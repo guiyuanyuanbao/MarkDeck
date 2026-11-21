@@ -1,0 +1,5 @@
+server/go.sum.bak
+.zcode/
+
+# root build leftovers
+/go.mod

@@ -1,0 +1,36 @@
+:root {
+  --md-bg: #f5f7fa;
+  --md-sidebar: #1f2430;
+  --md-accent: #409eff;
+}
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--md-bg);
+  color: #303133;
+}
+
+/* App layout */
+.md-layout { display: flex; height: 100%; }
+.md-sidebar {
+  width: 220px; background: var(--md-sidebar); color: #cfd3dc;
+  display: flex; flex-direction: column; flex-shrink: 0;
+}
+.md-sidebar .logo {
+  padding: 18px 20px; font-size: 18px; font-weight: 600; color: #fff;
+  letter-spacing: 1px;
+}
+.md-main { flex: 1; overflow: auto; padding: 16px; }
+
+/* Bookmark list rows */
+.bm-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; }
+.bm-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bm-url { color: #909399; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* login */
+.login-wrap {
+  height: 100%; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #1f2430 0%, #2b3a55 100%);
+}
+.login-card { width: 380px; padding: 8px; }
