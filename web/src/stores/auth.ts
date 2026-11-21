@@ -14,8 +14,10 @@ export const useAuthStore = defineStore('auth', {
       this.totpEnabled = s.totp
       // me() only succeeds when a session cookie is live
       try {
-        await authApi.me()
+        const me = await authApi.me()
         this.loggedIn = true
+        // restore CSRF token after a page reload (module-level variable is lost)
+        if (me.csrf) setCsrf(me.csrf)
       } catch {
         this.loggedIn = false
       }

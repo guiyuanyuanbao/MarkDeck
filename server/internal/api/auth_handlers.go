@@ -133,9 +133,15 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleMe(w http.ResponseWriter, r *http.Request) {
+	sess := a.Auth.SessionFromRequest(r)
+	csrf := ""
+	if sess != nil {
+		csrf = sess.CSRF
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"admin": true,
 		"totp":  a.Auth.TOTPEnabled(),
+		"csrf":  csrf, // lets the SPA restore its CSRF token after a page reload
 	})
 }
 

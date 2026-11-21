@@ -33,6 +33,7 @@ type createReq struct {
 	URL      string   `json:"url"`
 	Note     string   `json:"note"`
 	Tags     []string `json:"tags"`
+	Favorite *bool    `json:"favorite"`
 }
 
 func (a *API) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +58,7 @@ func (a *API) handleCreate(w http.ResponseWriter, r *http.Request) {
 	b := &store.Bookmark{
 		ParentID: body.ParentID, Type: body.Type, Title: body.Title,
 		URL: body.URL, Note: body.Note, Position: max + 1,
+		Favorite: body.Favorite != nil && *body.Favorite,
 		UpdatedAt: store.Now(), DeviceID: "web",
 	}
 	created, err := a.Store.Create(b, body.Tags)

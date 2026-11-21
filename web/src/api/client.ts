@@ -100,7 +100,7 @@ export const authApi = {
   setup: (password: string) => api.post<{ csrf: string }>('/api/auth/setup', { password }),
   login: (password: string, totp = '') => api.post<{ csrf: string }>('/api/auth/login', { password, totp }),
   logout: () => api.post('/api/auth/logout'),
-  me: () => api.get<{ admin: boolean; totp: boolean }>('/api/auth/me'),
+  me: () => api.get<{ admin: boolean; totp: boolean; csrf?: string }>('/api/auth/me'),
   changePassword: (oldPw: string, newPw: string) => api.post('/api/auth/change-password', { old: oldPw, new: newPw }),
   totpSetup: () => api.get<{ secret: string; otpauth: string }>('/api/auth/totp-setup'),
   totpEnable: (code: string) => api.post('/api/auth/totp-enable', { code }),
