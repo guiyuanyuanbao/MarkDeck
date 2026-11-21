@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>MarkDeck 设置</title>
+  <style>
+    body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; max-width: 640px; margin: 40px auto; color: #303133; }
+    h1 { font-size: 20px; }
+    .card { border: 1px solid #dcdfe6; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    label { display: block; margin: 10px 0 4px; font-size: 14px; }
+    input { width: 100%; padding: 8px 10px; box-sizing: border-box; border: 1px solid #dcdfe6; border-radius: 4px; }
+    button { padding: 8px 16px; border: none; background: #409eff; color: #fff; border-radius: 4px; cursor: pointer; margin-top: 12px; }
+    button.secondary { background: #606266; }
+    .msg { margin-top: 10px; font-size: 13px; }
+    .ok { color: #2e7d32; } .err { color: #c62828; }
+    .hint { color: #909399; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>📚 MarkDeck 同步设置</h1>
+
+  <div class="card">
+    <h2 style="font-size:16px">连接服务器</h2>
+    <p class="hint">1. 在 MarkDeck 管理页面「设置 → 设备同步」生成 6 位配对码<br>2. 填写服务器地址与配对码，点击配对</p>
+    <label>服务器地址</label>
+    <input id="server" placeholder="http://your-server:8990" />
+    <label>配对码（5 分钟有效）</label>
+    <input id="code" placeholder="123456" maxlength="6" />
+    <button id="pairBtn">配对</button>
+    <button id="resyncBtn" class="secondary">手动全量同步</button>
+    <div class="msg" id="pairMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:16px">离线说明</h2>
+    <p class="hint">与服务器失联时，插件会在本地记录所有改动（增删改/移动），联网后自动同步。
+    浏览器书签栏本身始终可用 — MarkDeck 不会破坏或接管它。</p>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

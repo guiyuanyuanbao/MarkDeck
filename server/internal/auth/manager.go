@@ -176,6 +176,15 @@ func (m *Manager) PairDevice(code, name string) (deviceID, token string, err err
 }
 
 // DeviceFromRequest authenticates Authorization: Bearer <token>.
+// DeviceByToken authenticates a raw device token — used for WebSocket
+// upgrades from the extension, where browsers cannot attach custom headers.
+func (m *Manager) DeviceByToken(token string) *store.DeviceRow {
+	if token == "" {
+		return nil
+	}
+	return m.Store.TouchDevice(TokenHash(token), time.Now().Unix())
+}
+
 func (m *Manager) DeviceFromRequest(r *http.Request) *store.DeviceRow {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Bearer ") {

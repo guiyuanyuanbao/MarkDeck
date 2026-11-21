@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "MarkDeck 同步",
+  "version": "1.0.0",
+  "description": "MarkDeck 自托管书签同步服务配套插件：双向同步、离线可用、快速收藏。",
+  "permissions": ["bookmarks", "storage", "alarms"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "MarkDeck" },
+  "options_page": "options.html",
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "icons": {
+    "128": "icon.png"
+  }
+}

@@ -1,0 +1,19 @@
+services:
+  markdeck:
+    build: .
+    image: markdeck:latest
+    restart: unless-stopped
+    ports:
+      - "8990:8990"
+    volumes:
+      - ./data:/data
+    environment:
+      # 公网部署时设置，用于 otpauth 链接与 Secure Cookie 判定
+      - MARKDECK_BASE_URL=http://localhost:8990
+      - MARKDECK_ADDR=0.0.0.0:8990
+      - MARKDECK_DATA=/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8990/api/auth/state"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

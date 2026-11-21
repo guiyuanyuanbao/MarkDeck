@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { width: 320px; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; margin: 0; }
+    header { background: #1f2430; color: #fff; padding: 10px 14px; font-weight: 600; }
+    .row { padding: 10px 14px; }
+    .status { display: flex; align-items: center; gap: 8px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .dot.online { background: #2e7d32; }
+    .dot.off { background: #c62828; }
+    .dot.unconfigured { background: #f9a825; }
+    input { width: 100%; padding: 6px 8px; margin: 4px 0 8px; box-sizing: border-box; }
+    button { padding: 6px 12px; border: none; background: #409eff; color: #fff; border-radius: 4px; cursor: pointer; }
+    button.secondary { background: #606266; }
+    .hint { color: #909399; font-size: 12px; }
+    .saved-msg { color: #2e7d32; font-size: 12px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <header>📚 MarkDeck</header>
+  <div class="row status">
+    <span class="dot" id="dot"></span>
+    <span id="statusText">检查中…</span>
+    <span class="hint" id="queueInfo"></span>
+  </div>
+  <div class="row">
+    <div class="hint">收藏当前页面</div>
+    <input id="title" placeholder="标题" />
+    <div class="hint">标签（逗号分隔，可选）</div>
+    <input id="tags" placeholder="开发, 工具" />
+    <button id="saveBtn">⭐ 收藏</button>
+    <span class="saved-msg" id="savedMsg"></span>
+  </div>
+  <div class="row">
+    <button id="searchBtn" class="secondary">🔍 打开搜索</button>
+    <button id="optionsBtn" class="secondary">设置</button>
+  </div>
+  <div class="row">
+    <div class="hint" id="searchResults"></div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

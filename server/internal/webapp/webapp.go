@@ -1,8 +1,9 @@
 //go:build !nowebapp
-//
+
 // The embed requires the dist directory to exist at build time. When
 // building without the frontend (e.g. quick backend-only compile), the
 // fallback build tag `nowebapp` serves a stub index instead.
+//
 package webapp
 
 import (

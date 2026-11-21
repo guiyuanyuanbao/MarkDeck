@@ -60,7 +60,12 @@ func (a *API) Register(mux *http.ServeMux) {
 	// websocket
 	mux.HandleFunc("GET /api/ws", func(w http.ResponseWriter, r *http.Request) {
 		a.Hub.HandleWS(w, r, func(req *http.Request) bool {
-			return a.Auth.SessionFromRequest(req) != nil || a.Auth.DeviceFromRequest(req) != nil
+			if a.Auth.SessionFromRequest(req) != nil || a.Auth.DeviceFromRequest(req) != nil {
+				return true
+			}
+			// Browser WS cannot send Authorization headers; the extension
+			// passes its device token via query param instead.
+			return a.Auth.DeviceByToken(req.URL.Query().Get("token")) != nil
 		})
 	})
 }
