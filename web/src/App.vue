@@ -7,8 +7,21 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
+const nav = [
+  { path: '/', label: '书签管理', ico: '🔖' },
+  { path: '/tags', label: '标签', ico: '🏷️' },
+  { path: '/trash', label: '回收站', ico: '🗑️' },
+  { path: '/tools', label: '工具中心', ico: '🧰' },
+  { path: '/import', label: '导入 / 导出', ico: '📦' },
+  { path: '/settings', label: '设置', ico: '⚙️' },
+]
+
+function isActive(p: string) {
+  if (p === '/') return route.path === '/'
+  return route.path.startsWith(p)
+}
+
 onMounted(() => {
-  // session expiry anywhere -> login screen
   window.addEventListener('md:unauthorized', () => {
     auth.loggedIn = false
     router.push('/login')
@@ -20,26 +33,35 @@ onMounted(() => {
   <router-view v-if="route.meta.public" />
   <div v-else class="md-layout">
     <aside class="md-sidebar">
-      <div class="logo">📚 MarkDeck</div>
-      <el-menu
-        :default-active="route.path"
-        background-color="#1f2430"
-        text-color="#cfd3dc"
-        active-text-color="#409eff"
-        router
-        style="border-right: none"
-      >
-        <el-menu-item index="/"><span>书签管理</span></el-menu-item>
-        <el-menu-item index="/tags"><span>标签</span></el-menu-item>
-        <el-menu-item index="/trash"><span>回收站</span></el-menu-item>
-        <el-menu-item index="/tools"><span>工具中心</span></el-menu-item>
-        <el-menu-item index="/import"><span>导入 / 导出</span></el-menu-item>
-        <el-menu-item index="/settings"><span>设置</span></el-menu-item>
-      </el-menu>
-      <div style="flex: 1" />
-      <el-button text style="color:#cfd3dc; margin: 12px" @click="auth.logout().then(() => router.push('/login'))">
-        退出登录
-      </el-button>
+      <div class="md-logo">
+        <div class="md-logo-mark">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+          </svg>
+        </div>
+        <div class="md-logo-name">MarkDeck</div>
+      </div>
+
+      <nav class="md-nav">
+        <button
+          v-for="item in nav"
+          :key="item.path"
+          class="md-nav-item"
+          :class="{ active: isActive(item.path) }"
+          @click="router.push(item.path)"
+        >
+          <span class="md-nav-ico">{{ item.ico }}</span>
+          {{ item.label }}
+        </button>
+      </nav>
+
+      <div class="md-sidebar-foot">
+        <div class="md-user-row">
+          <div class="md-user-avatar">A</div>
+          <div class="md-user-name">管理员</div>
+          <button class="md-logout" @click="auth.logout().then(() => router.push('/login'))">退出</button>
+        </div>
+      </div>
     </aside>
     <main class="md-main">
       <router-view />

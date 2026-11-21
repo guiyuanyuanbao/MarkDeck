@@ -49,7 +49,7 @@ async function batchRestore() {
   <el-card shadow="never">
     <template #header>
       <div style="display:flex; gap:8px; align-items:center">
-        <b>回收站</b>
+        <h1 class="page-title">回收站</h1>
         <span style="color:#909399; font-size: 12px">删除的书签保留在此，可随时恢复</span>
         <el-button v-if="selection.length" type="success" plain size="small" @click="batchRestore">恢复所选 ({{ selection.length }})</el-button>
         <el-button v-if="trash.length" type="danger" plain size="small" @click="emptyAll">清空回收站</el-button>

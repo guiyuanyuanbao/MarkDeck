@@ -48,7 +48,7 @@ async function remove(t: TagInfo) {
 
 <template>
   <el-card shadow="never">
-    <template #header><b>标签管理</b></template>
+    <template #header><h1 class="page-title">标签管理</h1></template>
     <el-table :data="tags" v-loading="loading">
       <el-table-column prop="tag" label="标签" min-width="200" />
       <el-table-column prop="count" label="书签数" width="100" />

@@ -33,7 +33,7 @@ async function upload() {
 
 <template>
   <el-card shadow="never">
-    <template #header><b>导入浏览器书签</b></template>
+    <template #header><h1 class="page-title">导入浏览器书签</h1></template>
     <el-alert type="info" :closable="false" style="margin-bottom: 16px"
       title="支持 Chrome / Edge / Firefox 导出的 Netscape HTML 格式。导出方法：浏览器 → 书签管理器 → 导出书签。" />
     <el-form label-width="100px" style="max-width: 560px">
