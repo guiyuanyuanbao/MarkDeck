@@ -1,0 +1,19 @@
+# Go
+server/markdeck
+server/markdeck.exe
+*.db
+data/
+
+# Node
+node_modules/
+dist/
+web/dist/
+!server/internal/webapp/dist/index.html
+
+# Extension build
+extension/dist/
+extension/*.zip
+
+# Tools & temp
+.tools/
+*.log

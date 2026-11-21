@@ -1,0 +1,111 @@
+// Package api wires HTTP routing, session auth and all REST handlers.
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/config"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/sync"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/tools"
+)
+
+// API bundles shared dependencies for all handlers.
+type API struct {
+	Store     *store.Store
+	Config    *config.Config
+	Auth      *auth.Manager
+	Hub       *sync.Hub
+	Limiter   *auth.Limiter
+	chain     *tools.Chain
+	broadcast func(int64)
+}
+
+// RegisterTools attaches the maintenance tool chain.
+func (a *API) RegisterTools(chain *tools.Chain) { a.chain = chain }
+
+// New constructs the API aggregate.
+func New(st *store.Store, cfg *config.Config, am *auth.Manager, hub *sync.Hub) *API {
+	a := &API{Store: st, Config: cfg, Auth: am, Hub: hub, Limiter: auth.NewLimiter(5)}
+	a.broadcast = hub.Broadcast
+	return a
+}
+
+// broadcastRevision pushes the current head revision to all WS clients.
+func (a *API) broadcastRevision() {
+	if _, head, err := a.Store.ChangesSince(0, 1); err == nil {
+		a.broadcast(head)
+	}
+}
+
+// ---- helpers ----
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeJSON2 is the two-arg convenience used by handlers above (status default 200).
+func writeJSON2(w http.ResponseWriter, v any) { writeJSON(w, http.StatusOK, v) }
+
+func httpError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+func (a *API) requireSession(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := a.Auth.SessionFromRequest(r)
+		if sess == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "login required"})
+			return
+		}
+		// CSRF: state-changing methods must carry the session's token header.
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			if r.Header.Get("X-CSRF") != sess.CSRF {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "csrf mismatch"})
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// requireDevice authenticates extension traffic via Bearer device token.
+func (a *API) requireDevice(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		dev := a.Auth.DeviceFromRequest(r)
+		if dev == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "device token required"})
+			return
+		}
+		next(w, r)
+	}
+}
+
+// requireAny accepts either a valid session cookie or a device bearer token.
+// Session-cookie traffic must also present the CSRF header on state-changing
+// methods; device-token traffic is exempt (token never rides browser cookies,
+// so CSRF does not apply).
+func (a *API) requireAny(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := a.Auth.SessionFromRequest(r)
+		if sess == nil && a.Auth.DeviceFromRequest(r) == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "auth required"})
+			return
+		}
+		if sess != nil {
+			switch r.Method {
+			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+				if r.Header.Get("X-CSRF") != sess.CSRF {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": "csrf mismatch"})
+					return
+				}
+			}
+		}
+		next(w, r)
+	}
+}
