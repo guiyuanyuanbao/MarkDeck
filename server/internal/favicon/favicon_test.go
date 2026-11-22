@@ -6,13 +6,13 @@ import (
 
 func TestSanitizeHost(t *testing.T) {
 	cases := map[string]string{
-		"github.com":               "github.com",
-		"  GitHub.COM  ":           "github.com",
+		"github.com":                   "github.com",
+		"  GitHub.COM  ":               "github.com",
 		"https://news.ycombinator.com": "news.ycombinator.com",
 		"example.com/path?query=1":     "example.com",
 		"example.com:8080":             "example.com",
-		"":                       "",
-		"<evil>":                 "",
+		"":                             "",
+		"<evil>":                       "",
 	}
 	for in, want := range cases {
 		if got := sanitizeHost(in); got != want {
