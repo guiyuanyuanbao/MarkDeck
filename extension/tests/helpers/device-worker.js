@@ -271,6 +271,13 @@ async function main() {
             }
             break
           }
+          case 'conflictStatus': {
+            const flat = []
+            for (const n of device.store.nodes.values()) flat.push({ id: n.id, title: n.title, url: n.url })
+            const { detectDuplicateGroups } = require('D:/Code/AiWorkSpace/ZCode/MarkDeck/extension/dist/background.test.mjs')
+            result = { groups: detectDuplicateGroups(flat), hasConflict: detectDuplicateGroups(flat).length > 0 }
+            break
+          }
           case 'config': {
             const st = await device.chrome.storage.local.get('md_config')
             resultOf = st.md_config || null

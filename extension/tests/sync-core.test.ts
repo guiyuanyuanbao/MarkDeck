@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   compressQueue, opsToPushPayload, clientWins, planRemoteActions,
-  backoffDelay, isOfflineState, type NodeState, type QueuedOp,
+  backoffDelay, isOfflineState, detectDuplicateGroups, type NodeState, type QueuedOp,
 } from '../src/sync-core'
 
 const T = 1700000000
@@ -109,5 +109,37 @@ describe('backoff + offline', () => {
     expect(isOfflineState(null)).toBe(true)
     expect(isOfflineState('disconnected')).toBe(true)
     expect(isOfflineState('online')).toBe(false)
+  })
+})
+
+describe('detectDuplicateGroups', () => {
+  it('detects exact duplicates produced by double-sync', () => {
+    const nodes = [
+      { id: 'a', title: '重复页', url: 'https://dup.test/page' },
+      { id: 'b', title: '重复页', url: 'https://dup.test/page' },
+      { id: 'c', title: '正常页', url: 'https://ok.test' },
+    ]
+    const groups = detectDuplicateGroups(nodes)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].count).toBe(2)
+    expect(groups[0].title).toBe('重复页')
+  })
+  it('ignores folders and unique bookmarks', () => {
+    const groups = detectDuplicateGroups([
+      { id: 'f', title: 'folder', url: undefined },
+      { id: 'a', title: 'unique', url: 'https://a.test' },
+    ])
+    expect(groups).toHaveLength(0)
+  })
+  it('sorts by count descending', () => {
+    const groups = detectDuplicateGroups([
+      { id: 'a', title: 'x', url: 'https://x.test' },
+      { id: 'b', title: 'x', url: 'https://x.test' },
+      { id: 'c', title: 'y', url: 'https://y.test' },
+      { id: 'd', title: 'y', url: 'https://y.test' },
+      { id: 'e', title: 'y', url: 'https://y.test' },
+    ])
+    expect(groups[0].count).toBe(3)
+    expect(groups[1].count).toBe(2)
   })
 })

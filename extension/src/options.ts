@@ -38,4 +38,22 @@ $('resyncBtn').onclick = async () => {
   msg.className = 'msg ok'; msg.textContent = '✓ 已触发全量同步'
 }
 
+// conflict detection: duplicated bookmarks hint at double-sync
+async function checkConflict() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'conflictStatus' })
+    if (resp?.hasConflict) {
+      const card = document.getElementById('conflictCard')!
+      card.style.display = 'block'
+      const total = resp.groups.reduce((a: number, g: any) => a + g.count, 0)
+      document.getElementById('conflictDesc')!.textContent =
+        `发现 ${resp.groups.length} 组完全相同的书签（共 ${total} 条）。`
+      document.getElementById('openSyncSettings')!.addEventListener('click', async () => {
+        await chrome.runtime.sendMessage({ type: 'openSyncSettings' })
+      })
+    }
+  } catch { /* ignore */ }
+}
+checkConflict()
+
 export {}

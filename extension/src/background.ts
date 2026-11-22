@@ -7,7 +7,7 @@
 // - realtime: /api/ws revision pings trigger pull; alarm polls as fallback
 // - re-entrancy guard: applyingRemote blocks local listeners while we write
 
-import { compressQueue, planRemoteActions, opsToPushPayload, backoffDelay, type NodeState, type QueuedOp } from './sync-core'
+import { compressQueue, planRemoteActions, opsToPushPayload, backoffDelay, detectDuplicateGroups, type NodeState, type QueuedOp } from './sync-core'
 
 interface Config {
   server: string
@@ -397,6 +397,23 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
       })
     } else if (msg.type === 'resync') {
       await fullSync()
+      sendResponse({ ok: true })
+    } else if (msg.type === 'conflictStatus') {
+      ;(async () => {
+        const tree = await chrome.bookmarks.getTree()
+        const flat: { id: string; title: string; url?: string }[] = []
+        const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+          for (const n of nodes) { flat.push({ id: n.id, title: n.title, url: n.url }); if (n.children) walk(n.children) }
+        }
+        walk(tree)
+        const groups = detectDuplicateGroups(flat)
+        sendResponse({ groups, hasConflict: groups.length > 0 })
+      })()
+    } else if (msg.type === 'openSyncSettings') {
+      // open the browser's own sync settings (Chrome vs Edge)
+      const isEdge = /Edg\//.test(navigator.userAgent)
+      const url = isEdge ? 'edge://settings/profiles/sync' : 'chrome://settings/syncSetup'
+      chrome.tabs.create({ url })
       sendResponse({ ok: true })
     } else if (msg.type === 'saveCurrent') {
       const cfg = await getConfig()

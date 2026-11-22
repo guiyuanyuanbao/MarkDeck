@@ -18,6 +18,19 @@ function initial(t?: string): string {
   return (t || '?').trim().slice(0, 1).toUpperCase()
 }
 
+async function checkConflict() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'conflictStatus' })
+    if (resp.hasConflict) {
+      ;($('conflictBar') as HTMLElement).style.display = 'block'
+      ;($('openSyncSettings') as HTMLButtonElement).onclick = async () => {
+        await chrome.runtime.sendMessage({ type: 'openSyncSettings' })
+        window.close()
+      }
+    }
+  } catch { /* status endpoint unavailable */ }
+}
+
 async function refreshStatus() {
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'status' })
@@ -90,6 +103,7 @@ function initSearch() {
 $('optionsBtn').onclick = () => chrome.runtime.openOptionsPage()
 
 refreshStatus()
+checkConflict()
 initSave()
 initSearch()
 

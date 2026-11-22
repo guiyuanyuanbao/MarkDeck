@@ -170,3 +170,30 @@ export function backoffDelay(attempt: number): number {
 export function isOfflineState(status: string | null): boolean {
   return status === null || status === 'disconnected'
 }
+
+// ---- browser-sync conflict detection ----
+
+export interface DupGroup {
+  title: string
+  url: string
+  count: number
+}
+
+/**
+ * Heuristic: two bookmark-sync systems fighting over the same bar produce
+ * exact-duplicate nodes (same URL, same title). A group of >=2 is strong
+ * evidence of double-sync.
+ */
+export function detectDuplicateGroups(nodes: { id: string; title: string; url?: string }[]): DupGroup[] {
+  const byKey = new Map<string, { title: string; url: string; count: number }>()
+  for (const n of nodes) {
+    if (!n.url) continue // folders are not duplicated by sync engines
+    const key = n.url.replace(/\/+$/, '').toLowerCase() + '|' + (n.title || '').trim()
+    const g = byKey.get(key)
+    if (g) g.count++
+    else byKey.set(key, { title: n.title, url: n.url, count: 1 })
+  }
+  const out: DupGroup[] = []
+  for (const g of byKey.values()) if (g.count >= 2) out.push(g)
+  return out.sort((a, b) => b.count - a.count)
+}

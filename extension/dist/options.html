@@ -103,6 +103,9 @@
     .hint { color: var(--text3); font-size: 12px; line-height: 1.6; }
     .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 
+    .conflict-card { border-color: #f5d98d; background: #fffdf5; }
+    .conflict-card h2 { color: #9a6d0b; }
+
     code.kbd {
       background: #f0f2f9; border-radius: 6px; padding: 2px 8px;
       font-family: ui-monospace, monospace; font-size: 12px; color: var(--text2);
@@ -121,6 +124,17 @@
         <div class="brand-name">MarkDeck 同步设置</div>
         <div class="brand-sub">自托管书签同步服务 · 浏览器插件</div>
       </div>
+    </div>
+
+    <div class="card conflict-card" id="conflictCard" style="display:none">
+      <h2>⚠️ 检测到重复书签</h2>
+      <p class="sub" id="conflictDesc"></p>
+      <p class="hint" style="margin-bottom: 12px">
+        这通常说明浏览器自带的书签同步（Chrome Sync / Edge 同步）仍处于开启状态，
+        两套同步会互相覆盖、产生副本。建议在浏览器设置中关闭「书签」这一项的同步
+        （密码、历史记录等其他数据不受影响），让 MarkDeck 独占书签同步。
+      </p>
+      <button id="openSyncSettings" class="btn-primary">一键打开浏览器同步设置</button>
     </div>
 
     <div class="card">
