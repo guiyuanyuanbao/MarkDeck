@@ -18,6 +18,8 @@ export const useAuthStore = defineStore('auth', {
         this.loggedIn = true
         // restore CSRF token after a page reload (module-level variable is lost)
         if (me.csrf) setCsrf(me.csrf)
+        // reconnect realtime feed (module-level WebSocket is also lost on reload)
+        connectWS()
       } catch {
         this.loggedIn = false
       }

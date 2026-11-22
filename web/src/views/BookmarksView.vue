@@ -3,6 +3,8 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
+import BatchMoveDialog from '@/components/BatchMoveDialog.vue'
+import BatchTagDialog from '@/components/BatchTagDialog.vue'
 
 interface TreeNode {
   id: string
@@ -24,6 +26,8 @@ const tagFilter = ref('')
 const allTags = ref<{ tag: string; count: number }[]>([])
 
 const editDlg = ref<InstanceType<typeof EditBookmarkDialog> | null>(null)
+const moveDlg = ref<InstanceType<typeof BatchMoveDialog> | null>(null)
+const tagDlg = ref<InstanceType<typeof BatchTagDialog> | null>(null)
 
 // ---- palette for bookmark avatars ----
 const AVATAR_COLORS = [
@@ -142,33 +146,15 @@ async function batchDelete() {
   ElMessage.success(`已删除 ${ids.length} 项`)
   loadTree(); loadList()
 }
-async function batchMove() {
+function batchMove() {
   const ids = [...checked.value]
   if (!ids.length) return
-  const folders = [...flat.value.values()].filter((n) => n.type === 'folder')
-  const names = folders.map((f) => (f.parentId ? f.title : '📂 ' + (f.title || '根')))
-  try {
-    const { value } = await ElMessageBox.prompt(
-      `输入目标文件夹（共 ${folders.length} 个）：\n` + names.slice(0, 20).join('\n'),
-      '批量移动', { inputPlaceholder: '文件夹名称' })
-    const target = folders.find((f) => f.title === value.trim())
-    if (!target) { ElMessage.warning('未找到该文件夹'); return }
-    await bookmarksApi.batch({ ids, action: 'move', parentId: target.id })
-    ElMessage.success(`已移动 ${ids.length} 项`)
-    loadTree(); loadList()
-  } catch { /* cancelled */ }
+  moveDlg.value?.open(ids)
 }
-async function batchTag() {
+function batchTag() {
   const ids = [...checked.value]
   if (!ids.length) return
-  try {
-    const { value } = await ElMessageBox.prompt('输入要添加的标签（可逗号分隔多个）', '批量打标签')
-    for (const tag of value.split(/[,，]/).map((t) => t.trim()).filter(Boolean)) {
-      await bookmarksApi.batch({ ids, action: 'tag', tag })
-    }
-    ElMessage.success('标签已添加')
-    loadList()
-  } catch { /* cancelled */ }
+  tagDlg.value?.open(ids)
 }
 
 // ---- drag & drop ----
@@ -326,5 +312,7 @@ function fmtDate(ts: number) {
     </div>
 
     <EditBookmarkDialog ref="editDlg" @saved="() => { loadTree(); loadList() }" />
+    <BatchMoveDialog ref="moveDlg" @done="() => { loadTree(); loadList() }" />
+    <BatchTagDialog ref="tagDlg" @done="() => { loadList() }" />
   </div>
 </template>

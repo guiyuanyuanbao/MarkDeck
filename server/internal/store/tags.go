@@ -122,8 +122,12 @@ func (s *Store) SetTags(id string, tags []string, deviceID string) (*Bookmark, e
 		return nil, err
 	}
 	for _, t := range tags {
+		nt := normalizeTag(t)
+		if nt == "" {
+			continue // drop empty/whitespace-only tags
+		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag) VALUES(?,?)`,
-			id, normalizeTag(t)); err != nil {
+			id, nt); err != nil {
 			return nil, err
 		}
 	}

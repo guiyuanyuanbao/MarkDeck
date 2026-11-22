@@ -132,6 +132,9 @@ func (s *Store) TouchRevision(id string) (int64, error) {
 // DeleteSoft moves a bookmark (and recursively, its subtree) to trash by
 // setting deleted_at. Rows remain as tombstones.
 func (s *Store) DeleteSoft(id string, at int64, deviceID string) ([]string, error) {
+	if _, err := s.Get(id); err != nil {
+		return nil, err
+	}
 	ids, err := s.SubtreeIDs(id)
 	if err != nil {
 		return nil, err
