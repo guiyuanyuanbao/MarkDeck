@@ -17,6 +17,7 @@ import (
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/api"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/config"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/favicon"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/sync"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/tools"
@@ -44,12 +45,16 @@ func main() {
 			hub.Broadcast(rev)
 		}
 	})
+	fetcher := favicon.NewFetcher(st)
 	a := api.New(st, cfg, am, hub)
 	a.RegisterTools(chain)
 
 	mux := http.NewServeMux()
 	a.Register(mux)
 	a.RegisterToolsRoutes(mux, chain)
+	mux.HandleFunc("GET /api/favicon/{host}", func(w http.ResponseWriter, r *http.Request) {
+		fetcher.ServeHTTP(w, r, r.PathValue("host"))
+	})
 	mux.Handle("/", securityHeaders(webapp.Handler()))
 
 	srv := &http.Server{

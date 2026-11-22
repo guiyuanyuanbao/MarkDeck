@@ -25,6 +25,7 @@ const searchQ = ref('')
 const tagFilter = ref('')
 const allTags = ref<{ tag: string; count: number }[]>([])
 
+const favFailed = ref<Set<string>>(new Set()) // hosts whose favicon failed to load
 const editDlg = ref<InstanceType<typeof EditBookmarkDialog> | null>(null)
 const moveDlg = ref<InstanceType<typeof BatchMoveDialog> | null>(null)
 const tagDlg = ref<InstanceType<typeof BatchTagDialog> | null>(null)
@@ -47,6 +48,22 @@ function avatarColor(b: Bookmark): string {
 function initial(b: Bookmark): string {
   const t = (b.title || b.url || '?').trim()
   return t.slice(0, 1).toUpperCase()
+}
+
+function hostOf(b: Bookmark): string {
+  if (!b.url) return ''
+  try { return new URL(b.url).host } catch { return '' }
+}
+
+function faviconSrc(b: Bookmark): string | null {
+  const h = hostOf(b)
+  if (!h || favFailed.value.has(h)) return null
+  return '/api/favicon/' + encodeURIComponent(h)
+}
+
+function onFaviconError(b: Bookmark) {
+  const h = hostOf(b)
+  if (h) favFailed.value.add(h)
 }
 
 // ---- tree assembly ----
@@ -271,10 +288,13 @@ function fmtDate(ts: number) {
             :model-value="checked.has(b.id)"
             @change="checked.has(b.id) ? checked.delete(b.id) : checked.add(b.id)"
           />
-          <div class="bm-avatar" :class="{ folder: b.type === 'folder' }" :style="b.type !== 'folder' ? `background:${avatarColor(b)}` : ''">
-            <svg v-if="b.type === 'folder'" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
-            <template v-else>{{ initial(b) }}</template>
+          <div v-if="b.type === 'folder'" class="bm-avatar folder">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
           </div>
+          <div v-else-if="faviconSrc(b)" class="bm-avatar icon">
+            <img :src="faviconSrc(b) ?? undefined" :alt="initial(b)" loading="lazy" @error="onFaviconError(b)" />
+          </div>
+          <div v-else class="bm-avatar" :style="`background:${avatarColor(b)}`">{{ initial(b) }}</div>
           <div class="bm-main" @click="b.type === 'folder' ? (currentFolder = b.id) : undefined" :style="b.type === 'folder' ? 'cursor:pointer' : ''">
             <div class="bm-title">
               <template v-if="b.type === 'folder'">{{ b.title }}</template>

@@ -18,6 +18,7 @@ func (a *API) RegisterToolsRoutes(mux *http.ServeMux, chain *tools.Chain) {
 	mux.HandleFunc("GET /api/export/json", a.requireAny(a.handleExportJSON))
 
 	mux.HandleFunc("GET /api/tools/deadlinks", a.requireAny(a.handleDeadLinks))
+	mux.HandleFunc("GET /api/tools/deadlinks/status", a.requireAny(a.handleDeadScanStatus))
 	mux.HandleFunc("POST /api/tools/deadlinks/scan", a.requireAny(a.handleDeadScan))
 	mux.HandleFunc("GET /api/tools/duplicates", a.requireAny(a.handleDuplicates))
 	mux.HandleFunc("POST /api/tools/duplicates/merge", a.requireAny(a.handleDupMerge))
@@ -114,6 +115,11 @@ func (a *API) handleDeadLinks(w http.ResponseWriter, r *http.Request) {
 		links = []tools.DeadLink{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"links": links})
+}
+
+func (a *API) handleDeadScanStatus(w http.ResponseWriter, r *http.Request) {
+	running, lastAt := a.chain.ScanStatus()
+	writeJSON(w, http.StatusOK, map[string]any{"running": running, "lastScanAt": lastAt})
 }
 
 func (a *API) handleDeadScan(w http.ResponseWriter, r *http.Request) {

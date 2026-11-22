@@ -136,9 +136,14 @@ func checkURL(url string) string {
 	return "dead"
 }
 
+// statusStr classifies a response. 405/403/429 usually mean anti-bot
+// measures rather than a dead link, so they are marked separately.
 func statusStr(code int) string {
 	if code >= 200 && code < 400 {
 		return "ok"
+	}
+	if code == 403 || code == 405 || code == 429 {
+		return fmt.Sprintf("blocked:%d", code)
 	}
 	return fmt.Sprintf("http:%d", code)
 }
@@ -172,6 +177,13 @@ func FilterInternalTags(tags []string) []string {
 		}
 	}
 	return out
+}
+
+// ScanStatus reports whether a dead-link scan is currently running.
+func (c *Chain) ScanStatus() (running bool, lastAt int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deadRunning, c.lastDeadAt
 }
 
 // DeadLinks returns bookmarks currently tagged dead, with status and age.

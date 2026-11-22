@@ -37,19 +37,22 @@ async function startScan() {
 function pollScan() {
   const t = setInterval(async () => {
     try {
-      await toolsApi.deadLinks() // endpoint returns current state
+      const st = await toolsApi.scanStatus()
       await load()
-      scanning.value = false
-      clearInterval(t)
-      ElMessage.success('扫描完成')
+      if (!st.running) {
+        scanning.value = false
+        clearInterval(t)
+        ElMessage.success('扫描完成')
+      }
     } catch { /* keep polling */ }
-  }, 5000)
+  }, 3000)
   // safety: stop polling after 10 min
   setTimeout(() => clearInterval(t), 10 * 60 * 1000)
 }
 
 function statusTag(s: string) {
   if (s === 'ok') return 'success'
+  if (s.startsWith('blocked:')) return 'warning' // anti-bot, not necessarily dead
   if (s.startsWith('http:4')) return 'warning'
   return 'danger'
 }

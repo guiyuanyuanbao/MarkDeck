@@ -365,3 +365,10 @@ body {
 }
 
 .el-input__wrapper, .el-select__wrapper, .el-textarea__inner { border-radius: 8px !important; }
+
+/* favicon avatars */
+.bm-avatar.icon { background: #fff; border: 1px solid var(--md-border); overflow: hidden; }
+.bm-avatar.icon img { width: 22px; height: 22px; display: block; }
+/* tools page: clamp long titles */
+.el-table .cell { overflow-wrap: anywhere; word-break: break-all; }
+.el-table .cell .bm-url { max-width: 340px; display: inline-block; vertical-align: middle; }
