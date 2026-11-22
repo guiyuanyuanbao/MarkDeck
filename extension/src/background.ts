@@ -281,8 +281,16 @@ let deviceIdCached = 'unknown'
 
 async function setSyncStatus(status: string) {
   await chrome.storage.local.set({ md_status: status })
-  chrome.action.setBadgeText({ text: status === 'online' ? '' : '!' })
-  chrome.action.setBadgeBackgroundColor({ color: status === 'online' ? '#2e7d32' : '#c62828' })
+  // distinct toolbar badges so the user can tell WHAT is wrong at a glance
+  const badges: Record<string, { text: string; color: string }> = {
+    online: { text: '', color: '#2e7d32' },
+    disconnected: { text: '!', color: '#f5a623' },   // offline: amber
+    unauthorized: { text: '×', color: '#e5484d' },   // token dead: red
+    unconfigured: { text: '·', color: '#9ca1b6' },   // not paired: grey
+  }
+  const badge = badges[status] || badges.disconnected
+  chrome.action.setBadgeText({ text: badge.text })
+  chrome.action.setBadgeBackgroundColor({ color: badge.color })
 }
 
 async function connectWS(cfg: Config) {

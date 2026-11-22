@@ -38,6 +38,42 @@ $('resyncBtn').onclick = async () => {
   msg.className = 'msg ok'; msg.textContent = '✓ 已触发全量同步'
 }
 
+// live connection status card (always visible)
+async function refreshConnStatus() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'status' })
+    const card = document.getElementById('connCard')!
+    const dot = document.getElementById('connDot')!
+    const title = document.getElementById('connTitle')!
+    const desc = document.getElementById('connDesc')!
+    card.style.display = 'block'
+    const q = resp.queued > 0 ? `，本地已保存 ${resp.queued} 条待同步` : ''
+    switch (resp.status) {
+      case 'online':
+        dot.className = 'dot online'
+        title.textContent = '✓ 已连接服务器'
+        desc.textContent = '书签双向实时同步中' + q
+        break
+      case 'disconnected':
+        dot.className = 'dot off'
+        title.textContent = '⚠ 与服务器断联'
+        desc.textContent = '改动已保存在本地（' + (resp.queued || 0) + ' 条待同步），恢复连接后自动同步；书签查看与搜索不受影响。'
+        break
+      case 'unauthorized':
+        dot.className = 'dot err'
+        title.textContent = '设备令牌已失效'
+        desc.textContent = '请在下方重新配对以恢复同步。'
+        break
+      default:
+        dot.className = 'dot none'
+        title.textContent = '尚未配对'
+        desc.textContent = '填写上方服务器地址与配对码完成连接。'
+    }
+  } catch { /* ignore */ }
+}
+refreshConnStatus()
+setInterval(refreshConnStatus, 10000)
+
 // conflict detection: duplicated bookmarks hint at double-sync
 async function checkConflict() {
   try {

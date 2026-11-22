@@ -103,6 +103,11 @@
     .hint { color: var(--text3); font-size: 12px; line-height: 1.6; }
     .divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 
+    .conn-card .dot { width: 10px; height: 10px; border-radius: 50%; }
+    .conn-card .dot.online { background: var(--success); box-shadow: 0 0 0 3px rgba(35,168,119,.18); }
+    .conn-card .dot.off { background: var(--warning); box-shadow: 0 0 0 3px rgba(245,166,35,.18); }
+    .conn-card .dot.err { background: var(--danger); box-shadow: 0 0 0 3px rgba(229,72,77,.15); }
+    .conn-card .dot.none { background: var(--text3); }
     .conflict-card { border-color: #f5d98d; background: #fffdf5; }
     .conflict-card h2 { color: #9a6d0b; }
 
@@ -124,6 +129,14 @@
         <div class="brand-name">MarkDeck 同步设置</div>
         <div class="brand-sub">自托管书签同步服务 · 浏览器插件</div>
       </div>
+    </div>
+
+    <div class="card conn-card" id="connCard" style="display:none">
+      <div style="display:flex; align-items:center; gap:10px">
+        <span class="dot" id="connDot"></span>
+        <b id="connTitle" style="font-size:14px">检查连接…</b>
+      </div>
+      <p class="hint" id="connDesc" style="margin-top:6px"></p>
     </div>
 
     <div class="card conflict-card" id="conflictCard" style="display:none">
