@@ -1,8 +1,19 @@
-# MarkDeck
+<p align="center">
+  <img src="docs/logo.png" width="140" alt="MarkDeck logo" />
+</p>
 
-自托管浏览器书签同步服务 —— 一个 Go 单二进制 + 浏览器插件，让你的书签在 Chrome、Edge 等所有设备间**双向实时同步、离线可用**。
+<h1 align="center">MarkDeck</h1>
 
-![CI](https://img.shields.io/badge/CI-GitHub_Actions-blue) ![Go](https://img.shields.io/badge/Go-1.23-00ADD8) ![Vue](https://img.shields.io/badge/Vue-3-42B883) ![License](https://img.shields.io/badge/License-MIT-green)
+<p align="center">
+  自托管浏览器书签同步服务 —— 一个 Go 单二进制 + 浏览器插件<br/>让你的书签在 Chrome、Edge 等所有设备间<b>双向实时同步、离线可用</b>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/CI-GitHub_Actions-blue" />
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8" />
+  <img src="https://img.shields.io/badge/Vue-3-42B883" />
+  <img src="https://img.shields.io/badge/License-MIT-green" />
+</p>
 
 ## 为什么是 MarkDeck
 
