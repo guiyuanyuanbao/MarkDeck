@@ -1,19 +1,27 @@
+# MarkDeck 单文件部署示例
+# 用法：
+#   docker compose up -d
+#   打开 http://localhost:8990，首次运行创建管理员密码
+#
+# 升级：docker compose pull && docker compose up -d
+# （compose 会使用 latest 镜像；想锁定版本就把 image 换成 ghcr.io/guiyuanyuanbao/markdeck:0.0.1 这样的精确 tag）
+
 services:
   markdeck:
-    build: .
-    image: markdeck:latest
+    image: ghcr.io/guiyuanyuanbao/markdeck:latest
+    container_name: markdeck
     restart: unless-stopped
     ports:
       - "8990:8990"
     volumes:
-      - ./data:/data
+      - ./data:/data          # SQLite 数据库 + 快照备份都在这里，备份此目录即可
     environment:
-      # 公网部署时设置，用于 otpauth 链接与 Secure Cookie 判定
-      - MARKDECK_BASE_URL=http://localhost:8990
-      - MARKDECK_ADDR=0.0.0.0:8990
-      - MARKDECK_DATA=/data
+      MARKDECK_ADDR: 0.0.0.0:8990
+      # 有反向代理/域名时设置，用于 HTTPS Cookie 和 TOTP 链接；纯内网可留空
+      MARKDECK_BASE_URL: ""
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8990/api/auth/state"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
