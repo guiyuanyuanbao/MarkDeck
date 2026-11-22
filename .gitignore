@@ -1,5 +1,19 @@
-server/go.sum.bak
-.zcode/
+# Node
+node_modules/
+dist/
 
-# root build leftovers
-/go.mod
+# Go build outputs
+server/markdeck
+server/markdeck.exe
+markdeck-*
+*.db
+*.db-shm
+*.db-wal
+
+# Local toolchains & tooling
+.tools/
+data/
+
+# Logs & misc
+*.log
+.zcode/
