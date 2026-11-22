@@ -90,8 +90,11 @@ async function refreshLocalCache(): Promise<Map<string, NodeState>> {
     }
   }
   walk(tree, '')
-  // Only sync the "Bookmarks Bar" subtree: find its root id
-  const barRoot = tree[0]?.children?.find((c) => c.id === '1')
+  // Sync scope: the Bookmarks Bar plus Other Bookmarks (roots '1' and '2'),
+  // so bookmarks saved outside the bar also participate in sync.
+  const roots = tree[0]?.children ?? []
+  const barRoot = roots.find((c) => c.id === '1')
+  const otherRoot = roots.find((c) => c.id === '2')
   const scope = new Map<string, NodeState>()
   // async walk that fully awaits getChildren before persisting — a .then
   // fire-and-forget here raced the storage.set below and left the cache
@@ -106,6 +109,7 @@ async function refreshLocalCache(): Promise<Map<string, NodeState>> {
     }
   }
   if (barRoot) await walkScoped(barRoot.id)
+  if (otherRoot) await walkScoped(otherRoot.id)
   await chrome.storage.local.set({ [LOCAL_KEY]: Object.fromEntries(scope) })
   return scope
 }
@@ -227,10 +231,15 @@ async function applyRemote(changes: NodeState[]) {
           // asynchronously and must find the guard already in place
           recentlyApplied.set('__pre__' + n.id, n.title)
           // parent may itself need translating (folder created by remote)
-          const parentLocal = await mapToLocalId(n.parentId)
+          // unknown remote parent (e.g. another device's 'Other Bookmarks'
+          // holder) falls back to the bookmarks bar so the node is reachable
+          let parentLocal = await mapToLocalId(n.parentId)
+          if (parentLocal) {
+            try { await chrome.bookmarks.get(parentLocal) } catch { parentLocal = null }
+          }
           const created = n.type === 'url'
-            ? await chrome.bookmarks.create({ parentId: parentLocal ? parentLocal : bookmarksBarRoot(), title: n.title, url: n.url })
-            : await chrome.bookmarks.create({ parentId: parentLocal ? parentLocal : bookmarksBarRoot(), title: n.title })
+            ? await chrome.bookmarks.create({ parentId: parentLocal || bookmarksBarRoot(), title: n.title, url: n.url })
+            : await chrome.bookmarks.create({ parentId: parentLocal || bookmarksBarRoot(), title: n.title })
           // remember which server id this new local node corresponds to
           await recordIdMapping(n.id, created.id)
           recentlyApplied.delete('__pre__' + n.id)
@@ -452,7 +461,11 @@ async function initialImport() {
   applyingRemote = true
   try {
     const tree = await chrome.bookmarks.getTree()
-    const bar = tree[0]?.children?.find((c) => c.id === bookmarksBarRoot())
+    const roots = tree[0]?.children ?? []
+    const bar = roots.find((c) => c.id === bookmarksBarRoot())
+    // 'Other Bookmarks' gets a server-side top-level folder so its content
+    // is visible everywhere, while the local root stays untouched.
+    const others = roots.find((c) => c.id === '2')
     const ops: Record<string, unknown>[] = []
     const now = Math.floor(Date.now() / 1000)
     const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentId: string) => {
@@ -468,6 +481,15 @@ async function initialImport() {
       }
     }
     if (bar) walk(bar.children || [], bar.id)
+    if (others && others.children?.length) {
+      const othersFolder: Record<string, unknown> = {
+        id: 'others-' + cfg.deviceId, type: 'folder', parentId: '',
+        title: '其他书签', url: '', position: 9999,
+        updatedAt: now, deviceId: cfg.deviceId,
+      }
+      ops.push(othersFolder)
+      walk(others.children, 'others-' + cfg.deviceId)
+    }
     if (ops.length) {
       // chunk to stay under body limits
       for (let i = 0; i < ops.length; i += 500) {
