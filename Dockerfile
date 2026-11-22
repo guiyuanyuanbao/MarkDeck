@@ -19,11 +19,14 @@ RUN cd server && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimp
 
 # ---- runtime ----
 FROM alpine:3.20
-RUN adduser -D -H markdeck && apk add --no-cache ca-certificates tzdata
+RUN adduser -D -H -u 1000 markdeck \
+    && apk add --no-cache ca-certificates tzdata su-exec
 COPY --from=build /out/markdeck /usr/local/bin/markdeck
-USER markdeck
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 WORKDIR /data
 VOLUME /data
 EXPOSE 8990
 ENV MARKDECK_ADDR=0.0.0.0:8990 MARKDECK_DATA=/data
-ENTRYPOINT ["markdeck"]
+# start as root to fix host-mounted volume ownership, then drop to markdeck
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
