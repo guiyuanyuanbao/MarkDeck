@@ -460,6 +460,10 @@ async function initialImport() {
   if (!cfg) return
   applyingRemote = true
   try {
+    // pre-pair local edits are about to be pushed with fresh UUIDs below;
+    // clear the queue first so scheduleFlush can't push stale local-id ops
+    // in parallel (that would duplicate every bookmark)
+    await setQueue([])
     const tree = await chrome.bookmarks.getTree()
     const roots = tree[0]?.children ?? []
     const bar = roots.find((c) => c.id === bookmarksBarRoot())
@@ -468,27 +472,46 @@ async function initialImport() {
     const others = roots.find((c) => c.id === '2')
     const ops: Record<string, unknown>[] = []
     const now = Math.floor(Date.now() / 1000)
-    const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentId: string) => {
+    // Local chrome ids collide across devices (every browser numbers its
+    // bookmarks from small integers), so each node gets a fresh server UUID
+    // and a local→server mapping. Without this, device B's initial import
+    // overwrites device A's bookmarks that happen to share the same ids.
+    const localToServer: Record<string, string> = {}
+    const serverIdOf = (localId: string): string => {
+      if (localToServer[localId]) return localToServer[localId]
+      const uuid = localId === 'others-root'
+        ? 'others-' + cfg.deviceId // stable holder id per device
+        : crypto.randomUUID()
+      localToServer[localId] = uuid
+      return uuid
+    }
+    const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentServerId: string) => {
       for (const n of nodes) {
+        if (isAlreadySynced(n.id)) continue // already on the server
+        const sid = serverIdOf(n.id)
         ops.push({
-          id: n.id, type: n.url ? 'url' : 'folder', parentId,
+          id: sid, type: n.url ? 'url' : 'folder', parentId: parentServerId,
           title: n.title, url: n.url || '',
           position: (n.index ?? 0) + 1,
           updatedAt: Math.floor((n.dateAdded || Date.now() * 0) / 1000) || now,
           deviceId: cfg.deviceId,
         })
-        if (n.children) walk(n.children, n.id)
+        if (n.children) walk(n.children, sid)
       }
     }
-    if (bar) walk(bar.children || [], bar.id)
+    // nodes already mapped (pulled from the server via another device's
+    // sync) must not be re-pushed, or every device would duplicate them
+    const alreadyOnServer = await idMap()
+    const isAlreadySynced = (localId: string): boolean => localId in alreadyOnServer
+    if (bar) walk(bar.children || [], '')
     if (others && others.children?.length) {
-      const othersFolder: Record<string, unknown> = {
-        id: 'others-' + cfg.deviceId, type: 'folder', parentId: '',
+      const othersFolderId = serverIdOf('others-root')
+      ops.push({
+        id: othersFolderId, type: 'folder', parentId: '',
         title: '其他书签', url: '', position: 9999,
         updatedAt: now, deviceId: cfg.deviceId,
-      }
-      ops.push(othersFolder)
-      walk(others.children, 'others-' + cfg.deviceId)
+      })
+      walk(others.children, othersFolderId)
     }
     if (ops.length) {
       // chunk to stay under body limits
@@ -496,6 +519,10 @@ async function initialImport() {
         await apiFetch(cfg, '/api/sync/device-push', { method: 'POST', body: JSON.stringify(ops.slice(i, i + 500)) })
       }
     }
+    // persist local→server mapping so future local edits push to the right
+    // server nodes instead of colliding with other devices' ids
+    const existing = await idMap()
+    await setIdMap({ ...existing, ...idMap })
     await refreshLocalCache()
   } finally {
     applyingRemote = false
