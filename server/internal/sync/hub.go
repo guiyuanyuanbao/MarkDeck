@@ -42,7 +42,11 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, authenticate func
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// Same-origin only; browsers enforce origin. Keep default (false originTypes).
+		// The extension's service worker connects from a chrome-extension://
+		// origin that can never match the server host, and auth is done via
+		// the device token (or session cookie) below the upgrade — so the
+		// default same-origin Origin check must be disabled.
+		OriginPatterns: []string{"*"},
 		CompressionMode: websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {
