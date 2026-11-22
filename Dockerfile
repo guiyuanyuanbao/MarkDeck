@@ -7,7 +7,7 @@ COPY web/ ./
 RUN npm run build
 
 # ---- go build (embeds the built UI) ----
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY server/ ./server/
 COPY --from=web /src/server/internal/webapp/dist ./server/internal/webapp/dist
