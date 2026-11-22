@@ -274,6 +274,12 @@ async function main() {
             }
             break
           }
+          case 'debugTree': {
+            const dump = []
+            for (const [id, n] of device.store.nodes) dump.push({ id, parentId: n.parentId, type: n.url ? 'url' : 'folder', title: n.title, url: n.url || undefined })
+            resultOf = dump
+            break
+          }
           case 'config': {
             const st = await device.chrome.storage.local.get('md_config')
             resultOf = st.md_config || null
