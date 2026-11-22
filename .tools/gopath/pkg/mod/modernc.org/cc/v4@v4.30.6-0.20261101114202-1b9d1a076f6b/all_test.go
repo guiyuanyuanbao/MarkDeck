@@ -1,0 +1,5199 @@
+// Copyright 2021 The CC Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package cc // import "modernc.org/cc/v4"
+
+import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"math"
+	"math/big"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
+	"runtime/debug"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"testing/fstest"
+
+	"github.com/dustin/go-humanize"
+	"github.com/pbnjay/memory"
+	"github.com/pmezard/go-difflib/difflib"
+	"modernc.org/ccorpus2"
+	"modernc.org/mathutil"
+)
+
+var (
+	cfs         = ccorpus2.FS
+	corpusIndex []string
+	defaultCfg0 *Config
+	re          *regexp.Regexp
+	totalRam    = memory.TotalMemory()
+	makeJ       = fmt.Sprintf("-j%d", runtime.GOMAXPROCS(-1))
+	_           = stack
+	goos        = runtime.GOOS
+	goarch      = runtime.GOARCH
+	target      = fmt.Sprintf("%s/%s", goos, goarch)
+
+	oTrace = flag.Bool("trc", false, "Print tested paths.")
+)
+
+func init() {
+	flag.BoolVar(&traceFails, "trcfails", false, "")
+	isTesting = true
+	extendedErrors = true
+	var err error
+	flags := []string{LongDouble64Flag(runtime.GOOS, runtime.GOARCH)}
+	if goos == "windows" && (goarch == "386" || goarch == "amd64") {
+		flags = append(flags,
+			"-mno-3dnow",
+			"-mno-abm",
+			"-mno-aes",
+			"-mno-avx",
+			"-mno-avx2",
+			"-mno-avx512cd",
+			"-mno-avx512er",
+			"-mno-avx512f",
+			"-mno-avx512pf",
+			"-mno-bmi",
+			"-mno-bmi2",
+			"-mno-f16c",
+			"-mno-fma",
+			"-mno-fma4",
+			"-mno-fsgsbase",
+			"-mno-lwp",
+			"-mno-lzcnt",
+			"-mno-mmx",
+			"-mno-pclmul",
+			"-mno-popcnt",
+			"-mno-prefetchwt1",
+			"-mno-rdrnd",
+			"-mno-sha",
+			"-mno-sse",
+			"-mno-sse2",
+			"-mno-sse3",
+			"-mno-sse4",
+			"-mno-sse4.1",
+			"-mno-sse4.2",
+			"-mno-sse4a",
+			"-mno-ssse3",
+			"-mno-tbm",
+			"-mno-xop",
+		)
+	}
+	if defaultCfg0, err = NewConfig(runtime.GOOS, runtime.GOARCH, flags...); err != nil {
+		panic(errorf("NewConfig: %v", err))
+	}
+
+	if err := walk("assets", func(pth string, fi os.FileInfo) error {
+		corpusIndex = append(corpusIndex, pth)
+		return nil
+	}); err != nil {
+		panic(err)
+	}
+
+}
+
+func walk(dir string, f func(pth string, fi os.FileInfo) error) error {
+	fis, err := cfs.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, v := range fis {
+		switch {
+		case v.IsDir():
+			if err = walk(dir+"/"+v.Name(), f); err != nil {
+				return err
+			}
+		default:
+			fi, err := v.Info()
+			if err != nil {
+				return err
+			}
+
+			if err = f(dir+"/"+v.Name(), fi); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Produce the AST used in examples documentation.
+func exampleAST(rule int, src string) (r interface{}) {
+	defer func() {
+		if err := recover(); err != nil {
+			r = fmt.Sprintf("%v (%v:)", err, origin(5))
+		}
+	}()
+
+	src = strings.Replace(src, "\\n", "\n", -1)
+	cfg := &Config{}
+	ast, _ := Parse(cfg, []Source{{Name: "example.c", Value: src}})
+	if ast == nil {
+		return "FAIL"
+	}
+
+	pc, _, _, _ := runtime.Caller(1)
+	typ := runtime.FuncForPC(pc - 1).Name()
+	i := strings.LastIndexByte(typ, '.')
+	typ = typ[i+1+len("Example"):]
+	i = strings.LastIndexByte(typ, '_')
+	typ = typ[:i]
+	var node Node
+	depth := mathutil.MaxInt
+	findNode(typ, ast.TranslationUnit, 0, &node, &depth)
+	return node
+}
+
+func TestMain(m *testing.M) {
+	oRE := flag.String("re", "", "")
+	flag.Parse()
+	if *oRE != "" {
+		re = regexp.MustCompile(*oRE)
+	}
+	os.Exit(m.Run())
+}
+
+func TestScannerSource(t *testing.T) {
+	const fn = "all_test.go"
+	exp, err := os.ReadFile(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testScannerSource(t, fn, f, exp, false)
+	testScannerSource(t, fn, exp, exp, false)
+	testScannerSource(t, fn, string(exp), exp, false)
+	testScannerSource(t, fn, bytes.NewReader(exp), exp, false)
+	testScannerSource(t, fn, nil, exp, false)
+	testScannerSource(t, fn, 42, nil, true)
+}
+
+func testScannerSource(t *testing.T, name string, value interface{}, exp []byte, mustFail bool) {
+	ss, err := newScannerSource(newFset(), Source{name, value, nil})
+	if err != nil != mustFail {
+		t.Fatalf("(%q, %T): %v", name, value, err)
+	}
+
+	if err != nil {
+		return
+	}
+
+	if !bytes.Equal(ss.buf, exp) {
+		t.Fatal("buf does not match")
+	}
+}
+
+func TestToken(t *testing.T) {
+	s, err := newScannerSource(newFset(), Source{"test", `abc
+def
+ ghi
+`, nil})
+	// abc\ndef\n ghi\n
+	//             1
+	// 0123 4567 89012
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.file.AddLine(4)
+	s.file.AddLine(8)
+	s.file.AddLine(13)
+	for itest, test := range []struct {
+		Token
+		line int
+		col  int
+		ch   rune
+		sep  string
+		src  string
+	}{
+		{newToken(s, 0, 0, 0, 3), 1, 1, 0, "", "abc"},
+		{newToken(s, 1, 3, 4, 3), 2, 1, 1, "\n", "def"},
+		{newToken(s, 2, 7, 9, 3), 3, 2, 2, "\n ", "ghi"},
+		{newToken(s, eof, 13, 13, 0), 3, 6, eof, "", ""},
+	} {
+		tok := test.Token
+		if g, e := tok.Position().Line, test.line; g != e {
+			t.Fatal(itest, g, e)
+		}
+		if g, e := tok.Position().Column, test.col; g != e {
+			t.Fatal(itest, g, e)
+		}
+		if g, e := tok.Ch, test.ch; g != e {
+			t.Fatal(itest, g, e)
+		}
+		if g, e := string(tok.Sep()), test.sep; g != e {
+			t.Fatalf("%v %q %q", itest, g, e)
+		}
+		if g, e := tok.SrcStr(), test.src; g != e {
+			t.Fatalf("%v %q %q", itest, g, e)
+		}
+
+		tok2 := tok
+		tok2.Set([]byte("xyz0123"), []byte("456789"))
+		if g, e := string(tok.Sep()), test.sep; g != e {
+			t.Fatalf("%v %q %q", itest, g, e)
+		}
+		if g, e := tok.SrcStr(), test.src; g != e {
+			t.Fatalf("%v %q %q", itest, g, e)
+		}
+		if g, e := string(tok2.Sep()), "xyz0123"; g != e {
+			t.Fatalf("%v %q %q", itest, g, e)
+		}
+		if g, e := tok2.SrcStr(), "456789"; g != e {
+			t.Fatalf("%v %q %q", itest, g, e)
+		}
+	}
+}
+
+func TestPragmaOnceSkipSource(t *testing.T) {
+	dir := t.TempDir()
+	header := filepath.Join(dir, "test.h")
+	main := filepath.Join(dir, "test2.h")
+	if err := os.WriteFile(header, []byte(`#pragma once
+
+#ifdef TESTPRAGMA
+#error pragma once not working
+#endif
+#define TESTPRAGMA
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(main, []byte(`#include "test.h"
+#include "test.h"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]struct{}{}
+	cfg := &Config{
+		IncludePaths: []string{"@"},
+		PragmaHandler: func(toks []Token) error {
+			if len(toks) == 0 || toks[0].SrcStr() != "once" {
+				return nil
+			}
+
+			fn := toks[0].Position().Filename
+			if _, ok := seen[fn]; ok {
+				return SkipSource
+			}
+
+			seen[fn] = struct{}{}
+			return nil
+		},
+	}
+
+	if err := Preprocess(cfg, []Source{{Name: main}}, io.Discard); err != nil {
+		t.Fatalf("Preprocess: %v", err)
+	}
+}
+
+type parallel struct {
+	limit chan struct{}
+	sync.Mutex
+	wg sync.WaitGroup
+}
+
+func newParallel() *parallel {
+	limit := runtime.GOMAXPROCS(-1)
+	switch runtime.GOARCH {
+	case "386", "arm": // 32 bit targets
+		limit = 1
+	default:
+		if totalRam <= 1<<32 {
+			limit = 1
+		}
+	}
+	return &parallel{
+		limit: make(chan struct{}, limit),
+	}
+}
+
+func (p *parallel) exec(run func()) {
+	p.wg.Add(1)
+	p.limit <- struct{}{}
+
+	go func() {
+		defer func() {
+			p.wg.Done()
+			<-p.limit
+		}()
+
+		run()
+	}()
+}
+
+var tokSink []Token
+
+func TestScanner(t *testing.T) {
+	defer func() { tokSink = nil }()
+
+	var files, tokens, chars int64
+	var m0, m runtime.MemStats
+	p := newParallel()
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&m0)
+	for _, path := range corpusIndex {
+		path := path
+		switch filepath.Ext(path) {
+		case ".c", ".h":
+			files++
+			p.exec(func() {
+				var err error
+				var chars0, tokens0 int64
+				var toks []Token
+
+				defer func() {
+					p.Lock()
+					chars += chars0
+					tokens += tokens0
+					tokSink = append(tokSink, toks...)
+					if err != nil {
+						t.Error(err)
+					}
+					p.Unlock()
+				}()
+
+				var buf []byte
+				if buf, err = getCorpusFile(path); err != nil {
+					return
+				}
+
+				chars0 += int64(len(buf))
+				var s *scanner
+				if s, err = newScanner(newFset(), Source{path, buf, nil}, func(msg string, args ...interface{}) {
+					s.close()
+					err = fmt.Errorf(msg, args...)
+				}); err != nil {
+					err = fmt.Errorf("%v: %v", path, err)
+					return
+				}
+
+				for {
+					tok := s.cppScan()
+					if tok.Ch == eof {
+						return
+					}
+
+					toks = append(toks, tok)
+					tokens0++
+				}
+			})
+		}
+	}
+	p.wg.Wait()
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&m)
+	t.Logf("files %v; tokens %v; bytes %v; heap %v; alloc %v", h(files), h(tokens), h(chars), h(m.HeapAlloc-m0.HeapAlloc), h(m.TotalAlloc-m0.TotalAlloc))
+}
+
+func getCorpusFile(path string) ([]byte, error) {
+	f, err := cfs.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return io.ReadAll(f)
+}
+
+func h(v interface{}) string {
+	switch x := v.(type) {
+	case int64:
+		return humanize.Comma(x)
+	case uint64:
+		if x <= math.MaxInt64 {
+			return humanize.Comma(int64(x))
+		}
+	}
+	return fmt.Sprint(v)
+}
+
+func BenchmarkScanner(b *testing.B) {
+	debug.FreeOSMemory()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var chars int64
+		for _, path := range corpusIndex {
+			switch filepath.Ext(path) {
+			case ".c", ".h":
+				buf, err := getCorpusFile(path)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				chars += int64(len(buf))
+				var s *scanner
+				if s, err = newScanner(newFset(), Source{path, buf, nil}, func(msg string, args ...interface{}) {
+					s.close()
+					b.Fatalf(msg, args...)
+				}); err != nil {
+					b.Fatal(path, err)
+				}
+				for {
+					tok := s.cppScan()
+					if tok.Ch == eof {
+						break
+					}
+				}
+			}
+		}
+		b.SetBytes(chars)
+	}
+}
+
+var (
+	cppParseBlacklist = map[string]struct{}{
+		"assets/github.com/vnmakarov/mir/c-tests/new/endif.c": {}, // 1:1: unexpected #endif
+	}
+	astSink []group
+)
+
+func TestCPPParse0(t *testing.T) {
+	defer func() { astSink = nil }()
+
+	var files, lines, chars int64
+	var m0, m runtime.MemStats
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&m0)
+	for _, path := range corpusIndex {
+		if _, ok := cppParseBlacklist[path]; ok {
+			continue
+		}
+
+		switch filepath.Ext(path) {
+		case ".c", ".h":
+			buf, err := getCorpusFile(path)
+			if err != nil {
+				t.Fatal(path, err)
+			}
+
+			chars += int64(len(buf))
+			var p *cppParser
+			if p, err = newCppParser(newFset(), Source{path, buf, nil}, func(msg string, args ...interface{}) {
+				p.close()
+				t.Fatalf(msg, args...)
+			}); err != nil {
+				t.Fatal(path, err)
+			}
+
+			files++
+			ast := p.preprocessingFile()
+			if len(ast) == 0 {
+				t.Fatalf("%v: empty AST", path)
+			}
+
+			eol := ast[len(ast)-1]
+			x, ok := eol.(eofLine)
+			if !ok {
+				t.Fatalf("%v: AST not terminated: %T", p.pos(), eol)
+			}
+
+			eof := Token(x)
+			lines += int64(eof.Position().Line)
+			astSink = append(astSink, ast)
+		}
+	}
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&m)
+	astSink = nil
+	t.Logf("files %v; lines %v bytes %v; heap %v; alloc %v", h(files), h(lines), h(chars), h(m.HeapAlloc-m0.HeapAlloc), h(m.TotalAlloc-m0.TotalAlloc))
+}
+
+func TestCPPParse(t *testing.T) {
+	defer func() { astSink = nil }()
+
+	var files, lines, chars int64
+	var m0, m runtime.MemStats
+	p := newParallel()
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&m0)
+	for _, path := range corpusIndex {
+		path := path
+		if _, ok := cppParseBlacklist[path]; ok {
+			continue
+		}
+
+		switch filepath.Ext(path) {
+		case ".c", ".h":
+			files++
+			p.exec(func() {
+				buf, err := getCorpusFile(path)
+				if err != nil {
+					t.Fatal(path, err)
+				}
+
+				var ast group
+				var eof Token
+
+				defer func() {
+					p.Lock()
+					chars += int64(len(buf))
+					lines += int64(eof.Position().Line)
+					astSink = append(astSink, ast)
+					if err != nil {
+						t.Error(err)
+					}
+					p.Unlock()
+				}()
+
+				var p *cppParser
+				if p, err = newCppParser(newFset(), Source{path, buf, nil}, func(msg string, args ...interface{}) {
+					p.close()
+					err = fmt.Errorf(msg, args...)
+				}); err != nil {
+					t.Fatal(path, err)
+				}
+
+				if ast = p.preprocessingFile(); len(ast) == 0 {
+					t.Fatalf("%v: empty AST", path)
+				}
+
+				eol := ast[len(ast)-1]
+				x, ok := eol.(eofLine)
+				if !ok {
+					err = fmt.Errorf("%v: AST not terminated: %T", p.pos(), eol)
+					return
+				}
+
+				eof = Token(x)
+			})
+		}
+	}
+	p.wg.Wait()
+	debug.FreeOSMemory()
+	runtime.ReadMemStats(&m)
+	astSink = nil
+	t.Logf("files %v; lines %v bytes %v; heap %v; alloc %v", h(files), h(lines), h(chars), h(m.HeapAlloc-m0.HeapAlloc), h(m.TotalAlloc-m0.TotalAlloc))
+}
+
+func BenchmarkCPPParse(b *testing.B) {
+	debug.FreeOSMemory()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var chars int64
+		for _, path := range corpusIndex {
+			if _, ok := cppParseBlacklist[path]; ok {
+				continue
+			}
+
+			switch filepath.Ext(path) {
+			case ".c", ".h":
+				buf, err := getCorpusFile(path)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				chars += int64(len(buf))
+				var p *cppParser
+				if p, err = newCppParser(newFset(), Source{path, buf, nil}, func(msg string, args ...interface{}) {
+					p.close()
+					b.Fatalf(msg, args...)
+				}); err != nil {
+					b.Fatal(path, err)
+				}
+
+				ast := p.preprocessingFile()
+				if len(ast) == 0 {
+					b.Fatalf("%v: empty AST", path)
+				}
+
+				eol := ast[len(ast)-1]
+				if _, ok := eol.(eofLine); !ok {
+					b.Fatalf("%v: AST not terminated: %T", p.pos(), eol)
+				}
+			}
+		}
+		b.SetBytes(chars)
+	}
+}
+
+func defaultCfg() *Config {
+	c := *defaultCfg0
+	return &c
+}
+
+func TestCPPExpand(t *testing.T) {
+	testCPPExpand(t, "testdata/cpp-expand/", nil, true)
+}
+
+func testCPPExpand(t *testing.T, dir string, blacklist map[string]struct{}, fakeIncludes bool) {
+	var fails []string
+	var files, ok, skip int
+	var c *cpp
+	cfg := defaultCfg()
+	cfg.fakeIncludes = fakeIncludes
+	cfg.PragmaHandler = func(s []Token) error {
+		pragmaTestTok := Token{s: s[0].s, Ch: rune(IDENTIFIER)}
+		pragmaTestTok.Set(nil, []byte("__pragma"))
+		a := textLine{pragmaTestTok}
+		for i, v := range s {
+			if i == 0 {
+				v.Set(sp, v.Src())
+			}
+			a = append(a, v)
+		}
+		nlTok := Token{s: s[0].s, Ch: '\n'}
+		nlTok.Set(nil, nl)
+		c.push(append(a, nlTok))
+		return nil
+	}
+	err := filepath.Walk(filepath.FromSlash(dir), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() || (!strings.HasSuffix(path, ".c") && !strings.HasSuffix(path, ".h")) {
+			return nil
+		}
+
+		files++
+		switch {
+		case re != nil:
+			if !re.MatchString(path) {
+				skip++
+				return nil
+			}
+		default:
+			if _, ok := blacklist[filepath.Base(path)]; ok {
+				skip++
+				return nil
+			}
+		}
+
+		if *oTrace {
+			fmt.Fprintln(os.Stderr, path)
+		}
+		var b strings.Builder
+		if c, err = newCPP(cfg, newFset(), []Source{{path, nil, nil}}, nil); err != nil {
+			t.Fatalf("%v: %v", path, err)
+		}
+
+		if err := preprocess(c, &b); err != nil {
+			fails = append(fails, path)
+			t.Fatalf("%v: %v", path, err)
+		}
+
+		if strings.Contains(filepath.ToSlash(path), "/mustfail/") {
+			if err != nil {
+				return nil
+			}
+
+			fails = append(fails, path)
+			return fmt.Errorf("%v: unexpected success", path)
+		}
+
+		if err != nil {
+			fails = append(fails, path)
+			return err
+		}
+
+		expFn := path + ".expect"
+		exp, err := os.ReadFile(expFn)
+		if err != nil {
+			fails = append(fails, path)
+			t.Error(err)
+		}
+
+		g := strings.ReplaceAll(b.String(), "\r", "")
+		g = strings.TrimSpace(g)
+		e := strings.ReplaceAll(string(exp), "\r", "")
+		e = strings.TrimSpace(e)
+		if g != e {
+			fails = append(fails, path)
+			diff := difflib.UnifiedDiff{
+				A:        difflib.SplitLines(e),
+				B:        difflib.SplitLines(g),
+				FromFile: expFn,
+				ToFile:   path,
+				Context:  0,
+			}
+			s, err := difflib.GetUnifiedDiffString(diff)
+			if err != nil {
+				t.Fatalf("%v: %v", path, err)
+			}
+
+			t.Errorf("%v\ngot\n%s\nexp\n%s\ngot\n%s\nexp\n%s", s, g, e, hex.Dump([]byte(g)), hex.Dump([]byte(e)))
+			return nil
+		}
+		ok++
+		return nil
+	})
+	for _, v := range fails {
+		t.Log(v)
+	}
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, len(fails))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreprocess(t *testing.T) {
+	testCPPExpand(t, "testdata/preprocess/", nil, true)
+}
+
+func TestTCCExpand(t *testing.T) {
+	testCPPExpand(t, "testdata/tcc-0.9.27/tests/pp/", map[string]struct{}{
+		"11.c": {}, // https://gcc.gnu.org/onlinedocs/gcc/Variadic-Macros.html#Variadic-Macros
+		"16.c": {}, // We don't produce warnings on macro redefinition.
+	}, true)
+}
+
+func TestInclude(t *testing.T) {
+	testCPPExpand(t, "testdata/include/", nil, false)
+}
+
+func TestTranslationPhase4(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.SysIncludePaths = append(cfg.SysIncludePaths, "Include") // benchmarksgame
+	cfg.FS = cfs
+	blacklistCompCert := map[string]struct{}{}
+	blacklistGCC := map[string]struct{}{
+		// assertions are deprecated, not supported.
+		"950919-1.c": {},
+	}
+	blacklictTCC := map[string]struct{}{
+		// https://gcc.gnu.org/onlinedocs/gcc/Variadic-Macros.html#Variadic-Macros, not supported.
+		"11.c": {},
+	}
+	switch fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH) {
+	case "linux/s390x", "linux/loong64", "linux/mips64le":
+		blacklistCompCert["aes.c"] = struct{}{} // Unsupported endianness.
+	}
+	var files, ok, skip, fails int32
+	for _, v := range []struct {
+		cfg       *Config
+		dir       string
+		blacklist map[string]struct{}
+	}{
+		{cfg, "CompCert-3.6/test/c", blacklistCompCert},
+		{cfg, "ccgo", nil},
+		{cfg, "gcc-9.1.0/gcc/testsuite/gcc.c-torture", blacklistGCC},
+		{cfg, "github.com/AbsInt/CompCert/test/c", blacklistCompCert},
+		{cfg, "github.com/cxgo", nil},
+		{cfg, "github.com/gcc-mirror/gcc/gcc/testsuite", blacklistGCC},
+		{cfg, "github.com/vnmakarov", nil},
+		{cfg, "sqlite-amalgamation", nil},
+		{cfg, "tcc-0.9.27/tests", blacklictTCC},
+		{cfg, "benchmarksgame-team.pages.debian.net", nil},
+	} {
+		t.Run(v.dir, func(t *testing.T) {
+			f, o, s, n := testTranslationPhase4(t, v.cfg, "assets/"+v.dir, v.blacklist)
+			files += f
+			ok += o
+			skip += s
+			fails += n
+		})
+	}
+	t.Logf("TOTAL: files %v, skip %v, ok %v, fails %v", files, skip, ok, fails)
+}
+
+func testTranslationPhase4(t *testing.T, cfg *Config, dir string, blacklist map[string]struct{}) (files, ok, skip, nfails int32) {
+	tmp := t.TempDir()
+	var fails []string
+	p := newParallel()
+	err := walk(dir, func(pth string, fi os.FileInfo) error {
+		if fi.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(pth) != ".c" {
+			return nil
+		}
+
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				atomic.AddInt32(&skip, 1)
+				return nil
+			}
+		default:
+			if _, ok := blacklist[filepath.Base(pth)]; ok {
+				atomic.AddInt32(&skip, 1)
+				return nil
+			}
+		}
+
+		files++
+		apth := pth
+		p.exec(func() {
+			if *oTrace {
+				fmt.Fprintln(os.Stderr, apth)
+			}
+			var err error
+
+			defer func() {
+				p.Lock()
+
+				defer p.Unlock()
+
+				if err != nil {
+					fails = append(fails, apth)
+					t.Errorf("%v: %v", apth, err)
+				}
+			}()
+
+			if err = Preprocess(
+				cfg,
+				[]Source{
+					{Name: "<predefined>", Value: cfg.Predefined},
+					{Name: "<builtin>", Value: Builtin},
+					{Name: apth, FS: cfs},
+				},
+				io.Discard,
+			); err == nil {
+				atomic.AddInt32(&ok, 1)
+				return
+			}
+
+			f, err2 := cfs.Open(apth)
+			if err2 != nil {
+				err = errorf("", err2)
+				return
+			}
+
+			defer f.Close()
+
+			b := make([]byte, fi.Size())
+			if n, _ := f.Read(b); int64(n) != fi.Size() {
+				err = errorf("%v: short read", apth)
+				return
+			}
+
+			fn := filepath.Join(tmp, filepath.Base(apth))
+			if err2 := os.WriteFile(fn, b, 0660); err2 != nil {
+				err = errorf("", err2)
+				return
+			}
+
+			defer os.Remove(fn)
+
+			cmd := exec.Command(cfg.CC, "-E", fn)
+			var buf bytes.Buffer
+			cmd.Stderr = &buf
+			if err2 = cmd.Run(); err2 != nil {
+				t.Logf("%v: skip: %v: %s %v", apth, cfg.CC, buf.Bytes(), err2)
+				atomic.AddInt32(&skip, 1)
+				err = nil
+			}
+		})
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	p.wg.Wait()
+	for _, v := range fails {
+		t.Log(v)
+	}
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, len(fails))
+	return files, ok, skip, int32(len(fails))
+}
+
+// https://gitlab.com/cznic/cc/-/issues/127
+func TestIssue127(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	if err := os.Chdir(filepath.FromSlash("testdata/issue127/")); err != nil {
+		t.Error(err)
+		return
+	}
+
+	cd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("working directory: %s", cd)
+	cfg := defaultCfg()
+	cfg.IncludePaths = append(cfg.IncludePaths, "include")
+	if err := Preprocess(
+		cfg,
+		[]Source{{Name: "main.c"}},
+		io.Discard,
+	); err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestBOM(t *testing.T) {
+	for i, v := range []struct {
+		src string
+		err string
+	}{
+		{"int main() {}", ""},
+		{"\xEF\xBB\xBFint main() {}", ""},
+	} {
+		cfg := *defaultCfg()
+		cfg.noPredefinedDeclarator = true
+		switch _, err := Parse(&cfg, []Source{{Value: v.src}}); {
+		case v.err == "" && err != nil:
+			t.Errorf("%v: unexpected error %v", i, err)
+		case v.err != "" && err == nil:
+			t.Errorf("%v: unexpected success, expected error matching %v", i, v.err)
+		case v.err != "":
+			if !regexp.MustCompile(v.err).MatchString(err.Error()) {
+				t.Errorf("%v: error %v does not match %v", i, err, v.err)
+			}
+		}
+	}
+}
+
+func TestStrCatSep(t *testing.T) {
+	for i, v := range []struct {
+		src         string
+		lit         string
+		sep         string
+		trailingSep string
+	}{
+		{`int f() {  "a";}`, `"a"`, "  ", "\n"},
+		{`int f() {  L"a";}`, `L"a"`, "  ", "\n"},
+		{`int f() { "a" "b";}`, `"ab"`, "  ", "\n"},
+		{`int f() { "a""b";}`, `"ab"`, " ", "\n"},
+		{`int f() { "a";}`, `"a"`, " ", "\n"},
+
+		{`int f() { "a"` + "\n\t" + `"b"; }`, `"ab"`, " \n\t", "\n"},
+		{`int f() { /*x*/ /*y*/ "a";}`, `"a"`, " /*x*/ /*y*/ ", "\n"},
+		{`int f() { /*x*/` + "\n" + `/*y*/ "a";}`, `"a"`, " /*x*/\n/*y*/ ", "\n"},
+		{`int f() { //x` + "\n" + ` "a";}`, `"a"`, " //x\n ", "\n"},
+		{`int f() { //x` + "\n" + `"a";}`, `"a"`, " //x\n", "\n"},
+
+		{`int f() { L"a" L"b";}`, `L"ab"`, "  ", "\n"},
+		{`int f() { ` + "\n" + ` "a";}`, `"a"`, " \n ", "\n"},
+		{`int f() { ` + "\n" + `"a";}`, `"a"`, " \n", "\n"},
+		{`int f() {"a" "b";}`, `"ab"`, " ", "\n"},
+		{`int f() {"a"/*y*/"b";}`, `"ab"`, "/*y*/", "\n"},
+
+		{`int f() {"a";} /*x*/ `, `"a"`, "", " /*x*/ \n"},
+		{`int f() {"a";} /*x*/`, `"a"`, "", " /*x*/\n"},
+		{`int f() {"a";} /*x` + "\n" + `*/ `, `"a"`, "", " /*x\n*/ \n"},
+		{`int f() {"a";} `, `"a"`, "", " \n"},
+		{`int f() {"a";}/*x*/`, `"a"`, "", "/*x*/\n"},
+
+		{`int f() {"a";}` + "\n", `"a"`, "", "\n"},
+		{`int f() {"a";}`, `"a"`, "", "\n"},
+		{`int f() {/*x*/ /*y*/ "a";}`, `"a"`, "/*x*/ /*y*/ ", "\n"},
+		{`int f() {/*x*/"a""b";}`, `"ab"`, "/*x*/", "\n"},
+		{`int f() {/*x*/"a"/*y*/"b";}`, `"ab"`, "/*x*//*y*/", "\n"},
+
+		{`int f() {/*x*/"a";}`, `"a"`, "/*x*/", "\n"},
+		{`int f() {/*x*//*y*/ "a";}`, `"a"`, "/*x*//*y*/ ", "\n"},
+		{`int f() {/*x*//*y*/"a";}`, `"a"`, "/*x*//*y*/", "\n"},
+		{`int f() {//` + "\n" + `"a";}`, `"a"`, "//\n", "\n"},
+		{`int f() {//x` + "\n" + `"a";}`, `"a"`, "//x\n", "\n"},
+
+		{`int f() {` + "/*A*/\n/*B*/\n" + `"a";}`, `"a"`, "/*A*/\n/*B*/\n", "\n"},
+		{`int f() {` + "\n" + ` "a";}`, `"a"`, "\n ", "\n"},
+		{`int f() {` + "\n" + `"a";}`, `"a"`, "\n", "\n"},
+	} {
+		ast, err := Parse(
+			&Config{
+				doNotInjectFunc:        true,
+				noPredefinedDeclarator: true,
+			},
+			[]Source{{Name: "test", Value: v.src}},
+		)
+		if err != nil {
+			t.Errorf("%v: %v", i, err)
+			continue
+		}
+
+		// trc("%q -> %q", v.src, nodeSource2(ast.TranslationUnit))
+		var n Node
+		depth := mathutil.MaxInt
+		findNode("PrimaryExpression", ast.TranslationUnit, 0, &n, &depth)
+		tok := n.(*PrimaryExpression).Token
+		if g, e := tok.SrcStr(), v.lit; g != e {
+			t.Errorf("%v: %q %q", i, g, e)
+		}
+		if g, e := string(tok.Sep()), v.sep; g != e {
+			t.Errorf("%v: %q %q", i, g, e)
+		}
+		if g, e := string(ast.EOF.Sep()), v.trailingSep; g != e {
+			t.Errorf("%v: %q %q", i, g, e)
+		}
+	}
+}
+
+func TestParserBug(t *testing.T) {
+	blacklistJourdan := map[string]struct{}{
+		// Type checking has to detect the fail.
+		"bitfield_declaration_ambiguity.fail.c": {},
+	}
+	t.Run("bug", func(t *testing.T) { testParserBug(t, "testdata/bug", nil) })
+	t.Run("jhjourdan", func(t *testing.T) { testParserBug(t, "testdata/jhjourdan", blacklistJourdan) })
+}
+
+func testParserBug(t *testing.T, dir string, blacklist map[string]struct{}) {
+	tmp := t.TempDir()
+	cfg := defaultCfg()
+	var fails []string
+	var files, ok, skip int
+	err := filepath.Walk(filepath.FromSlash(dir), func(pth string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if fi.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(pth) != ".c" {
+			return nil
+		}
+
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				skip++
+				return nil
+			}
+		}
+
+		files++
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				skip++
+				return nil
+			}
+		default:
+			if _, ok := blacklist[filepath.Base(pth)]; ok {
+				skip++
+				return nil
+			}
+		}
+
+		if *oTrace {
+			fmt.Fprintln(os.Stderr, pth)
+		}
+
+		sources := []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: pth},
+		}
+		_, err = Parse(cfg, sources)
+		switch {
+		case strings.Contains(pth, ".fail."):
+			if err == nil {
+				fails = append(fails, pth)
+				t.Errorf("%v: missing error", pth)
+			} else {
+				if *oTrace {
+					t.Log(err)
+				}
+				ok++
+			}
+		case err == nil:
+			ok++
+		default:
+			cmd := exec.Command(cfg.CC, "-c", "-o", filepath.Join(tmp, "test.o"), pth)
+			var buf bytes.Buffer
+			cmd.Stderr = &buf
+			if err2 := cmd.Run(); err2 != nil {
+				t.Logf("%v: skip: %v: %s %v", pth, cfg.CC, buf.Bytes(), err2)
+				skip++
+				break
+			}
+
+			fails = append(fails, pth)
+			t.Errorf("%v: %v", pth, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, v := range fails {
+		t.Log(v)
+	}
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, len(fails))
+}
+
+// ~/src/modernc.org/ccorpus2/
+
+func TestParse(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.SysIncludePaths = append(cfg.SysIncludePaths, "Include") // benchmarksgame
+	cfg.FS = cfs
+	blacklistCompCert := map[string]struct{}{}
+	blacklistGCC := map[string]struct{}{
+		// Assertions are deprecated, not supported.
+		"950919-1.c": {},
+	}
+	blacklistDebian := map[string]struct{}{
+		"nbody-4.c": {}, // _Float16 not supported
+		"nbody-8.c": {}, // _Float16 not supported
+	}
+	switch fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH) {
+	case "linux/s390x", "linux/loong64", "linux/mips64le":
+		blacklistCompCert["aes.c"] = struct{}{} // Unsupported endianness.
+	case "freebsd/amd64":
+		blacklistDebian["mandelbrot-6.c"] = struct{}{}
+		blacklistDebian["spectral-norm-5.c"] = struct{}{}
+	case "darwin/amd64":
+		blacklistDebian["fannkuchredux-4.c"] = struct{}{}
+		blacklistDebian["mandelbrot-6.c"] = struct{}{}
+	}
+	type bm map[string]struct{}
+	var files, ok, skip, fails int32
+	for _, v := range []struct {
+		cfg             *Config
+		dir             string
+		blacklist       map[string]struct{}
+		targetBlacklist map[string]struct{}
+	}{
+		{cfg, "CompCert-3.6/test/c", blacklistCompCert, nil},
+		{cfg, "ccgo", nil, nil},
+		{cfg, "gcc-9.1.0/gcc/testsuite/gcc.c-torture", blacklistGCC, nil},
+		{cfg, "github.com/AbsInt/CompCert/test/c", blacklistCompCert, nil},
+		{cfg, "github.com/cxgo", nil, nil},
+		{cfg, "github.com/gcc-mirror/gcc/gcc/testsuite", blacklistGCC, nil},
+		{cfg, "github.com/vnmakarov", nil, nil},
+		{cfg, "sqlite-amalgamation", nil, bm{"windows/amd64": {}}},
+		{cfg, "tcc-0.9.27/tests/tests2", nil, nil},
+		{cfg, "benchmarksgame-team.pages.debian.net", blacklistDebian, nil},
+	} {
+		if _, ok := v.targetBlacklist[target]; ok {
+			continue
+		}
+
+		t.Run(v.dir, func(t *testing.T) {
+			f, o, s, n := testParse(t, v.cfg, "assets/"+v.dir, v.blacklist)
+			files += f
+			ok += o
+			skip += s
+			fails += n
+		})
+	}
+	t.Logf("TOTAL: files %v, skip %v, ok %v, fails %v", files, skip, ok, fails)
+}
+
+func testParse(t *testing.T, cfg *Config, dir string, blacklist map[string]struct{}) (files, ok, skip, nfails int32) {
+	tmp := t.TempDir()
+	var fails []string
+	p := newParallel()
+	err := walk(dir, func(pth string, fi os.FileInfo) error {
+		if fi.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(pth) != ".c" {
+			return nil
+		}
+
+		files++
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				atomic.AddInt32(&skip, 1)
+				return nil
+			}
+		default:
+			if _, ok := blacklist[filepath.Base(pth)]; ok {
+				atomic.AddInt32(&skip, 1)
+				return nil
+			}
+		}
+		apth := pth
+		p.exec(func() {
+			if *oTrace {
+				fmt.Fprintln(os.Stderr, apth)
+			}
+
+			var err error
+
+			defer func() {
+				p.Lock()
+
+				defer p.Unlock()
+
+				if err != nil {
+					fails = append(fails, apth)
+					t.Errorf("%v: %v", apth, err)
+				}
+
+			}()
+
+			func() {
+				defer func() {
+					if e := recover(); e != nil && err == nil {
+						err = fmt.Errorf("%v: PANIC: %v", apth, e)
+						// trc("\n%s", debug.Stack())
+					}
+				}()
+
+				if _, err = Parse(
+					cfg,
+					[]Source{
+						{Name: "<predefined>", Value: cfg.Predefined},
+						{Name: "<builtin>", Value: Builtin},
+						{Name: apth, FS: cfs},
+					},
+				); err == nil {
+					atomic.AddInt32(&ok, 1)
+					return
+				}
+			}()
+
+			if err == nil {
+				return
+			}
+
+			f, err2 := cfs.Open(apth)
+			if err2 != nil {
+				err = errorf("", err2)
+				return
+			}
+
+			defer f.Close()
+
+			b := make([]byte, fi.Size())
+			if n, _ := f.Read(b); int64(n) != fi.Size() {
+				err = errorf("%v: short read", apth)
+				return
+			}
+
+			fn := filepath.Join(tmp, filepath.Base(apth))
+			if err2 := os.WriteFile(fn, b, 0660); err2 != nil {
+				err = errorf("", err2)
+				return
+			}
+
+			defer os.Remove(fn)
+
+			cmd := exec.Command(cfg.CC, "-c", "-o", filepath.Join(tmp, "test.o"), fn)
+			var buf bytes.Buffer
+			cmd.Stderr = &buf
+			if err2 = cmd.Run(); err2 != nil {
+				t.Logf("%v: skip: %v: %s %v", apth, cfg.CC, buf.Bytes(), err2)
+				atomic.AddInt32(&skip, 1)
+				err = nil
+				return
+			}
+		})
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	p.wg.Wait()
+	for _, v := range fails {
+		t.Log(v)
+	}
+	// fmt.Fprintf(os.Stderr, "%v: files %v, skip %v, ok %v, fails %v\n", dir, files, skip, ok, len(fails))
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, len(fails))
+	return files, ok, skip, int32(len(fails))
+}
+
+func TestTranslateBug(t *testing.T) {
+	t.Run("bug", func(t *testing.T) { testTranslateBug(t, "testdata/bug", nil) })
+}
+
+func testTranslateBug(t *testing.T, dir string, blacklist map[string]struct{}) {
+	tmp := t.TempDir()
+	cfg := defaultCfg()
+	var fails []string
+	var files, ok, skip int
+	err := filepath.Walk(filepath.FromSlash(dir), func(pth string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if fi.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(pth) != ".c" {
+			return nil
+		}
+
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				skip++
+				return nil
+			}
+		}
+
+		files++
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				skip++
+				return nil
+			}
+		default:
+			if _, ok := blacklist[filepath.Base(pth)]; ok {
+				skip++
+				return nil
+			}
+		}
+
+		if *oTrace {
+			fmt.Fprintln(os.Stderr, pth)
+		}
+
+		sources := []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: pth},
+		}
+		_, err = Translate(cfg, sources)
+		switch {
+		case strings.Contains(pth, ".fail."):
+			if err == nil {
+				fails = append(fails, pth)
+				t.Errorf("%v: missing error", pth)
+			} else {
+				if *oTrace {
+					t.Log(err)
+				}
+				ok++
+			}
+		case err == nil:
+			ok++
+		default:
+			cmd := exec.Command(cfg.CC, "-c", "-o", filepath.Join(tmp, "test.o"), pth)
+			var buf bytes.Buffer
+			cmd.Stderr = &buf
+			if err2 := cmd.Run(); err2 != nil {
+				t.Logf("%v: skip: %v: %s %v", pth, cfg.CC, buf.Bytes(), err2)
+				skip++
+				break
+			}
+
+			fails = append(fails, pth)
+			t.Errorf("%v: %v", pth, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	for _, v := range fails {
+		t.Log(v)
+	}
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, len(fails))
+}
+
+func TestTranslate(t *testing.T) {
+	cfg := defaultCfg()
+	if target == "darwin/arm64" {
+		cfg.IgnoreStaticAssert = true
+	}
+	cfg.SysIncludePaths = append(cfg.SysIncludePaths, "Include") // benchmarksgame
+	cfg.FS = cfs
+	blacklistCompCert := map[string]struct{}{}
+	blacklistMakarov := map[string]struct{}{}
+	blacklistGCC := map[string]struct{}{
+		"950919-1.c": {}, // Assertions are deprecated, not supported.
+		"991014-1.c": {}, // Type size too big
+	}
+	blacklistDebian := map[string]struct{}{
+		"nbody-4.c": {}, // _Float16 not supported
+		"nbody-8.c": {}, // _Float16 not supported
+	}
+	switch fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH) {
+	case "linux/mips64le":
+		blacklistCompCert["aes.c"] = struct{}{} // Unsupported endianness.
+	case "linux/s390x":
+		blacklistCompCert["aes.c"] = struct{}{} // Unsupported endianness.
+	case "linux/loong64":
+		blacklistCompCert["aes.c"] = struct{}{} // Unsupported endianness.
+		blacklistGCC["20101011-1.c"] = struct{}{}
+		blacklistGCC["fp-cmp-1.c"] = struct{}{}
+		blacklistGCC["fp-cmp-2.c"] = struct{}{}
+		blacklistGCC["fp-cmp-3.c"] = struct{}{}
+	case "windows/arm64":
+		blacklistGCC["pr49218.c"] = struct{}{}     //TODO
+		blacklistGCC["pr54471.c"] = struct{}{}     //TODO
+		blacklistGCC["pr61375.c"] = struct{}{}     //TODO
+		blacklistGCC["pr63302.c"] = struct{}{}     //TODO
+		blacklistGCC["pr65170.c"] = struct{}{}     //TODO
+		blacklistGCC["pr70355.c"] = struct{}{}     //TODO
+		blacklistGCC["pr84169.c"] = struct{}{}     //TODO
+		blacklistGCC["pr84748.c"] = struct{}{}     //TODO
+		blacklistGCC["pr85582-2.c"] = struct{}{}   //TODO
+		blacklistGCC["pr85582-3.c"] = struct{}{}   //TODO
+		blacklistGCC["pr92904.c"] = struct{}{}     //TODO
+		blacklistGCC["pr93213.c"] = struct{}{}     //TODO
+		blacklistGCC["pr98474.c"] = struct{}{}     //TODO
+		blacklistMakarov["setjmp2.c"] = struct{}{} //TODO
+	case "windows/amd64":
+		blacklistGCC["pr30704.c"] = struct{}{} //TODO
+	case "windows/386":
+		blacklistGCC["pr30704.c"] = struct{}{} // '__int128' is not supported on this target
+	case "freebsd/amd64":
+		blacklistDebian["mandelbrot-6.c"] = struct{}{}
+		blacklistDebian["spectral-norm-5.c"] = struct{}{}
+	case "darwin/amd64":
+		blacklistDebian["fannkuchredux-4.c"] = struct{}{}
+		blacklistDebian["mandelbrot-6.c"] = struct{}{}
+	}
+	var files, ok, skip, fails int32
+	for _, v := range []struct {
+		cfg       *Config
+		dir       string
+		blacklist map[string]struct{}
+	}{
+		{cfg, "CompCert-3.6/test/c", blacklistCompCert},
+		{cfg, "ccgo", nil},
+		{cfg, "gcc-9.1.0/gcc/testsuite/gcc.c-torture", blacklistGCC},
+		{cfg, "github.com/AbsInt/CompCert/test/c", blacklistCompCert},
+		{cfg, "github.com/cxgo", nil},
+		{cfg, "github.com/gcc-mirror/gcc/gcc/testsuite", blacklistGCC},
+		{cfg, "github.com/vnmakarov", blacklistMakarov},
+		{cfg, "sqlite-amalgamation", nil},
+		{cfg, "tcc-0.9.27/tests/tests2", nil},
+		{cfg, "benchmarksgame-team.pages.debian.net", blacklistDebian},
+	} {
+		if target == "windows/amd64" && strings.Contains(v.dir, "sqlite") {
+			continue
+		}
+
+		t.Run(v.dir, func(t *testing.T) {
+			f, o, s, n := testTranslate(t, v.cfg, "assets/"+v.dir, v.blacklist)
+			files += f
+			ok += o
+			skip += s
+			fails += n
+		})
+	}
+	t.Logf("TOTAL: files %v, skip %v, ok %v, fails %v", files, skip, ok, fails)
+}
+
+func testTranslate(t *testing.T, cfg *Config, dir string, blacklist map[string]struct{}) (files, ok, skip, nfails int32) {
+	tmp := t.TempDir()
+	var fails []string
+	p := newParallel()
+	err := walk(dir, func(pth string, fi os.FileInfo) error {
+		if fi.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(pth) != ".c" {
+			return nil
+		}
+
+		files++
+		switch {
+		case re != nil:
+			if !re.MatchString(pth) {
+				atomic.AddInt32(&skip, 1)
+				return nil
+			}
+		default:
+			if _, ok := blacklist[filepath.Base(pth)]; ok {
+				atomic.AddInt32(&skip, 1)
+				return nil
+			}
+		}
+		apth := pth
+		afi := fi
+		p.exec(func() {
+			if *oTrace {
+				fmt.Fprintln(os.Stderr, apth)
+			}
+
+			var err error
+
+			defer func() {
+				p.Lock()
+
+				defer p.Unlock()
+
+				if err != nil {
+					fails = append(fails, apth)
+					t.Errorf("%v:\n%v", apth, err)
+				}
+
+			}()
+
+			func() {
+				defer func() {
+					if e := recover(); e != nil && err == nil {
+						err = fmt.Errorf("%v: PANIC: %v", apth, e)
+						trc("%v: PANIC: %v\n%s", apth, e, debug.Stack())
+						os.Exit(1)
+					}
+				}()
+
+				if _, err = Translate(
+					cfg,
+					[]Source{
+						{Name: "<predefined>", Value: cfg.Predefined},
+						{Name: "<builtin>", Value: Builtin},
+						{Name: apth, FS: cfs},
+					},
+				); err == nil {
+					atomic.AddInt32(&ok, 1)
+					return
+				}
+			}()
+
+			if err == nil {
+				return
+			}
+
+			f, err2 := cfs.Open(apth)
+			if err2 != nil {
+				err = errorf("", err2)
+				return
+			}
+
+			defer f.Close()
+
+			b := make([]byte, afi.Size())
+			if n, _ := f.Read(b); int64(n) != afi.Size() {
+				err = errorf("%v: short read", apth)
+				return
+			}
+
+			fn := filepath.Join(tmp, filepath.Base(apth))
+			if err2 := os.WriteFile(fn, b, 0660); err2 != nil {
+				err = errorf("", err2)
+				return
+			}
+
+			defer os.Remove(fn)
+
+			cmd := exec.Command(cfg.CC, "-c", "-o", filepath.Join(tmp, "test.o"), fn)
+			var buf bytes.Buffer
+			cmd.Stderr = &buf
+			if err2 = cmd.Run(); err2 != nil {
+				t.Logf("%v: skip: %v: %s %v", apth, cfg.CC, buf.Bytes(), err2)
+				atomic.AddInt32(&skip, 1)
+				err = nil
+				return
+			}
+		})
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	p.wg.Wait()
+	for _, v := range fails {
+		t.Logf("FAIL: %v", v)
+	}
+	// fmt.Fprintf(os.Stderr, "%v: files %v, skip %v, ok %v, fails %v\n", dir, files, skip, ok, len(fails))
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, len(fails))
+	return files, ok, skip, int32(len(fails))
+}
+
+func shell(cmd string, args ...string) ([]byte, error) {
+	wd, err := absCwd()
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Printf("execute %s %q in %s\n", cmd, args, wd)
+	var b echoWriter
+	b.echo = testing.Verbose()
+	c := exec.Command(cmd, args...)
+	c.Stdout = &b
+	c.Stderr = &b
+	err = c.Run()
+	return b.w.Bytes(), err
+}
+
+func absCwd() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	if wd, err = filepath.Abs(wd); err != nil {
+		return "", err
+	}
+
+	return wd, nil
+}
+
+type echoWriter struct {
+	w    bytes.Buffer
+	echo bool
+}
+
+func (w *echoWriter) Write(b []byte) (int, error) {
+	if w.echo {
+		os.Stdout.Write(b)
+	}
+	return w.w.Write(b)
+}
+
+func mustShell(t *testing.T, cmd string, args ...string) []byte {
+	b, err := shell(cmd, args...)
+	if err != nil {
+		t.Fatalf("%v %s\noutput: %s\nerr: %s", cmd, args, b, err)
+	}
+
+	return b
+}
+
+func mustUntarFile(t *testing.T, dst, src string, canOverwrite func(fn string, fi os.FileInfo) bool) {
+	if err := untarFile(dst, src, canOverwrite); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func untarFile(dst, src string, canOverwrite func(fn string, fi os.FileInfo) bool) error {
+	f, err := cfs.Open(src)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	return untar(dst, bufio.NewReader(f), canOverwrite)
+}
+
+func untar(dst string, r io.Reader, canOverwrite func(fn string, fi os.FileInfo) bool) error {
+	dst = filepath.FromSlash(dst)
+	gr, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+
+			return nil
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			dir := filepath.Join(dst, hdr.Name)
+			if err = os.MkdirAll(dir, 0770); err != nil {
+				return err
+			}
+		case tar.TypeSymlink, tar.TypeXGlobalHeader:
+			// skip
+		case tar.TypeReg:
+			dir := filepath.Dir(filepath.Join(dst, hdr.Name))
+			if _, err := os.Stat(dir); err != nil {
+				if !os.IsNotExist(err) {
+					return err
+				}
+
+				if err = os.MkdirAll(dir, 0770); err != nil {
+					return err
+				}
+			}
+
+			fn := filepath.Join(dst, hdr.Name)
+			f, err := os.OpenFile(fn, os.O_CREATE|os.O_WRONLY, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+
+			w := bufio.NewWriter(f)
+			if _, err = io.Copy(w, tr); err != nil {
+				return err
+			}
+
+			if err := w.Flush(); err != nil {
+				return err
+			}
+
+			if err := f.Close(); err != nil {
+				return err
+			}
+
+			if err := os.Chtimes(fn, hdr.AccessTime, hdr.ModTime); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unexpected tar header typeflag %#02x", hdr.Typeflag)
+		}
+	}
+
+}
+
+func TestMake(t *testing.T) {
+	if testing.Short() {
+		t.Skip("SKIP: -short")
+	}
+
+	if goos == "windows" {
+		t.Skip("SKIP: not supported on Windows")
+	}
+
+	tmp := t.TempDir()
+	CC := defaultCfg().CC
+	if !filepath.IsAbs(CC) {
+		var err error
+		if CC, err = filepath.Abs(CC); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Setenv("FAKE_CC_CC", CC)
+	base := filepath.Base(CC)
+	oldCC := os.Getenv("CC")
+
+	defer os.Setenv("CC", oldCC)
+
+	os.Setenv("CC", base)
+	cc := filepath.Join(tmp, base)
+	args := []string{"build", "-o", cc}
+	if Dmesgs {
+		args = append(args, "-tags=cc.dmesg")
+	}
+	mustShell(t, "go", append(args, "fakecc.go")...)
+	if !strings.HasPrefix(base, "gcc") {
+		mustShell(t, "cp", cc, filepath.Join(tmp, "gcc"))
+	}
+	if !strings.HasPrefix(base, "cc") {
+		mustShell(t, "cp", cc, filepath.Join(tmp, "cc"))
+	}
+	if !strings.HasPrefix(base, "clang") {
+		mustShell(t, "cp", cc, filepath.Join(tmp, "clang"))
+	}
+	oldPath := os.Getenv("PATH")
+
+	defer os.Setenv("PATH", oldPath)
+
+	os.Setenv("PATH", tmp+string(os.PathListSeparator)+oldPath)
+	var files, ok, skip, fails int32
+	all := []string{
+		"darwin/amd64",
+		"darwin/arm64",
+		"freebsd/386",
+		"freebsd/amd64",
+		"linux/386",
+		"linux/amd64",
+		"linux/arm",
+		"linux/arm64",
+		"linux/loong64",
+		"linux/riscv64",
+		"linux/s390x",
+		"netbsd/amd64",
+		"openbsd/amd64",
+	}
+	hdf5 := []string{
+		"freebsd/386",
+		"freebsd/amd64",
+		"linux/386",
+		"linux/amd64",
+		"linux/arm",
+		"linux/arm64",
+		"linux/loong64",
+		"linux/riscv64",
+		"linux/s390x",
+		"netbsd/amd64",
+		"openbsd/amd64",
+		// "darwin/amd64", //TODO PATH_MAX undefined
+		// "darwin/arm64", //TODO PATH_MAX undefined
+	}
+	mpfr := []string{
+		"darwin/amd64",
+		"darwin/arm64",
+		"freebsd/386",
+		"freebsd/amd64",
+		"linux/386",
+		"linux/amd64",
+		"linux/arm",
+		"linux/arm64",
+		"linux/loong64",
+		"linux/s390x",
+		"netbsd/amd64",
+		"openbsd/amd64",
+		// "linux/riscv64", //TODO
+	}
+	qbe := []string{
+		"amd64",
+		"arm64",
+		"loong64",
+		"riscv64",
+	}
+	qjs := []string{
+		"freebsd/386",
+		"freebsd/amd64",
+		"linux/386",
+		"linux/amd64",
+		"linux/arm",
+		"linux/arm64",
+		"linux/loong64",
+		"linux/riscv64",
+		"linux/s390x",
+		"netbsd/amd64",
+		"openbsd/amd64",
+		// "darwin/amd64", //TODO PATH_MAX undefined
+		// "darwin/arm64", //TODO PATH_MAX undefined
+	}
+	redis := []string{
+		"freebsd/386",
+		"freebsd/amd64",
+		"linux/386",
+		"linux/amd64",
+		"linux/arm64",
+		"linux/loong64",
+		"linux/riscv64",
+		"linux/s390x",
+		"openbsd/amd64",
+		// "darwin/amd64", //TODO SSIZE_MAX undefined
+		// "darwin/arm64", //TODO SSIZE_MAX undefined
+		// "linux/arm",    //TODO <sys/event.h> not found
+		// "netbsd/amd64", //TODO <sys/epoll.h> not found
+	}
+	cfg := &makeCfg{cc: cc}
+	switch goos {
+	case "darwin":
+		cfg.cflags = "-I/opt/homebrew/include"
+	case "freebsd", "openbsd":
+		cfg.cflags = "-I/usr/local/include"
+	case "netbsd":
+		cfg.cflags = "-I/usr/pkg/include"
+	}
+	cfg.cflags = strings.TrimSpace(cfg.cflags)
+	for _, v := range []struct {
+		archive string
+		dir     string
+		cfg     *makeCfg
+		filter  []string
+	}{
+		{"ftp.pcre.org/pub/pcre.tar.gz", "pcre", cfg.add("--disable-cpp"), all},
+		{"ftp.pcre.org/pub/pcre2.tar.gz", "pcre2", cfg, all},
+		{"github.com/madler/zlib.tar.gz", "zlib", cfg, all},
+		{"sourceforge.net/projects/tcl/files/Tcl/tcl.tar.gz", "tcl/unix", cfg.add("--enable-corefoundation=no"), all},
+		{"gmplib.org/download/gmp/gmp-6.2.1.tar.gz", "gmp-6.2.1", cfg, all},
+		{"www.mpfr.org/mpfr-current/mpfr-4.1.0.tar.gz", "mpfr-4.1.0", cfg, mpfr},
+		{"ftp.gnu.org/gnu/mpc/mpc-1.2.1.tar.gz", "mpc-1.2.1", cfg, all},
+		{"www.hdfgroup.org/downloads/hdf5/source-code/hdf5-1.12.1.tar.gz", "hdf5-1.12.1", cfg, hdf5},
+		{"musl.libc.org/releases/musl-1.2.4.tar.gz", "musl-1.2.4", cfg, []string{"linux"}},
+		{"github.com/git/git/archive/refs/tags/v2.35.1.tar.gz", "git-2.35.1", cfg.noConfigure(), all},
+		{"github.com/bellard/quickjs/archive/refs/heads/quickjs-master/quickjs-master.tar.gz", "quickjs-master", cfg.noConfigure(), qjs},
+		{"download.redis.io/releases/redis-6.2.6.tar.gz", "redis-6.2.6", cfg.noConfigure(), redis},
+		{"c9x.me/git/qbe.tar.gz", "qbe", cfg.noConfigure(), qbe},
+		{"git.postgresql.org/git/postgresql.tar.gz", "postgresql", cfg, all},
+		{"www.lua.org/ftp/lua-5.4.4.tar.gz", "lua-5.4.4", cfg.noConfigure(), all},
+	} {
+		if !filter(v.filter) || re != nil && !re.MatchString(v.archive) {
+			continue
+		}
+
+		t.Run(v.dir, func(t *testing.T) {
+			f, o, s, n := testMake(t, "assets/"+v.archive, v.dir, v.cfg)
+			files += f
+			ok += o
+			skip += s
+			fails += n
+		})
+	}
+	t.Logf("TOTAL: files %v, skip %v, ok %v, fails %v", files, skip, ok, fails)
+}
+
+func filter(f []string) bool {
+	for _, v := range f {
+		if v == goos || v == goarch || v == target {
+			return true
+		}
+	}
+
+	return false
+}
+
+type makeCfg struct {
+	cc        string
+	cflags    string
+	configure []string
+
+	disableConfigure bool
+}
+
+func (n *makeCfg) add(a ...string) *makeCfg {
+	m := *n
+	m.configure = append(m.configure[:len(m.configure):len(m.configure)], a...)
+	return &m
+}
+
+func (n *makeCfg) noConfigure() *makeCfg {
+	m := *n
+	m.disableConfigure = true
+	return &m
+}
+
+func testMake(t *testing.T, archive, dir string, mcfg *makeCfg) (files, ok, skip, nfails int32) {
+	tmp := t.TempDir()
+	mustUntarFile(t, tmp, archive, nil)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newWd := filepath.Join(tmp, dir)
+	if err := os.Chdir(newWd); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	fn := filepath.Join(newWd, "_fake_cc.log")
+	os.Setenv("FAKE_CC_LOG", fn)
+	var args []string
+	if mcfg != nil {
+		if mcfg.cflags != "" {
+			os.Setenv("CFLAGS", mcfg.cflags)
+		}
+		args = mcfg.configure
+	}
+	if !mcfg.disableConfigure {
+		if _, err := shell("./configure", args...); err != nil {
+			t.Skipf("SKIP: ./configure: %v", err)
+		}
+	}
+	switch goos {
+	case "darwin", "freebsd", "netbsd", "openbsd":
+		if _, err := shell("gmake", makeJ); err != nil {
+			t.Skipf("SKIP: gmake: %v", err)
+		}
+	default:
+		if _, err := shell("make", makeJ); err != nil {
+			t.Skipf("SKIP: make: %v", err)
+		}
+	}
+	logf, err := os.ReadFile(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lines := bytes.Split(logf, []byte{'\n'})
+	for _, b := range lines {
+		if b = bytes.TrimSpace(b); len(b) == 0 {
+			continue
+		}
+
+		var a []string
+		if err := json.NewDecoder(bytes.NewReader(b)).Decode(&a); err != nil {
+			t.Fatal(err)
+		}
+
+		if len(a) == 0 {
+			t.Fatal("unexpected empty line")
+		}
+
+		if *oTrace {
+			fmt.Printf("%s\n", strings.Join(a, " "))
+		}
+		files++
+		switch a[0] {
+		case "FAIL":
+			t.Errorf("%s", strings.Join(a, " "))
+			nfails++
+		case "PASS":
+			ok++
+		case "SKIP":
+			skip++
+		default:
+			t.Fatalf("unexpected report tag %q", a[0])
+		}
+	}
+	t.Logf("files %v, skip %v, ok %v, fails %v", files, skip, ok, nfails)
+	return files, ok, skip, nfails
+}
+
+func TestSep(t *testing.T) {
+	for i, v := range []struct {
+		src         string
+		sep         string
+		trailingSep string
+	}{
+		{"int f() {}", "", "\n"},
+		{" int f() {}\n", " ", "\n"},
+		{"\nint f() {}\n", "\n", "\n"},
+		{"/*A*//*B*/int f() {}\n", "/*A*//*B*/", "\n"},
+		{"/*A*//*B*/ int f() {}\n", "/*A*//*B*/ ", "\n"},
+
+		{"/*A*//*B*/\nint f() {}\n", "/*A*//*B*/\n", "\n"},
+		{"/*A*/ /*B*/int f() {}\n", "/*A*/ /*B*/", "\n"},
+		{"/*A*/ /*B*/ int f() {}\n", "/*A*/ /*B*/ ", "\n"},
+		{"/*A*/ /*B*/\nint f() {}\n", "/*A*/ /*B*/\n", "\n"},
+		{"/*A*/\n/*B*/int f() {}\n", "/*A*/\n/*B*/", "\n"},
+
+		{"/*A*/\n/*B*/ int f() {}\n", "/*A*/\n/*B*/ ", "\n"},
+		{"/*A*/\n/*B*/\nint f() {}\n", "/*A*/\n/*B*/\n", "\n"},
+		{" /*A*/ /*B*/int f() {}\n", " /*A*/ /*B*/", "\n"},
+		{" /*A*/ /*B*/ int f() {}\n", " /*A*/ /*B*/ ", "\n"},
+		{" /*A*/ /*B*/\nint f() {}\n", " /*A*/ /*B*/\n", "\n"},
+
+		{" /*A*/\n/*B*/int f() {}\n", " /*A*/\n/*B*/", "\n"},
+		{" /*A*/\n/*B*/ int f() {}\n", " /*A*/\n/*B*/ ", "\n"},
+		{" /*A*/\n/*B*/\nint f() {}\n", " /*A*/\n/*B*/\n", "\n"},
+		{"\n/*A*/ /*B*/int f() {}\n", "\n/*A*/ /*B*/", "\n"},
+		{"\n/*A*/ /*B*/ int f() {}\n", "\n/*A*/ /*B*/ ", "\n"},
+
+		{"\n/*A*/ /*B*/\nint f() {}\n", "\n/*A*/ /*B*/\n", "\n"},
+		{"\n/*A*/\n/*B*/int f() {}\n", "\n/*A*/\n/*B*/", "\n"},
+		{"\n/*A*/\n/*B*/ int f() {}\n", "\n/*A*/\n/*B*/ ", "\n"},
+		{"\n/*A*/\n/*B*/\nint f() {}\n", "\n/*A*/\n/*B*/\n", "\n"},
+	} {
+		ast, err := Parse(
+			&Config{},
+			[]Source{{Name: "test", Value: v.src + "int __predefined_declarator;"}},
+		)
+		if err != nil {
+			t.Errorf("%v: %v", i, err)
+			continue
+		}
+
+		t.Logf("%q -> %q", v.src, NodeSource(ast.TranslationUnit))
+		var tok Token
+		firstToken(ast.TranslationUnit, &tok)
+		if g, e := string(tok.Sep()), v.sep; g != e {
+			t.Errorf("%v: %q %q", i, g, e)
+		}
+		if g, e := string(ast.EOF.Sep()), v.trailingSep; g != e {
+			t.Errorf("%v: %q %q", i, g, e)
+		}
+	}
+}
+
+func firstToken(n Node, r *Token) {
+	if n == nil {
+		return
+	}
+
+	if x, ok := n.(*LabeledStatement); ok && x != nil {
+		t := x.Token
+		if r.Seq() == 0 || t.Seq() < r.Seq() {
+			*r = t
+		}
+		return
+	}
+
+	if x, ok := n.(Token); ok && x.Seq() != 0 {
+		if r.Seq() == 0 || x.Seq() < r.Seq() {
+			*r = x
+		}
+		return
+	}
+
+	t := reflect.TypeOf(n)
+	v := reflect.ValueOf(n)
+	var zero reflect.Value
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+		v = v.Elem()
+	}
+	if v == zero || v.IsZero() || t.Kind() != reflect.Struct {
+		return
+	}
+
+	nf := t.NumField()
+	for i := 0; i < nf; i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+
+		if m, ok := v.Field(i).Interface().(Node); ok {
+			firstToken(m, r)
+		}
+	}
+}
+
+// https://gitlab.com/cznic/cc/-/issues/141
+func TestIssue141(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "141.c", Value: `
+typedef struct {
+        int i;
+        char s[];
+} t;
+
+t x = {1, "a"};
+t y = {2, "bc"};
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nm := range []string{"t", "x", "y"} {
+		s := ast.Scope.Nodes[nm]
+		if len(s) == 0 {
+			t.Fatal(nm)
+		}
+
+		x, ok := s[0].(*Declarator)
+		if !ok {
+			t.Fatal(nm)
+		}
+
+		structType, ok := x.Type().(*StructType)
+		if !ok {
+			t.Fatal(nm)
+		}
+
+		if g, e := structType.IsIncomplete(), false; g != e {
+			t.Errorf("%s: declarator: %s, IsIncomplete got %v, exp %v", nm, structType, g, e)
+		}
+
+		if g, e := structType.Size(), ast.Int.Size(); g != e {
+			t.Errorf("%s: declarator: %s, size got %v, exp %v", nm, structType, g, e)
+		}
+
+		if g, e := structType.Padding(), 0; g != e {
+			t.Errorf("%s: declarator: %s, padding got %v, exp %v", nm, structType, g, e)
+		}
+
+		field := structType.FieldByName("s")
+		if field == nil {
+			t.Fatal(nm)
+		}
+
+		fieldType := field.Type()
+		if g, e := fieldType.IsIncomplete(), true; g != e {
+			t.Errorf("%s.s: declarator: %s, IsIncomplete got %v, exp %v", nm, fieldType, g, e)
+		}
+
+		if g, e := fieldType.Size(), int64(-1); g != e {
+			t.Errorf("%s.s: declarator: %s, size got %v, exp %v", nm, fieldType, g, e)
+		}
+
+	}
+	for l := ast.TranslationUnit; l != nil; l = l.TranslationUnit {
+		ed := l.ExternalDeclaration
+		if ed.Case != ExternalDeclarationDecl {
+			continue
+		}
+
+		d := ed.Declaration
+		if d == nil {
+			continue
+		}
+
+		idl := d.InitDeclaratorList
+		if idl == nil {
+			continue
+		}
+
+		id := idl.InitDeclarator
+		sz2 := 3
+		switch nm := id.Declarator.Name(); nm {
+		case "x":
+			sz2 = 2
+			fallthrough
+		case "y":
+			structType, ok := id.Initializer.Type().(*StructType)
+			if !ok {
+				t.Fatal(nm)
+			}
+
+			if g, e := structType.IsIncomplete(), false; g != e {
+				t.Errorf("%s: initializer: %s, IsIncomplete got %v, exp %v", nm, structType, g, e)
+			}
+
+			if g, e := structType.Size(), 2*ast.Int.Size(); g != e {
+				t.Errorf("%s: initializer: %s, size got %v, exp %v", nm, structType, g, e)
+			}
+
+			if g, e := structType.Padding(), int(ast.Int.Size())-sz2; g != e {
+				t.Errorf("%s: initializer: %s, padding got %v, exp %v", nm, structType, g, e)
+			}
+
+			field := structType.FieldByName("s")
+			if field == nil {
+				t.Fatal(nm)
+			}
+
+			fieldType := field.Type()
+			if g, e := fieldType.IsIncomplete(), false; g != e {
+				t.Errorf("%s.s: initializer: %s, IsIncomplete got %v, exp %v", nm, fieldType, g, e)
+			}
+
+			if g, e := fieldType.Size(), int64(sz2); g != e {
+				t.Errorf("%s.s: initializer: %s, size got %v, exp %v", nm, fieldType, g, e)
+			}
+		}
+	}
+}
+
+func TestABI(t *testing.T) {
+	for _, osarch := range []string{
+		"darwin/amd64",
+		"darwin/arm64",
+		"freebsd/386",
+		"freebsd/amd64",
+		"freebsd/arm",
+		"freebsd/arm64",
+		"linux/386",
+		"linux/amd64",
+		"linux/arm",
+		"linux/arm64",
+		"linux/ppc64le",
+		"linux/loong64",
+		"linux/riscv64",
+		"linux/s390x",
+		"netbsd/amd64",
+		"netbsd/arm",
+		"openbsd/amd64",
+		"openbsd/arm64",
+		"windows/386",
+		"windows/amd64",
+		"windows/arm64",
+	} {
+		a := strings.Split(osarch, "/")
+		os := a[0]
+		arch := a[1]
+		if _, err := NewABI(os, arch); err != nil {
+			t.Errorf("%s: %v", osarch, err)
+		}
+	}
+}
+
+// TestABIComplex checks every ABI table against [0]6.2.5/13: Each complex type
+// has the same representation and alignment requirements as an array type
+// containing exactly two elements of the corresponding real type.
+func TestABIComplex(t *testing.T) {
+	for osarch := range abiTypes {
+		abi, err := NewABI(osarch[0], osarch[1])
+		if err != nil {
+			t.Errorf("%v: %v", osarch, err)
+			continue
+		}
+
+		for ck, rk := range map[Kind]Kind{
+			ComplexFloat16:    Float16,
+			ComplexFloat:      Float,
+			ComplexDouble:     Double,
+			ComplexLongDouble: LongDouble,
+		} {
+			c, ok := abi.Types[ck]
+			if !ok {
+				continue
+			}
+
+			r := abi.Types[rk]
+			if e := (AbiType{2 * r.Size, r.Align, r.FieldAlign}); c != e {
+				t.Errorf("%s/%s: %v %+v, want %+v", osarch[0], osarch[1], ck, c, e)
+			}
+		}
+	}
+}
+
+// TestBitfieldByteOrder pins the storage layout of bit fields, which is
+// endianness dependent: little-endian ABIs allocate a storage unit's bit fields
+// starting from the least significant bit, big-endian ABIs from the most
+// significant bit. The regression case is GMP's 'union ieee_double_extract',
+// which overlays a bit field struct on a double; getting the big-endian
+// (s390x) layout wrong silently produced garbage doubles in mpz/mpq/mpf
+// _get_d/_set_d. Each target below declares the union the way GMP does for that
+// endianness, so both must yield the same physical IEEE-754 double layout:
+// sig at bit 63, exp at bits 52..62, mantissa in bits 0..51.
+func TestBitfieldByteOrder(t *testing.T) {
+	type field struct {
+		name       string
+		offset     int64 // Field.Offset(), bytes from the start of the storage
+		offsetBits int   // Field.OffsetBits(), bit position within the access unit
+		mask       uint64
+	}
+	for _, tc := range []struct {
+		arch   string
+		src    string
+		fields []field
+	}{
+		{ // big-endian: GMP declares the fields most-significant first
+			arch: "s390x",
+			src: `union ieee_double_extract {
+	struct { unsigned sig:1; unsigned exp:11; unsigned manh:20; unsigned manl:32; } s;
+	double d;
+} v;`,
+			fields: []field{
+				{"sig", 0, 31, 0x80000000},
+				{"exp", 0, 20, 0x7ff00000},
+				{"manh", 0, 0, 0x000fffff},
+				{"manl", 4, 0, 0xffffffff},
+			},
+		},
+		{ // little-endian: GMP declares the fields least-significant first
+			arch: "amd64",
+			src: `union ieee_double_extract {
+	struct { unsigned manl:32; unsigned manh:20; unsigned exp:11; unsigned sig:1; } s;
+	double d;
+} v;`,
+			fields: []field{
+				{"manl", 0, 0, 0xffffffff},
+				{"manh", 4, 0, 0x000fffff},
+				{"exp", 4, 20, 0x7ff00000},
+				{"sig", 4, 31, 0x80000000},
+			},
+		},
+	} {
+		cfg, err := NewConfig("linux", tc.arch, LongDouble64Flag("linux", tc.arch))
+		if err != nil {
+			t.Fatalf("%s: NewConfig: %v", tc.arch, err)
+		}
+
+		ast, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: tc.src},
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.arch, err)
+		}
+
+		s := ast.Scope.Nodes["v"]
+		if len(s) == 0 {
+			t.Fatalf("%s: v not declared", tc.arch)
+		}
+		d, ok := s[0].(*Declarator)
+		if !ok {
+			t.Fatalf("%s: v is %T, want *Declarator", tc.arch, s[0])
+		}
+		u, ok := d.Type().(*UnionType)
+		if !ok {
+			t.Fatalf("%s: v has type %T, want *UnionType", tc.arch, d.Type())
+		}
+		sf := u.FieldByName("s")
+		if sf == nil {
+			t.Fatalf("%s: union field s not found", tc.arch)
+		}
+		st, ok := sf.Type().(*StructType)
+		if !ok {
+			t.Fatalf("%s: s has type %T, want *StructType", tc.arch, sf.Type())
+		}
+
+		for _, w := range tc.fields {
+			f := st.FieldByName(w.name)
+			if f == nil {
+				t.Errorf("%s: field %s not found", tc.arch, w.name)
+				continue
+			}
+			if g, e := f.Offset(), w.offset; g != e {
+				t.Errorf("%s: %s.Offset() = %d, want %d", tc.arch, w.name, g, e)
+			}
+			if g, e := f.OffsetBits(), w.offsetBits; g != e {
+				t.Errorf("%s: %s.OffsetBits() = %d, want %d", tc.arch, w.name, g, e)
+			}
+			if g, e := f.Mask(), w.mask; g != e {
+				t.Errorf("%s: %s.Mask() = %#x, want %#x", tc.arch, w.name, g, e)
+			}
+		}
+	}
+}
+
+// TestUnionBitfieldByteOrder is the union counterpart of TestBitfieldByteOrder:
+// a bit field declared directly in a union starts at offset 0 and, on a
+// big-endian target, is allocated from the most significant bit of its access
+// unit (bits2AccessBytes(ValueBits) bytes) rather than the least significant
+// one. Access-unit widths of 1, 2, 4 and 8 bytes are all exercised.
+func TestUnionBitfieldByteOrder(t *testing.T) {
+	const src = `union U {
+	unsigned a:1;
+	unsigned b:12;
+	unsigned c:20;
+	unsigned long long e:40;
+} v;`
+	type field struct {
+		name       string
+		offsetBits int
+		mask       uint64
+	}
+	for _, tc := range []struct {
+		arch   string
+		fields []field
+	}{
+		{"s390x", []field{ // big-endian: fields sit at the top of their access unit
+			{"a", 7, 0x80},
+			{"b", 4, 0xfff0},
+			{"c", 12, 0xfffff000},
+			{"e", 24, 0xffffffffff000000},
+		}},
+		{"amd64", []field{ // little-endian: fields sit at the bottom
+			{"a", 0, 0x1},
+			{"b", 0, 0xfff},
+			{"c", 0, 0xfffff},
+			{"e", 0, 0xffffffffff},
+		}},
+	} {
+		cfg, err := NewConfig("linux", tc.arch, LongDouble64Flag("linux", tc.arch))
+		if err != nil {
+			t.Fatalf("%s: NewConfig: %v", tc.arch, err)
+		}
+
+		ast, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: src},
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.arch, err)
+		}
+
+		s := ast.Scope.Nodes["v"]
+		if len(s) == 0 {
+			t.Fatalf("%s: v not declared", tc.arch)
+		}
+		d, ok := s[0].(*Declarator)
+		if !ok {
+			t.Fatalf("%s: v is %T, want *Declarator", tc.arch, s[0])
+		}
+		u, ok := d.Type().(*UnionType)
+		if !ok {
+			t.Fatalf("%s: v has type %T, want *UnionType", tc.arch, d.Type())
+		}
+
+		for _, w := range tc.fields {
+			f := u.FieldByName(w.name)
+			if f == nil {
+				t.Errorf("%s: field %s not found", tc.arch, w.name)
+				continue
+			}
+			if g, e := f.Offset(), int64(0); g != e {
+				t.Errorf("%s: %s.Offset() = %d, want %d", tc.arch, w.name, g, e)
+			}
+			if g, e := f.OffsetBits(), w.offsetBits; g != e {
+				t.Errorf("%s: %s.OffsetBits() = %d, want %d", tc.arch, w.name, g, e)
+			}
+			if g, e := f.Mask(), w.mask; g != e {
+				t.Errorf("%s: %s.Mask() = %#x, want %#x", tc.arch, w.name, g, e)
+			}
+		}
+	}
+}
+
+// TestFixArgs verifies that newConfig strips a flag the host compiler rejects,
+// regardless of how the compiler phrases the rejection. The regression:
+// TestBitfieldByteOrder cross-configures linux/s390x by passing -mlong-double-64
+// to the host compiler; on arm64 hosts (darwin/arm64, windows/arm64,
+// openbsd/arm64) clang rejects it as "unsupported option '...' for target
+// '...'", a wording fixArgs did not recognize, so newConfig failed with "cannot
+// determine C compiler configuration". Rather than enumerate every wording,
+// fixArgs now strips any flag it passed that the diagnostic quotes.
+func TestFixArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		msg  string
+		want []string
+		ok   bool
+	}{
+		{
+			name: "gcc unrecognized",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "gcc: error: unrecognized command-line option '-mlong-double-64'",
+			want: []string{"-E"},
+			ok:   true,
+		},
+		{
+			name: "clang unknown argument",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "clang: error: unknown argument: '-mlong-double-64'",
+			want: []string{"-E"},
+			ok:   true,
+		},
+		{
+			name: "clang unsupported for target (darwin/arm64)",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "clang: error: unsupported option '-mlong-double-64' for target 'arm64-apple-macosx26.0.0'",
+			want: []string{"-E"},
+			ok:   true,
+		},
+		{
+			name: "clang unsupported for target (openbsd/arm64)",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "cc: error: unsupported option '-mlong-double-64' for target 'aarch64-unknown-openbsd7.3'",
+			want: []string{"-E"},
+			ok:   true,
+		},
+		{
+			// Insurance for windows/arm64 and any future host: an unknown
+			// wording still gets fixed as long as the flag is quoted.
+			name: "novel wording, flag still quoted",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "cc1: sorry, unimplemented: '-mlong-double-64' is not available for this target",
+			want: []string{"-E"},
+			ok:   true,
+		},
+		{
+			// GCC quotes with U+2018/U+2019; the old straight-quote extraction
+			// silently missed these.
+			name: "gcc curly quotes",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "gcc: error: unrecognized command-line option ‘-mlong-double-64’",
+			want: []string{"-E"},
+			ok:   true,
+		},
+		{
+			name: "unrelated error keeps args",
+			args: []string{"-mlong-double-64", "-E"},
+			msg:  "cc: error: no input files",
+			want: []string{"-mlong-double-64", "-E"},
+			ok:   false,
+		},
+		{
+			// clang quotes -mno-sse4 under its canonical name.
+			name: "clang canonical name",
+			args: []string{"-mno-sse", "-mno-sse4", "-E"},
+			msg:  "clang: error: unsupported option '-mno-sse4.1' for target 'arm64-apple-darwin27.0.0'",
+			want: []string{"-mno-sse", "-E"},
+			ok:   true,
+		},
+		{
+			// Both -mno-sse4 and -mno-sse4.1 are reported as '-mno-sse4.1';
+			// the exact match goes first, the next probe drops the other.
+			name: "clang canonical name, exact match first",
+			args: []string{"-mno-sse4", "-mno-sse4.1", "-E"},
+			msg:  "clang: error: unsupported option '-mno-sse4.1' for target 'arm64-apple-darwin27.0.0'\nclang: error: unsupported option '-mno-sse4.1' for target 'arm64-apple-darwin27.0.0'",
+			want: []string{"-mno-sse4", "-E"},
+			ok:   true,
+		},
+		{
+			name: "quoted flag extends no arg",
+			args: []string{"-E"},
+			msg:  "clang: error: unsupported option '-mno-sse4.1' for target 'arm64-apple-darwin27.0.0'",
+			want: []string{"-E"},
+			ok:   false,
+		},
+		{
+			// The suggestion names a flag that was passed and is fine.
+			name: "clang suggestion is not a rejection",
+			args: []string{"-mno-abm", "-mno-tbm", "-E"},
+			msg:  "clang: error: unknown argument '-mno-abm'; did you mean '-mno-tbm'?",
+			want: []string{"-mno-tbm", "-E"},
+			ok:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string(nil), tc.args...)
+			if g, e := fixArgs(&args, tc.msg), tc.ok; g != e {
+				t.Errorf("fixArgs returned %v, want %v", g, e)
+			}
+			if g, e := args, tc.want; !reflect.DeepEqual(g, e) {
+				t.Errorf("args = %q, want %q", g, e)
+			}
+		})
+	}
+}
+
+// TestNewConfigCanonicalFlag checks that newConfig survives a compiler that
+// rejects a flag under another name, like clang on an arm64 host, which
+// reports -mno-sse4 as '-mno-sse4.1': the probe is retried until the compiler
+// accepts the remaining flags.
+func TestNewConfigCanonicalFlag(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SKIP: needs a shell script as the compiler")
+	}
+
+	cc := filepath.Join(t.TempDir(), "cc")
+	const script = `#!/bin/sh
+rc=0
+for a in "$@"; do
+	case $a in
+	-mno-sse4) echo "clang: error: unsupported option '-mno-sse4.1' for target 'arm64-apple-darwin27.0.0'" >&2; rc=1;;
+	-mno-*) echo "clang: error: unsupported option '$a' for target 'arm64-apple-darwin27.0.0'" >&2; rc=1;;
+	esac
+done
+[ $rc = 0 ] || exit $rc
+case " $* " in
+*" -dM "*) echo "#define __STDC__ 1";;
+*" -v "*) echo "#include <...> search starts here:"; echo " /usr/include"; echo "End of search list.";;
+esac
+`
+	if err := os.WriteFile(cc, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("CC", cc)
+	gotCC, predefined, _, sysIncludePaths, _, err := newConfig([]string{"-D__CCGO__", "-mno-sse", "-mno-sse4", "-mno-sse4.1", "-mno-sse4.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gotCC != cc {
+		t.Errorf("cc = %q, want %q", gotCC, cc)
+	}
+	if g, e := predefined, "#define __STDC__ 1"; g != e {
+		t.Errorf("predefined = %q, want %q", g, e)
+	}
+	if g, e := sysIncludePaths, []string{"/usr/include"}; !reflect.DeepEqual(g, e) {
+		t.Errorf("sysIncludePaths = %q, want %q", g, e)
+	}
+}
+
+// https://gitlab.com/cznic/cc/-/issues/146
+func TestIssue146(t *testing.T) {
+	const src = `enum foo {
+	/* First comment */
+	FOO_A,
+	/* Second comment */
+	FOO_B,
+};
+`
+
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Parse(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var toks []Token
+	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
+		if tu.ExternalDeclaration == nil {
+			continue
+		}
+		if tu.ExternalDeclaration.Case != ExternalDeclarationDecl {
+			continue
+		}
+		decl := tu.ExternalDeclaration.Declaration
+
+		if decl.Position().Filename != "test.h" {
+			continue
+		}
+
+		enumSpec := decl.DeclarationSpecifiers.TypeSpecifier.EnumSpecifier
+		for el := enumSpec.EnumeratorList; el != nil; el = el.EnumeratorList {
+			t.Logf("el.Enumerator.Token: %v", el.Enumerator.Token)
+			toks = append(toks, el.Enumerator.Token)
+			t.Logf("el.Enumerator.Token.Sep(): %q", string(el.Enumerator.Token.Sep()))
+			t.Logf("el.Token: %v", el.Token)
+			t.Logf("el.Token.Sep(): %q", string(el.Token.Sep()))
+			t.Log("---")
+		}
+	}
+	for i, v := range []string{
+		"\n\t/* First comment */\n\t",
+		"\n\t/* Second comment */\n\t",
+	} {
+		if g, e := string(toks[i].Sep()), v; g != e {
+			t.Errorf("%v: %q %q", i, g, e)
+		}
+	}
+}
+
+// https://gitlab.com/cznic/cc/-/issues/149
+func TestIssue149(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/149#note_1376776631
+	const src = "#include_next <sys/types.h>\n"
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	if _, err := Parse(cfg, sources); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+}
+
+func TestConst0(t *testing.T) {
+	const src = "int i;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["i"][0].(*Declarator)
+	if g, e := d.IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestConst1(t *testing.T) {
+	const src = "const int i;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["i"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestConst2(t *testing.T) {
+	const src = "const int *p;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().(*PointerType).Elem().Attributes().IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestConst3(t *testing.T) {
+	const src = "int * const p;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsConst(), true; g != e {
+		t.Error(g, e) //TODO
+	}
+
+	if g, e := d.Type().Attributes().IsConst(), true; g != e {
+		t.Error(g, e) //TODO
+	}
+
+	if g, e := d.Type().(*PointerType).Elem().Attributes().IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestConst4(t *testing.T) {
+	const src = "const int * const p;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().(*PointerType).Elem().Attributes().IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestConst5(t *testing.T) {
+	const src = "const int *p[];\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsConst(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().(*ArrayType).Elem().Attributes().IsConst(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestVolatile0(t *testing.T) {
+	const src = "int i;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["i"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestVolatile1(t *testing.T) {
+	const src = "volatile int i;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["i"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestVolatile2(t *testing.T) {
+	const src = "volatile int *p;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().(*PointerType).Elem().Attributes().IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestVolatile3(t *testing.T) {
+	const src = "int * volatile p;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsVolatile(), true; g != e {
+		t.Error(g, e) //TODO
+	}
+
+	if g, e := d.Type().Attributes().IsVolatile(), true; g != e {
+		t.Error(g, e) //TODO
+	}
+
+	if g, e := d.Type().(*PointerType).Elem().Attributes().IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestVolatile4(t *testing.T) {
+	const src = "volatile int * volatile p;\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().(*PointerType).Elem().Attributes().IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestVolatile5(t *testing.T) {
+	const src = "volatile int *p[];\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["p"][0].(*Declarator)
+	t.Log(d.Type())
+	if g, e := d.IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().Attributes().IsVolatile(), false; g != e {
+		t.Error(g, e)
+	}
+
+	if g, e := d.Type().(*ArrayType).Elem().Attributes().IsVolatile(), true; g != e {
+		t.Error(g, e)
+	}
+}
+
+func TestBindDeclarations(t *testing.T) {
+	const src = "int x __attribute__((addr(42)));"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var found bool
+	for _, v := range ast.Scope.Nodes["x"] {
+		d, ok := v.(*Declarator)
+		if !ok {
+			continue
+		}
+		found = true
+		attrs := d.Type().Attributes()
+		t.Logf("%T: %v", v, d.Type().Attributes())
+
+		if !attrs.IsAttrSet("addr") {
+			t.Fatalf("attrs.IsAttrSet(\"addr\") failed")
+		}
+		attrval := attrs.AttrValue("addr")
+		if attrval == nil {
+			t.Fatalf("attrs.AttrValue(\"addr\") returned nil")
+		}
+		if len(attrval) != 1 {
+			t.Fatalf("attrs.AttrValue(\"addr\") returned slice of wrong length")
+		}
+		t.Log(attrval)
+		intval, ok := attrval[0].(Int64Value)
+		if !ok {
+			t.Fatalf("attrs.AttrValue(\"addr\") returned wrong type: %T", attrval[0])
+		}
+		if intval != 42 {
+			t.Fatalf("attrs.AttrValue(\"addr\") returned wrong value")
+		}
+	}
+	if !found {
+		t.Fatalf("Could not find node associated with x")
+	}
+}
+
+func TestPointerIntComparison(t *testing.T) {
+	const src = "void f(){int x = ((char *)1) == 1;}\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	_, err = Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+}
+
+func TestRandomError(t *testing.T) {
+	const src = "void f(){struct T{unsigned char x[1];};(struct T){0};}\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: `int __predefined_declarator;`}, // Just to test without wchar_t definition
+		{Name: "test.h", Value: src},
+	}
+
+	if _, err = Translate(cfg, sources); err == nil {
+		t.Fatalf("expected Translate error: %v", err)
+	}
+}
+
+func TestRandomError2(t *testing.T) {
+	const src = "void f(){struct T{unsigned char x[1];};(struct T){0};}\n"
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: `int __predefined_declarator;`}, // Just to test without wchar_t definition
+		{Name: "test.h", Value: src},
+	}
+
+	cfg.DefaultSizeT = ULongLong
+	cfg.DefaultWcharT = Int
+	if _, err = Translate(cfg, sources); err != nil {
+		t.Fatalf("unexpected Translate error: %v", err)
+	}
+}
+
+func TestAttrValue(t *testing.T) {
+	const src = `
+char a1 __attribute__((b1(100)));
+__attribute__((b2(200))) short a2;
+int *a3 __attribute__((b3(300)));
+__attribute__((b4(400))) long *a4;
+`
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["a1"][0].(*Declarator)
+	a := d.Type().Attributes()
+	vs := a.AttrValue("b1")
+	if len(vs) != 1 || vs[0] != Int64Value(100) {
+		t.Fatal(vs)
+	}
+
+	d = ast.Scope.Nodes["a2"][0].(*Declarator)
+	a = d.Type().Attributes()
+	vs = a.AttrValue("b2")
+	if len(vs) != 1 || vs[0] != Int64Value(200) {
+		t.Fatal(vs)
+	}
+
+	d = ast.Scope.Nodes["a3"][0].(*Declarator)
+	a = d.Type().Attributes()
+	vs = a.AttrValue("b3")
+	if len(vs) != 1 || vs[0] != Int64Value(300) {
+		t.Fatal(vs)
+	}
+
+	a = d.Type().(*PointerType).Elem().Attributes()
+	vs = a.AttrValue("b3")
+	if len(vs) != 0 {
+		t.Fatal(vs)
+	}
+
+	d = ast.Scope.Nodes["a4"][0].(*Declarator)
+	a = d.Type().Attributes()
+	vs = a.AttrValue("b4")
+	if len(vs) != 0 {
+		t.Fatal(vs)
+	}
+
+	a = d.Type().(*PointerType).Elem().Attributes()
+	vs = a.AttrValue("b4")
+	if len(vs) != 1 || vs[0] != Int64Value(400) {
+		t.Fatal(vs)
+	}
+}
+
+func TestCanonicalizeStrlitTail(t *testing.T) {
+	for i, test := range []struct{ a, b string }{
+		{``, ``},
+		{`a`, `a`},
+		{`\a`, `\a`},
+		{`\-`, `\-`},
+		{`\x1`, `\x01`},
+		{`\x12`, `\x12`},
+		{`\x123`, `\x123`},
+		{`\0`, `\000`},
+		{`\01`, `\001`},
+		{`\0123`, `\0123`},
+	} {
+		if g, e := string(canonicalizeStrlitTail([]byte(test.a))), test.b; g != e {
+			t.Errorf("%v: %q -> %q, want %q", i, test.a, g, e)
+		}
+	}
+}
+
+func TestVaArgs1(t *testing.T) {
+	//	parser.go:265:shift: TRC bug.c:7:9: U+E030 "g"
+	//	parser.go:265:shift: TRC bug.c:7:9: U+0028 '(' "("
+	//	parser.go:265:shift: TRC bug.c:7:9: U+E054 "\"foo\""
+	//	parser.go:265:shift: TRC bug.c:7:9: U+002C ',' ","	<--- comma not deleted
+	//	parser.go:265:shift: TRC bug.c:7:9: U+0029 ')' ")"
+	//	parser.go:265:shift: TRC bug.c:7:17: U+003B ';' ";"
+	//	parser.go:265:shift: TRC bug.c:8:1: U+007D '}' "}"
+	//
+	//	bug.c:7:9: unexpected ')', expected unary expression
+	//
+	//	https://gcc.gnu.org/onlinedocs/gcc-4.9.4/cpp/Variadic-Macros.html
+	cfg := defaultCfg()
+	cfg.noPredefinedDeclarator = true
+	_, err := Parse(cfg, []Source{
+		{Name: "bug.c", Value: `
+#define m(a, ...) g(a, ##__VA_ARGS__)
+
+void g() {}
+
+void f() {
+        m("foo");
+}
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVaArgs2(t *testing.T) {
+	//	parser.go:265:shift: TRC bug.c:7:9: U+E030 "g"
+	//	parser.go:265:shift: TRC bug.c:7:9: U+0028 '(' "("
+	//	parser.go:265:shift: TRC bug.c:7:9: U+E054 "\"foo\""
+	//	parser.go:265:shift: TRC bug.c:7:9: U+002C ',' ",42"	<--- malformed token
+	//	parser.go:265:shift: TRC bug.c:7:9: U+0029 ')' ")"
+	//	parser.go:265:shift: TRC bug.c:7:21: U+003B ';' ";"
+	//	parser.go:265:shift: TRC bug.c:8:1: U+007D '}' "}"
+	//
+	//	bug.c:7:9: unexpected ')', expected unary expression
+	cfg := defaultCfg()
+	cfg.noPredefinedDeclarator = true
+	_, err := Parse(cfg, []Source{
+		{Name: "bug.c", Value: `
+#define m(a, ...) g(a, ##__VA_ARGS__)
+
+void g() {}
+
+void f() {
+        m("foo", 42);
+}
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSingleBytewchar(t *testing.T) {
+	const src = `
+#include <stddef.h>
+wchar_t *c = L"!";
+`
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<predefined2>", Value: `
+#define __WCHAR_MAX__ 0xff
+#define __WCHAR_MIN__ 0
+#define __WCHAR_WIDTH__ 8
+#define __WCHAR_TYPE__ unsigned char
+#define __SIZEOF_WCHAR_T__ 1
+`},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.h", Value: src},
+	}
+	var ast *AST
+	if ast, err = Translate(cfg, sources); err != nil {
+		t.Fatalf("unexpected Translate error: %v", err)
+	}
+	nodes := findAllNodes("InitDeclarator", ast.TranslationUnit)
+	for _, n := range nodes {
+		decl := n.(*InitDeclarator)
+		if decl.Declarator.Name() == "c" {
+			var out Node
+			d := 100
+			findNode("PrimaryExpression", decl, 0, &out, &d)
+			pe := out.(*PrimaryExpression)
+			if _, ok := pe.Value().(StringValue); !ok {
+				t.Fatalf("value should be of type StringValue, but was of type %T", pe.Value())
+			}
+			return
+		}
+	}
+	t.Fatalf("Could not find InitDeclarator for value 'c'")
+}
+
+// https://gitlab.com/cznic/ccgo/-/issues/34
+func TestIssue34(t *testing.T) {
+	cfg := defaultCfg()
+	_, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "bug.c", Value: `
+
+void* f() {
+	return 0;
+}
+
+void* g() {
+	return &(((int*)(f()))[1]);
+} 
+
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIssue34b(t *testing.T) {
+	cfg := defaultCfg()
+	_, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "bug.c", Value: `
+
+typedef unsigned long int __uint64_t;
+typedef __uint64_t uint64_t;
+typedef uint64_t ecs_id_t;
+typedef ecs_id_t ecs_entity_t;
+
+typedef enum ecs_primitive_kind_t {
+ EcsBool = 1,
+ EcsChar,
+ EcsByte,
+ EcsU8,
+ EcsU16,
+ EcsU32,
+ EcsU64,
+ EcsI8,
+ EcsI16,
+ EcsI32,
+ EcsI64,
+ EcsF32,
+ EcsF64,
+ EcsUPtr,
+ EcsIPtr,
+ EcsString,
+ EcsEntity,
+ EcsId,
+ EcsPrimitiveKindLast = EcsId
+} ecs_primitive_kind_t;
+
+typedef struct ecs_primitive_desc_t {
+ ecs_entity_t entity; 
+ ecs_primitive_kind_t kind;
+} ecs_primitive_desc_t;
+
+// ----------------------------------------------------------------------------
+
+typedef unsigned long int __uint64_t;
+typedef __uint64_t uint64_t;
+typedef uint64_t ecs_id_t;
+typedef ecs_id_t ecs_entity_t;
+
+typedef enum ecs_primitive_kind_t {
+ EcsBool = 1,
+ EcsChar,
+ EcsByte,
+ EcsU8,
+ EcsU16,
+ EcsU32,
+ EcsU64,
+ EcsI8,
+ EcsI16,
+ EcsI32,
+ EcsI64,
+ EcsF32,
+ EcsF64,
+ EcsUPtr,
+ EcsIPtr,
+ EcsString,
+ EcsEntity,
+ EcsId,
+ EcsPrimitiveKindLast = EcsId
+} ecs_primitive_kind_t;
+
+typedef struct ecs_primitive_desc_t {
+ ecs_entity_t entity; 
+ ecs_primitive_kind_t kind;
+} ecs_primitive_desc_t;
+
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIssue34c(t *testing.T) {
+	cfg := defaultCfg()
+	_, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "bug.c", Value: `
+
+typedef struct ecs_world_t ecs_world_t;
+typedef unsigned long int __uint64_t;
+typedef __uint64_t uint64_t;
+typedef uint64_t ecs_id_t;
+typedef ecs_id_t ecs_entity_t;
+typedef struct ecs_serializer_t {
+ 
+ int (*value)(
+ const struct ecs_serializer_t *ser, 
+ ecs_entity_t type, 
+ const void *value); 
+
+ 
+ int (*member)(
+ const struct ecs_serializer_t *ser, 
+ const char *member); 
+
+ const ecs_world_t *world;
+ void *ctx;
+} ecs_serializer_t;
+
+// ----------------------------------------------------------------------------
+
+typedef struct ecs_world_t ecs_world_t;
+typedef unsigned long int __uint64_t;
+typedef __uint64_t uint64_t;
+typedef uint64_t ecs_id_t;
+typedef ecs_id_t ecs_entity_t;
+typedef struct ecs_serializer_t {
+ 
+ int (*value)(
+ const struct ecs_serializer_t *ser, 
+ ecs_entity_t type, 
+ const void *value); 
+
+ 
+ int (*member)(
+ const struct ecs_serializer_t *ser, 
+ const char *member); 
+
+ const ecs_world_t *world;
+ void *ctx;
+} ecs_serializer_t;
+
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// https://gitlab.com/cznic/cc/-/issues/165
+func TestIssue165(t *testing.T) {
+	const src = `
+#define CEPH_RBD_API          __attribute__ ((visibility ("default")))
+#define CEPH_RBD_DEPRECATED   __attribute__((deprecated))
+CEPH_RBD_API int a CEPH_RBD_DEPRECATED; 
+`
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	}
+
+	ast, err := Translate(cfg, sources)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	d := ast.Scope.Nodes["a"][0].(*Declarator)
+	for _, v := range []string{"visibility", "deprecated"} {
+		if g, e := d.Type().Attributes().IsAttrSet(v), true; g != e {
+			t.Errorf("%s: got=%v expexted=%v", v, g, e)
+		}
+	}
+}
+
+func TestEnumC23(t *testing.T) {
+	const src = `
+enum {a2};
+enum b3;
+enum c4 {d4};
+enum : char {e5};
+enum f6 : char;
+enum g7 : char {h7};
+`
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("failed to create new config: %v", err)
+	}
+
+	sources := []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	}
+
+	if _, err := Translate(cfg, sources); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+}
+
+// __bf16 is clang's/GCC's bfloat16 type. Apple clang's <emmintrin.h> typedefs
+// it, so failing to recognize it made every SSE2-using translation unit
+// unparseable on darwin/amd64.
+func TestBFloat16(t *testing.T) {
+	for _, tc := range []struct {
+		goos, goarch string
+		src          string
+		size         int64
+		align        int
+	}{
+		{"darwin", "amd64", "__bf16 x;", 2, 2},
+		{"darwin", "arm64", "__bf16 x;", 2, 2},
+		// The <emmintrin.h> form that motivated the support.
+		{"darwin", "amd64", "typedef __bf16 __v8bf __attribute__((__vector_size__(16), __aligned__(16)));\n__v8bf x;", 16, 16},
+	} {
+		cfg, err := NewConfig(tc.goos, tc.goarch, LongDouble64Flag(tc.goos, tc.goarch))
+		if err != nil {
+			t.Fatalf("%s/%s: %v", tc.goos, tc.goarch, err)
+		}
+
+		ast, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "t.c", Value: tc.src},
+		})
+		if err != nil {
+			t.Errorf("%s/%s: %q: %v", tc.goos, tc.goarch, tc.src, err)
+			continue
+		}
+
+		nodes := ast.Scope.Nodes["x"]
+		if len(nodes) == 0 {
+			t.Errorf("%s/%s: %q: x not declared", tc.goos, tc.goarch, tc.src)
+			continue
+		}
+
+		d, ok := nodes[0].(*Declarator)
+		if !ok {
+			t.Errorf("%s/%s: %q: got %T, expected *Declarator", tc.goos, tc.goarch, tc.src, nodes[0])
+			continue
+		}
+
+		typ := d.Type()
+		if g, e := typ.Kind(), BFloat16; g != e {
+			t.Errorf("%s/%s: %q: kind %v, expected %v", tc.goos, tc.goarch, tc.src, g, e)
+		}
+		if g, e := typ.Size(), tc.size; g != e {
+			t.Errorf("%s/%s: %q: size %v, expected %v", tc.goos, tc.goarch, tc.src, g, e)
+		}
+		if g, e := typ.Align(), tc.align; g != e {
+			t.Errorf("%s/%s: %q: align %v, expected %v", tc.goos, tc.goarch, tc.src, g, e)
+		}
+	}
+}
+
+// A target without __bf16 in its ABI table must report that cleanly instead of
+// failing to parse, same as _Float16 does.
+func TestBFloat16Unsupported(t *testing.T) {
+	cfg, err := NewConfig("linux", "amd64", LongDouble64Flag("linux", "amd64"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	switch _, err = Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "t.c", Value: "__bf16 x;"},
+	}); {
+	case err == nil:
+		t.Fatal("unexpected success")
+	case !strings.Contains(err.Error(), "__bf16 not supported on linux/amd64"):
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// With EvalAllMacros, an object-like macro whose expansion contained sizeof, a
+// cast, an enumeration constant or any other identifier that is not a macro
+// was evaluated by the preprocessor's #if evaluator, which treats identifiers
+// as 0, so 'sizeof(T)*N' became 0 and '(N-8)/sizeof(T)' N-8; ccgo then emitted
+// const WALINDEX_PGSZ = 0 for SQLite. Found by hazyhaar (cznic/sqlite#221,
+// https://gitlab.com/cznic/libsqlite3/-/merge_requests/4).
+func TestEvalAllMacros(t *testing.T) {
+	cfg := defaultCfg()
+	cfg.EvalAllMacros = true
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "macros.c", Value: `
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+typedef u16 ht_slot;
+
+typedef struct WalIndexHdr {
+	u32 iVersion;
+	u32 unused;
+	u32 iChange;
+	u8  isInit;
+	u8  big_endian;
+	u16 szPage;
+	u32 mxFrame;
+	u32 nPage;
+	u32 aFrameCksum[2];
+	u32 aSalt[2];
+	u32 aCksum[2];
+} WalIndexHdr;
+
+struct RowSetEntry { u32 v; u32 a; u32 b; };
+
+enum { E5 = 5 };
+int f(int);
+
+#define HASHTABLE_NPAGE      4096
+#define HASHTABLE_NSLOT      8192
+#define WALINDEX_HDR_SIZE    ((sizeof(WalIndexHdr) + 7) & ~7)
+#define WALINDEX_PGSZ        (sizeof(ht_slot)*HASHTABLE_NSLOT + HASHTABLE_NPAGE*sizeof(u32))
+#define HASHTABLE_NPAGE_ONE  (HASHTABLE_NPAGE - (WALINDEX_HDR_SIZE/sizeof(u32)))
+#define ROWSET_ENTRY_PER_CHUNK ((1024-8)/sizeof(struct RowSetEntry))
+#define EXPR_FULLSIZE        sizeof(WalIndexHdr)
+#define BMS                  ((int)(sizeof(u32)*8))
+#define EPLUS                (E5 + 1)
+#define LIT                  (1 + 2)
+#define NEG                  (-1)
+#define CH                   'a'
+#define FLT                  1.5
+#define FLTX                 (1.5 * 2)
+#define FNEG                 (-1.5)
+#define STR                  "a" "b"
+#define UNDECLARED           (nosuch + 1)
+#define CALL                 f(1)
+#define TYPE                 unsigned int
+#define SELF                 SELF
+#define EMPTY
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		want Value
+	}{
+		{"WALINDEX_HDR_SIZE", UInt64Value(48)},
+		{"WALINDEX_PGSZ", UInt64Value(32768)},
+		{"HASHTABLE_NPAGE_ONE", UInt64Value(4084)},
+		{"ROWSET_ENTRY_PER_CHUNK", UInt64Value(84)},
+		{"EXPR_FULLSIZE", UInt64Value(48)},
+		{"BMS", Int64Value(32)},
+		{"EPLUS", Int64Value(6)},
+		{"LIT", Int64Value(3)},
+		{"NEG", Int64Value(-1)},
+		{"CH", Int64Value('a')},
+		{"FLT", Float64Value(1.5)},
+		{"FLTX", Float64Value(3)},
+		{"FNEG", Float64Value(-1.5)},
+		{"STR", StringValue("ab\x00")},
+		{"UNDECLARED", Unknown},
+		{"CALL", Unknown},
+		{"TYPE", Unknown},
+		{"SELF", Unknown},
+		{"EMPTY", Unknown},
+	} {
+		m := ast.Macros[tc.name]
+		if m == nil {
+			t.Errorf("%s: macro not found", tc.name)
+			continue
+		}
+
+		if g, e := m.Value(), tc.want; g != e {
+			t.Errorf("%s: got %v (%T), want %v (%T)", tc.name, g, g, e, e)
+		}
+	}
+}
+
+// Unary minus did not fold a floating operand, so the value of -1.5 was
+// Unknown while the value of 0.0-1.5 was -1.5.
+func TestFloatNegation(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+double d = -1.5;
+double d2 = -(-1.5);
+double d3 = 2.0 * -1.5;
+double z = -0.0;
+float f = -1.5f;
+float f2 = +1.5f;
+long double l = -1.5L;
+long double l2 = +1.5L;
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm   string
+		want float64
+	}{
+		{"d", -1.5},
+		{"d2", 1.5},
+		{"d3", -3},
+		{"z", math.Copysign(0, -1)},
+		{"f", -1.5},
+		{"f2", 1.5},
+		{"l", -1.5},
+		{"l2", 1.5},
+	} {
+		var g float64
+		switch x := testInitializer(ast, tc.nm).AssignmentExpression.Value().(type) {
+		case Float64Value:
+			g = float64(x)
+		case *LongDoubleValue:
+			g, _ = (*big.Float)(x).Float64()
+		default:
+			t.Errorf("%s: got %v (%T)", tc.nm, x, x)
+			continue
+		}
+
+		if g != tc.want || math.Signbit(g) != math.Signbit(tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.nm, g, tc.want)
+		}
+	}
+}
+
+// isZero and isNonzero panicked on a floating or complex value, so 1.5 ? 1 :
+// 2 crashed Translate.
+func TestNonIntegerTruth(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+_Static_assert(1.5, "");
+_Static_assert(1.5L, "");
+int a = 1.5 ? 1 : 2;
+int b = -1.5 ? 1 : 2;
+int c = 0.0 ? 1 : 2;
+int d = -0.0 ? 1 : 2;
+int e = 1.5 && 1;
+int f = 0.0L && 1;
+int g = 1.5i ? 1 : 2;
+int h = L"x" ? 1 : 2;
+int i = __builtin_choose_expr(0.5, 1, 2.0);
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm   string
+		want Value
+	}{
+		{"a", Int64Value(1)},
+		{"b", Int64Value(1)},
+		{"c", Int64Value(2)},
+		{"d", Int64Value(2)},
+		{"e", Int64Value(1)},
+		{"f", Int64Value(0)},
+		{"g", Int64Value(1)},
+		{"h", Int64Value(1)},
+		{"i", Int64Value(1)},
+	} {
+		if g, e := testInitializer(ast, tc.nm).AssignmentExpression.Value(), tc.want; g != e {
+			t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+		}
+	}
+}
+
+// Converting to _Bool masked the value to 8 bits instead of comparing it to 0,
+// so (_Bool)256 was 0, and || converted its operands to int, so 0x100000000 ||
+// 0 was 0.
+func TestBoolConversion(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+_Bool b = 256;
+_Bool b2 = 2;
+_Bool b3 = 0.5;
+_Bool b4 = 0;
+int c = (_Bool)256;
+int c2 = (_Bool)0x100000000;
+int c3 = (_Bool)-1;
+int c4 = (_Bool)0;
+int o = 0x100000000 || 0;
+int o2 = 0 || 0x100000000;
+int o3 = (void*)0x100000000 || 0;
+int o4 = 0 || 0;
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm   string
+		init bool // check the value converted to the type of the declarator
+		want Value
+	}{
+		{"b", true, UInt64Value(1)},
+		{"b2", true, UInt64Value(1)},
+		{"b3", true, UInt64Value(1)},
+		{"b4", true, UInt64Value(0)},
+		{"c", false, UInt64Value(1)},
+		{"c2", false, UInt64Value(1)},
+		{"c3", false, UInt64Value(1)},
+		{"c4", false, UInt64Value(0)},
+		{"o", false, Int64Value(1)},
+		{"o2", false, Int64Value(1)},
+		{"o3", false, Int64Value(1)},
+		{"o4", false, Int64Value(0)},
+	} {
+		in := testInitializer(ast, tc.nm)
+		g := in.AssignmentExpression.Value()
+		if tc.init {
+			g = in.Value()
+		}
+		if e := tc.want; g != e {
+			t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+		}
+	}
+}
+
+// convert did not convert from or to a floating type other than double to
+// double, so (double)-1, 1.5*2 and (int)1.5 had no value. 0.1f was not rounded
+// to float.
+func TestFloatConversion(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+double a = (double)-1;
+double a2 = 1.5 * 2;
+double a3 = 2 * 1.5;
+double a4 = 1 / 2.0;
+double a5 = 18446744073709551615u + 0.0;
+double a6 = -0.0 * 1;
+float b = (float)1;
+float b2 = (float)0.1;
+float b3 = 0.1f;
+float b4 = 0.1f * 3;
+float b5 = 1e39f;
+float b6 = (float)1e300;
+long double c = (long double)1;
+long double c2 = (long double)0.5;
+int d = (int)1.5;
+int d2 = (int)-1.5;
+int d3 = (int)-0.5;
+int d4 = (int)3e9;
+unsigned d5 = (unsigned)3e9;
+unsigned d6 = (unsigned)-1.0;
+unsigned d7 = (unsigned)-0.5;
+signed char d8 = (signed char)127.9;
+signed char d9 = (signed char)128.0;
+long long d10 = (long long)9.2233720368547758e18;
+long long d11 = (long long)-9.2233720368547758e18;
+unsigned long long d12 = (unsigned long long)1.8446744073709552e19;
+int d13 = (int)1.5L;
+int d14 = (int)(1.0/0.0);
+int d15 = (int)(0.0/0.0);
+int e = 0.1f == 0.1;
+int e2 = 0.5f == 0.5;
+int e3 = 1.5 < 2;
+int e4 = 2 > 1.5;
+int e5 = 1.0 != 1;
+int e6 = 1.5 >= 1.5;
+int e7 = 0.5 || 0;
+int e8 = !1.5;
+int e9 = !0.0;
+int e10 = (0.0/0.0) == (0.0/0.0);
+_Complex double f = -1.5i;
+_Complex float f2 = -1.5fi;
+_Complex double f3 = +1.5i;
+int x[(int)2.5];
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inf := Float64Value(math.Inf(1))
+	for _, tc := range []struct {
+		nm   string
+		want Value
+	}{
+		{"a", Float64Value(-1)},
+		{"a2", Float64Value(3)},
+		{"a3", Float64Value(3)},
+		{"a4", Float64Value(0.5)},
+		{"a5", Float64Value(1 << 64)},
+		{"a6", Float64Value(math.Copysign(0, -1))},
+		{"b", Float64Value(1)},
+		{"b2", Float64Value(float32(0.1))},
+		{"b3", Float64Value(float32(0.1))},
+		{"b4", Float64Value(float32(0.1) * 3)},
+		{"b5", inf},
+		{"b6", inf},
+		{"c", (*LongDoubleValue)(big.NewFloat(1))},
+		{"c2", (*LongDoubleValue)(big.NewFloat(0.5))},
+		{"d", Int64Value(1)},
+		{"d2", Int64Value(-1)},
+		{"d3", Int64Value(0)},
+		{"d4", Unknown}, // Out of range, undefined behavior.
+		{"d5", UInt64Value(3e9)},
+		{"d6", Unknown}, // Out of range, undefined behavior.
+		{"d7", UInt64Value(0)},
+		{"d8", Int64Value(127)},
+		{"d9", Unknown}, // Out of range, undefined behavior.
+		{"d10", Unknown},
+		{"d11", Int64Value(math.MinInt64)},
+		{"d12", Unknown},
+		{"d13", Int64Value(1)},
+		{"d14", Unknown},
+		{"d15", Unknown},
+		{"e", Int64Value(0)},
+		{"e2", Int64Value(1)},
+		{"e3", Int64Value(1)},
+		{"e4", Int64Value(1)},
+		{"e5", Int64Value(0)},
+		{"e6", Int64Value(1)},
+		{"e7", Int64Value(1)},
+		{"e8", Int64Value(0)},
+		{"e9", Int64Value(1)},
+		{"e10", Int64Value(0)},
+		{"f", Complex128Value(complex(math.Copysign(0, -1), -1.5))},
+		{"f2", Complex64Value(complex(float32(math.Copysign(0, -1)), -1.5))},
+		{"f3", Complex128Value(complex(0, 1.5))},
+	} {
+		g := testInitializer(ast, tc.nm).AssignmentExpression.Value()
+		switch e := tc.want.(type) {
+		case *LongDoubleValue:
+			if x, ok := g.(*LongDoubleValue); !ok || (*big.Float)(x).Cmp((*big.Float)(e)) != 0 {
+				t.Errorf("%s: got %v (%T), want %v", tc.nm, g, g, (*big.Float)(e))
+			}
+		case Float64Value:
+			if x, ok := g.(Float64Value); !ok || x != e || math.Signbit(float64(x)) != math.Signbit(float64(e)) {
+				t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+			}
+		case Complex128Value:
+			if x, ok := g.(Complex128Value); !ok || x != e || math.Signbit(real(x)) != math.Signbit(real(e)) {
+				t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+			}
+		case Complex64Value:
+			if x, ok := g.(Complex64Value); !ok || x != e || math.Signbit(float64(real(x))) != math.Signbit(float64(real(e))) {
+				t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+			}
+		default:
+			if g != e {
+				t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+			}
+		}
+	}
+	if len(ast.Scope.Nodes["x"]) == 0 {
+		t.Fatal("x: not found")
+	}
+
+	for _, v := range ast.Scope.Nodes["x"] {
+		if g, e := v.(*Declarator).Type().(*ArrayType).Len(), int64(2); g != e {
+			t.Errorf("x: len %v, want %v", g, e)
+		}
+	}
+}
+
+// ExpressionList.check set the purity of the loop variable instead of the head
+// of the list, so a comma expression was as pure as its first operand. ccgo
+// trusts Pure before it replaces an expression by its value and so dropped
+// the ++g in ((x, ++g), 1) ? 5 : 6. Found by csmith in ccgo.
+func TestCommaPurity(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+int x, y, g;
+int f(void);
+int a = (x, ++g);
+int a2 = (g, (f(), 0));
+int a3 = ((g, ++g), 0);
+int a4 = (++g, g);
+int a5 = (f(), 0);
+int b = (x, y);
+int b2 = ((x, y), 0);
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm   string
+		pure bool
+	}{
+		{"a", false},
+		{"a2", false},
+		{"a3", false},
+		{"a4", false},
+		{"a5", false},
+		{"b", true},
+		{"b2", true},
+	} {
+		in := testInitializer(ast, tc.nm)
+		if in == nil {
+			t.Errorf("%s: not found", tc.nm)
+			continue
+		}
+
+		var lists int
+		testWalk(in.AssignmentExpression, func(n Node) {
+			if x, ok := n.(*ExpressionList); ok && lists == 0 {
+				lists++
+				if g, e := x.Pure(), tc.pure; g != e {
+					t.Errorf("%s: list pure %v, want %v", tc.nm, g, e)
+				}
+			}
+		})
+		if lists == 0 {
+			t.Errorf("%s: no expression list", tc.nm)
+		}
+		if g, e := in.AssignmentExpression.Pure(), tc.pure; g != e {
+			t.Errorf("%s: pure %v, want %v", tc.nm, g, e)
+		}
+	}
+}
+
+// Constant pointer arithmetic did not scale the integer operand by the size of
+// the pointed to type, so (int*)0 + 1 was 1 and (int*)8 - (int*)0 was 8.
+func TestPointerArithmetic(t *testing.T) {
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+long long p = (long long)((int*)0 + 1);
+long long p2 = (long long)((int*)8 - 1);
+long long p3 = (long long)(1 + (int*)0);
+long long p4 = (long long)((int*)0 + 1u);
+long long p5 = (long long)((double*)16 + -1);
+long long p6 = (long long)((int(*)[3])0 + 2);
+long long p7 = (long long)((char*)0 + 3);
+long long p8 = (long long)((void*)0 + 3);
+long long d = (int*)8 - (int*)0;
+long long d2 = (int*)0 - (int*)8;
+long long d3 = (int*)6 - (int*)0;
+long long d4 = (char*)6 - (char*)0;
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm   string
+		want Value
+	}{
+		{"p", Int64Value(4)},
+		{"p2", Int64Value(4)},
+		{"p3", Int64Value(4)},
+		{"p4", Int64Value(4)},
+		{"p5", Int64Value(8)},
+		{"p6", Int64Value(24)},
+		{"p7", Int64Value(3)},
+		{"p8", Int64Value(3)}, // gcc extension, sizeof(void) is 1.
+		{"d", Int64Value(2)},
+		{"d2", Int64Value(-2)},
+		{"d3", Unknown}, // Not a whole number of elements, undefined behavior.
+		{"d4", Int64Value(6)},
+	} {
+		if g, e := testInitializer(ast, tc.nm).Value(), tc.want; g != e {
+			t.Errorf("%s: got %v (%T), want %v (%T)", tc.nm, g, g, e, e)
+		}
+	}
+}
+
+// TestC23 covers the C23 spellings of keywords and the identifiers C23 turned
+// into keywords. gcc 15 defaults to C23, and its glibc's <assert.h>,
+// <stdbool.h> and <stddef.h> then define no macro for them any more, which made
+// the loong64 builder fail on testdata/bug/10.c (static_assert) with gcc 15.3.
+func TestC23(t *testing.T) {
+	cfg, err := NewConfig(runtime.GOOS, runtime.GOARCH, "-std=gnu23")
+	if err != nil {
+		t.Skipf("no C23 host compiler: %v", err)
+	}
+
+	if v := stdcVersion(cfg.Predefined); v < 202000 {
+		t.Skipf("__STDC_VERSION__ %v", v)
+	}
+
+	if _, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "testdata/bug/10.c"},
+	}); err != nil {
+		t.Error(err)
+	}
+
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "c23.c", Value: `
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+static_assert(sizeof(int) >= 2, "int");
+alignas(16) static int a[4];
+static thread_local int tl;
+bool b = true, c = false;
+int *p = nullptr;
+int n = alignof(int);
+int m = sizeof(a);
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		kind Kind
+	}{
+		{"b", Bool},
+		{"c", Bool},
+		{"p", Ptr},
+	} {
+		d, ok := ast.Scope.Nodes[tc.name][0].(*Declarator)
+		if !ok {
+			t.Errorf("%s: not found", tc.name)
+			continue
+		}
+
+		if g, e := d.Type().Kind(), tc.kind; g != e {
+			t.Errorf("%s: kind %v, want %v", tc.name, g, e)
+		}
+	}
+
+	// Below C23 the identifiers stay identifiers.
+	cfg = defaultCfg()
+	if stdcVersion(cfg.Predefined) >= 202000 {
+		return
+	}
+
+	if _, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "c17.c", Value: "int bool = 1, true = 1, false = 0, nullptr = 0, alignas = 2, static_assert = 3;\n"},
+	}); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestIssue166(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/166
+	const src = `
+enum opcode { PROTO = '\x80', FRAME = '\x95', FILL = '\xff', OCT = '\200', A = 'a', W = L'\x80', W2 = L'\xff' };
+#if '\x80' < 0
+int negative;
+#else
+int positive;
+#endif
+`
+	for _, signedChar := range []bool{true, false} {
+		cfg := defaultCfg()
+		abi := *cfg.ABI
+		abi.SignedChar = signedChar
+		cfg.ABI = &abi
+		ast, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: src},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		exp := map[string]int64{"PROTO": 128, "FRAME": 149, "FILL": 255, "OCT": 128, "A": 'a', "W": 128, "W2": 255}
+		declared, undeclared := "positive", "negative"
+		if signedChar {
+			exp["PROTO"], exp["FRAME"], exp["FILL"], exp["OCT"] = -128, -107, -1, -128
+			declared, undeclared = "negative", "positive"
+		}
+		for nm, e := range exp {
+			en, ok := ast.Scope.Nodes[nm][0].(*Enumerator)
+			if !ok {
+				t.Errorf("signed char %v: %s: not an enumerator", signedChar, nm)
+				continue
+			}
+
+			var g int64
+			switch x := en.Value().(type) {
+			case Int64Value:
+				g = int64(x)
+			case UInt64Value:
+				g = int64(x)
+			default:
+				t.Errorf("signed char %v: %s: unexpected value %T(%[3]v)", signedChar, nm, x)
+				continue
+			}
+			if g != e {
+				t.Errorf("signed char %v: %s: got %v, want %v", signedChar, nm, g, e)
+			}
+		}
+		if _, ok := ast.Scope.Nodes[declared]; !ok {
+			t.Errorf("signed char %v: #if '\\x80' < 0 evaluated wrongly, %q not declared", signedChar, declared)
+		}
+		if _, ok := ast.Scope.Nodes[undeclared]; ok {
+			t.Errorf("signed char %v: #if '\\x80' < 0 evaluated wrongly, %q declared", signedChar, undeclared)
+		}
+	}
+}
+
+// testInitializer returns the initializer of the file scope object nm.
+func testInitializer(ast *AST, nm string) *Initializer {
+	for tu := ast.TranslationUnit; tu != nil; tu = tu.TranslationUnit {
+		ed := tu.ExternalDeclaration
+		if ed == nil || ed.Case != ExternalDeclarationDecl {
+			continue
+		}
+
+		for l := ed.Declaration.InitDeclaratorList; l != nil; l = l.InitDeclaratorList {
+			if id := l.InitDeclarator; id.Initializer != nil && id.Declarator.Name() == nm {
+				return id.Initializer
+			}
+		}
+	}
+	return nil
+}
+
+// testInitializerLeaves returns "offset:value:len" for every expression
+// initializer within n, in source order.
+func testInitializerLeaves(n *Initializer, a *[]string) {
+	switch n.Case {
+	case InitializerExpr:
+		var v interface{} = n.Value()
+		switch x := v.(type) {
+		case Int64Value:
+			v = int64(x)
+		case UInt64Value:
+			v = uint64(x)
+		}
+		*a = append(*a, fmt.Sprintf("%d:%v:%d", n.Offset(), v, n.Len()))
+	case InitializerInitList:
+		for l := n.InitializerList; l != nil; l = l.InitializerList {
+			testInitializerLeaves(l.Initializer, a)
+		}
+	}
+}
+
+func TestIssue167(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/167
+	const src = `
+typedef unsigned short uint16_t;
+typedef unsigned char uint8_t;
+typedef union { uint16_t cache; struct { uint8_t code; uint8_t arg; } op; } CodeUnit;
+static const CodeUnit insts[] = {
+	{ .op.code = 1, .op.arg = 2 },
+	{ .op.code = 3, .op.arg = 4 },
+};
+struct S { CodeUnit u; int i; };
+struct S s = { .u.op.code = 5, .u.op.arg = 6, .i = 7 };
+CodeUnit b[] = { [0].op.code = 1, [1].op.arg = 2 };
+int a2[][3] = { [1][2] = 5 };
+int r[] = { [0 ... 3] = 1, 2 };
+int r2[8] = { [0 ... 3] = 1, 2 };
+struct R3 { int x; } r3[8] = { [1][2] = 1 };
+`
+	cfg := defaultCfg()
+	_, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	})
+	if err == nil {
+		t.Fatal("expected an error for r3")
+	}
+
+	if !strings.Contains(err.Error(), "test.c:15:") || !strings.Contains(err.Error(), "expected field name") || strings.Contains(err.Error(), "MISSING") {
+		t.Fatal(err)
+	}
+
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: strings.Replace(src, "struct R3 { int x; } r3[8] = { [1][2] = 1 };\n", "", 1)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm     string
+		leaves string
+		len    int64
+	}{
+		{"insts", "0:1:1 1:2:1 2:3:1 3:4:1", 2},
+		{"s", "0:5:1 1:6:1 4:7:1", -1},
+		{"b", "0:1:1 3:2:1", 2},
+		{"a2", "20:5:1", 2},
+		{"r", "0:1:4 16:2:1", 5},
+		{"r2", "0:1:4 16:2:1", 8},
+	} {
+		in := testInitializer(ast, tc.nm)
+		if in == nil {
+			t.Errorf("%s: initializer not found", tc.nm)
+			continue
+		}
+
+		var a []string
+		testInitializerLeaves(in, &a)
+		if g, e := strings.Join(a, " "), tc.leaves; g != e {
+			t.Errorf("%s: got leaves %q, want %q", tc.nm, g, e)
+		}
+		if tc.len < 0 {
+			continue
+		}
+
+		x, ok := ast.Scope.Nodes[tc.nm][0].(*Declarator).Type().(*ArrayType)
+		if !ok {
+			t.Errorf("%s: not an array", tc.nm)
+			continue
+		}
+
+		if g, e := x.Len(), tc.len; g != e {
+			t.Errorf("%s: got len %v, want %v", tc.nm, g, e)
+		}
+	}
+
+	// Both items of a union initializer list select the same member.
+	for i, l := 0, testInitializer(ast, "insts").InitializerList; l != nil; i, l = i+1, l.InitializerList {
+		for m := l.Initializer.InitializerList; m != nil; m = m.InitializerList {
+			if f := m.UnionField(); f == nil || f.Name() != "op" {
+				t.Errorf("insts[%d]: union field %v, want op", i, f)
+			}
+		}
+	}
+}
+
+func TestIssue168(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/168
+	const src = `
+struct H { int a; };
+static struct H handler_info[64];
+static struct H handler_info[] = { {1}, {2}, {0} };
+int n = sizeof handler_info / sizeof handler_info[0];
+extern int x[];
+int x[] = { 1, 2, 3 };
+`
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm  string
+		len int64
+	}{
+		{"handler_info", 64},
+		{"x", 3},
+	} {
+		for i, v := range ast.Scope.Nodes[tc.nm] {
+			x, ok := v.(*Declarator).Type().(*ArrayType)
+			if !ok {
+				t.Errorf("%s#%d: not an array", tc.nm, i)
+				continue
+			}
+
+			if g, e := x.Len(), tc.len; g != e {
+				t.Errorf("%s#%d: len %v, want %v", tc.nm, i, g, e)
+			}
+		}
+	}
+	if in := testInitializer(ast, "handler_info"); in == nil || in.Type().(*ArrayType).Len() != 64 {
+		t.Errorf("handler_info: initializer type %v, want array of 64", in.Type())
+	}
+	if g, e := testInitializer(ast, "n").Value(), Int64Value(64); g != e {
+		t.Errorf("n: %v, want %v", g, e)
+	}
+
+	// The reverse order is a conflict, as in gcc and clang.
+	if _, err = Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: "struct H { int a; };\nstatic struct H b[] = { {1} };\nstatic struct H b[64];\n"},
+	}); err == nil || !strings.Contains(err.Error(), "conflicting types") {
+		t.Fatalf("got %v, want a conflicting types error", err)
+	}
+}
+
+// testWalk calls f for every node reachable from n via exported fields.
+func testWalk(n Node, f func(Node)) {
+	seen := map[uintptr]bool{}
+	var walk func(v reflect.Value)
+	walk = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Ptr:
+			if v.IsNil() || v.Elem().Kind() != reflect.Struct {
+				return
+			}
+
+			if p := v.Pointer(); seen[p] {
+				return
+			} else {
+				seen[p] = true
+			}
+			if x, ok := v.Interface().(Node); ok {
+				f(x)
+			}
+			walk(v.Elem())
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(v.Elem())
+			}
+		case reflect.Struct:
+			t := v.Type()
+			for i := 0; i < v.NumField(); i++ {
+				if t.Field(i).PkgPath == "" {
+					walk(v.Field(i))
+				}
+			}
+		}
+	}
+	walk(reflect.ValueOf(n))
+}
+
+func TestIssue169(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/169
+	const src = `
+typedef int T;
+int f(int x) {
+	switch (x) {
+	case 1:
+		int y = 2;
+		return y;
+	case 2: T z = 3; return z;
+	case 3: static const T w = 4; return w;
+	case 4: a: b: T v = 5; return v;
+	default:
+		T *p = 0; return !p;
+	}
+	l: __attribute__((unused)) int q = 6;
+	m:
+	return q;
+}
+`
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	testWalk(ast.TranslationUnit, func(n Node) {
+		ls, ok := n.(*LabeledStatement)
+		if !ok {
+			return
+		}
+
+		var nm string
+		switch ls.Case {
+		case LabeledStatementLabel:
+			nm = ls.Token.SrcStr()
+		case LabeledStatementCaseLabel:
+			nm = "case " + NodeSource(ls.ConstantExpression)
+		case LabeledStatementDefault:
+			nm = "default"
+		}
+		s := ls.Statement
+		switch {
+		case s == nil:
+			got[nm] = "nil"
+		case s.Case == StatementExpr && s.ExpressionStatement.ExpressionList == nil && s.ExpressionStatement.Token.Ch == ';':
+			got[nm] = "empty"
+		default:
+			got[nm] = s.Case.String()
+		}
+	})
+	exp := map[string]string{
+		"case 1":  "empty",
+		"case 2":  "empty",
+		"case 3":  "empty",
+		"case 4":  "StatementLabeled",
+		"a":       "StatementLabeled",
+		"b":       "empty",
+		"default": "empty",
+		"l":       "empty",
+		"m":       "StatementJump",
+	}
+	if g, e := fmt.Sprint(got), fmt.Sprint(exp); g != e {
+		t.Errorf("got %v\nwant %v", g, e)
+	}
+
+	// A declaration is not a statement; the extension only applies where a
+	// block item is expected.
+	if _, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: "int g(int x) { if (x) l: int y = 1; return 0; }\n"},
+	}); err == nil || !strings.Contains(err.Error(), "expected statement") {
+		t.Fatalf("got %v, want an expected statement error", err)
+	}
+}
+
+func TestIssue170(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/170
+	if runtime.GOOS == "windows" {
+		t.Skip("fstest.MapFS uses slash separated paths")
+	}
+
+	cfg := defaultCfg()
+	cfg.FS = fstest.MapFS{
+		"a/limits.h": &fstest.MapFile{Data: []byte(`
+#define A_LIMITS 1
+#if __has_include_next(<limits.h>)
+#include_next <limits.h>
+#endif
+#if __has_include_next("limits.h")
+#define NEXT_QUOTED 1
+#endif
+#if __has_include_next(<nonexistent.h>)
+#define NEXT_NONEXISTENT 1
+#endif
+#if __has_include(<limits.h>)
+#define HAS_LIMITS 1
+#endif
+`)},
+		"b/limits.h": &fstest.MapFile{Data: []byte("#define B_LIMITS 1\n")},
+	}
+	cfg.IncludePaths = nil
+	cfg.SysIncludePaths = []string{"a", "b"}
+	ast, err := Parse(cfg, []Source{{Name: "test.c", Value: `
+#include <limits.h>
+#ifdef __has_include
+#define DEFINED0 1
+#endif
+#ifdef __has_include_next
+#define DEFINED1 1
+#endif
+#if defined(__has_include_next) && __has_include_next(<limits.h>)
+#define DEFINED2 1
+#endif
+int __predefined_declarator;
+`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, nm := range []string{"A_LIMITS", "B_LIMITS", "HAS_LIMITS", "NEXT_QUOTED", "DEFINED0", "DEFINED1", "DEFINED2"} {
+		if ast.Macros[nm] == nil {
+			t.Errorf("%s not defined", nm)
+		}
+	}
+	if ast.Macros["NEXT_NONEXISTENT"] != nil {
+		t.Error("NEXT_NONEXISTENT defined")
+	}
+}
+
+func TestIssue171(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/171
+
+	// __fp16 is accepted as a spelling of _Float16 and __builtin_bit_cast is
+	// available, here checked with the windows/amd64 ABI, which knows the half
+	// precision types. Their sizes and alignments are those reported by
+	// x86_64-w64-mingw32-gcc and llvm-mingw clang; _Complex _Float16 is 2
+	// aligned, not 4.
+	cfg := defaultCfg()
+	abi, err := NewABI("windows", "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.ABI = abi
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: `
+__fp16 h;
+_Float16 g;
+_Float16 _Complex c;
+__bf16 b;
+typedef float v4sf __attribute__((__vector_size__(16)));
+int f(float x, v4sf v) {
+	unsigned u = __builtin_bit_cast(unsigned, x);
+	float y = __builtin_bit_cast(float, u + 1);
+	typedef unsigned char v16qi __attribute__((__vector_size__(16)));
+	v16qi w = __builtin_bit_cast(v16qi, v);
+	return u + y + w[0];
+}
+`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		nm    string
+		kind  Kind
+		size  int64
+		align int
+	}{
+		{"h", Float16, 2, 2},
+		{"g", Float16, 2, 2},
+		{"c", ComplexFloat16, 4, 2},
+		{"b", BFloat16, 2, 2},
+	} {
+		typ := ast.Scope.Nodes[tc.nm][0].(*Declarator).Type()
+		if g, e := typ.Kind(), tc.kind; g != e {
+			t.Errorf("%s: kind %v, want %v", tc.nm, g, e)
+		}
+		if g, e := typ.Size(), tc.size; g != e {
+			t.Errorf("%s: size %v, want %v", tc.nm, g, e)
+		}
+		if g, e := typ.Align(), tc.align; g != e {
+			t.Errorf("%s: align %v, want %v", tc.nm, g, e)
+		}
+		if g, e := typ.FieldAlign(), tc.align; g != e {
+			t.Errorf("%s: field align %v, want %v", tc.nm, g, e)
+		}
+	}
+	var types []string
+	testWalk(ast.TranslationUnit, func(n Node) {
+		x, ok := n.(*InitDeclarator)
+		if !ok || x.Initializer == nil || x.Position().Filename != "test.c" || strings.HasPrefix(x.Declarator.Name(), "__") {
+			return
+		}
+
+		typ := x.Initializer.Type()
+		if v, ok := typ.(*PredefinedType); ok && v.VectorSize() > 0 {
+			types = append(types, fmt.Sprintf("%s: vector %d of %s", x.Declarator.Name(), v.VectorSize(), typ))
+			return
+		}
+
+		types = append(types, x.Declarator.Name()+": "+typ.String())
+	})
+	if g, e := strings.Join(types, ", "), "u: unsigned, y: float, w: vector 16 of unsigned char"; g != e {
+		t.Errorf("__builtin_bit_cast result types\n got %q\nwant %q", g, e)
+	}
+
+	// The llvm-mingw headers, when the cross compilers are available.
+	for _, tc := range []struct {
+		cc, goarch, src string
+	}{
+		{"x86_64-w64-mingw32-clang", "amd64", "#include <limits.h>\n#include <intrin.h>\n#include <immintrin.h>\n#include <windows.h>\n#include <winsock2.h>\n#include <ws2tcpip.h>\n"},
+		{"i686-w64-mingw32-clang", "386", "#include <limits.h>\n#include <intrin.h>\n#include <immintrin.h>\n#include <windows.h>\n"},
+		{"aarch64-w64-mingw32-clang", "arm64", "#include <limits.h>\n#include <intrin.h>\n#include <windows.h>\n#include <winsock2.h>\n#include <ws2tcpip.h>\n"},
+	} {
+		if _, err := exec.LookPath(tc.cc); err != nil {
+			t.Logf("windows/%s: %v", tc.goarch, err)
+			continue
+		}
+
+		t.Setenv("CC", tc.cc)
+		cfg, err := NewConfig("windows", tc.goarch)
+		if err != nil {
+			t.Errorf("windows/%s: %v", tc.goarch, err)
+			continue
+		}
+
+		ast, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: tc.src + "int main(void) { return 0; }\n"},
+		})
+		if err != nil {
+			t.Errorf("windows/%s: %v", tc.goarch, err)
+			continue
+		}
+
+		// mingw's <limits.h>, reached via clang's __has_include_next, defines it.
+		if ast.Macros["PATH_MAX"] == nil {
+			t.Errorf("windows/%s: PATH_MAX not defined", tc.goarch)
+		}
+	}
+}
+
+func TestIssue172(t *testing.T) {
+	// https://gitlab.com/cznic/cc/-/issues/172
+	//
+	// [0]6.7.9/17: Initialization then continues forward in order, beginning
+	// with the next subobject after that described by the designator.
+	const src = `
+struct In { int y, z; };
+struct PQ { int p, q; };
+struct In3 { struct PQ pq; int r; };
+struct S1 { int x; struct In in; int w; } s1 = { .in.y = 1, 2 };
+struct S2 { int x; struct In in; int w; } s2 = { .in.y = 1, 2, 3 };
+struct S3 { int x; struct In3 in; int w; } s3 = { .in.pq.p = 1, 2, 3, 4 };
+int a4[2][3] = { [0][1] = 5, 6, 7, 8 };
+struct S5 { int a[2][2]; int w; } s5 = { .a[0][1] = 1, 2, 3, 4 };
+struct S6 { struct In in[2]; int w; } s6 = { .in[0].z = 1, 2, 3, 4 };
+union U7 { unsigned short cache; struct { unsigned char code, arg; } op; };
+union U7 u7 = { .op.code = 1, 2 };
+struct S8 { union U7 u; int w; } s8 = { .u.op.arg = 1, 2 };
+int a9[6] = { [1 ... 2] = 7, 8 };
+struct S10 { int x; struct In in; struct PQ pq; int w; } s10 = { .in.y = 1, 2, 3, 4, 5 };
+struct S11 { int x; struct { int m, n; }; int w; } s11 = { .m = 1, 2, 3 };
+struct S12 { int x; struct In in; int w; } s12 = { .in.y = 1, .in.z = 2, 3 };
+struct S13 { struct In in; int w; } s13[2] = { [0].in.y = 1, 2, 3, 4, 5 };
+struct S14 { int x; struct In in; int w; } s14 = { .in.z = 1, 2 };
+struct XY { int x, y; };
+struct XY s15[2] = { [0 ... 1].x = 1, 2 };
+int a16[2][2] = { [0] = 1, 2, [1] = 3, 4 };
+struct S17 { int x; struct { int m, n; }; int w; } s17 = { .n = 1, 2, .m = 3, 4 };
+struct S18 { int x; union { int u; struct { char c1, c2; } cs; }; int w; } s18 = { .cs.c1 = 1, 2, 3 };
+`
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verified against gcc 13: offset:value:len of the initializers, in
+	// source order.
+	for _, tc := range []struct{ nm, leaves string }{
+		{"s1", "4:1:1 8:2:1"},
+		{"s2", "4:1:1 8:2:1 12:3:1"},
+		{"s3", "4:1:1 8:2:1 12:3:1 16:4:1"},
+		{"a4", "4:5:1 8:6:1 12:7:1 16:8:1"},
+		{"s5", "4:1:1 8:2:1 12:3:1 16:4:1"},
+		{"s6", "4:1:1 8:2:1 12:3:1 16:4:1"},
+		{"u7", "0:1:1 1:2:1"},
+		{"s8", "1:1:1 4:2:1"},
+		{"a9", "4:7:2 12:8:1"},
+		{"s10", "4:1:1 8:2:1 12:3:1 16:4:1 20:5:1"},
+		{"s11", "4:1:1 8:2:1 12:3:1"},
+		{"s12", "4:1:1 8:2:1 12:3:1"},
+		{"s13", "0:1:1 4:2:1 8:3:1 12:4:1 16:5:1"},
+		{"s14", "8:1:1 12:2:1"},
+		{"s15", "0:1:2 12:2:1"},
+		{"a16", "0:1:1 4:2:1 8:3:1 12:4:1"},
+		{"s17", "8:1:1 12:2:1 4:3:1 8:4:1"},
+		{"s18", "4:1:1 5:2:1 8:3:1"},
+	} {
+		in := testInitializer(ast, tc.nm)
+		if in == nil {
+			t.Errorf("%s: initializer not found", tc.nm)
+			continue
+		}
+
+		var a []string
+		testInitializerLeaves(in, &a)
+		if g, e := strings.Join(a, " "), tc.leaves; g != e {
+			t.Errorf("%s: got leaves %q, want %q", tc.nm, g, e)
+		}
+	}
+
+	for _, tc := range []struct{ src, err string }{
+		{"struct { int a[4]; } e1 = { .a[0 ... 2] = 1 };", "outermost array"},
+		{"int e2[2][2] = { [0 ... 1][1] = 5 };", "nested ranged"},
+		{"struct { int a; struct { int b; } e; } e3 = { .b = 1 };", "has no member b"},
+		{"struct { int x; struct { int y; } in; } e4 = { .in.y = 1, 2, 3 };", "too many items"},
+	} {
+		_, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: tc.src + "\n"},
+		})
+		if err == nil || !strings.Contains(err.Error(), tc.err) {
+			t.Errorf("%s: got %v, want an error containing %q", tc.src, err, tc.err)
+		}
+	}
+}
+
+func TestLabelAttributes(t *testing.T) {
+	// GNU attribute specifiers after the colon of a label bind to the label
+	// (gcc, clang). What follows them is a statement or, where a block item
+	// is expected, a declaration. libX11 src/xcms/LRGB.c has
+	//
+	//	FreeBlueTblElements: _X_UNUSED
+	//	    Xfree(pScreenData->pBlueTbl->pBase);
+	//
+	// with _X_UNUSED being __attribute__((__unused__)).
+	const src = `
+typedef int T;
+void g(int *);
+int f(int *p) {
+	if (!p) goto a;
+	if (p) m: __attribute__((unused)) g(p);
+a: __attribute__((unused)) g(p);
+b: __attribute__((unused)) __attribute__((cold)) g(p);
+c: __attribute__((unused));
+d: __attribute__((unused)) T *q = p;
+e: __attribute__((unused)) __attribute__((cold)) static T *r = 0;
+	r = q;
+	return *r;
+}
+`
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	declared := map[string]bool{}
+	testWalk(ast.TranslationUnit, func(n Node) {
+		switch x := n.(type) {
+		case *Declarator:
+			declared[x.Name()] = true
+		case *LabeledStatement:
+			nm := x.Token.SrcStr()
+			s := x.Statement
+			switch {
+			case s == nil:
+				got[nm] = "nil"
+			case s.Case != StatementExpr:
+				got[nm] = s.Case.String()
+			case s.ExpressionStatement.ExpressionList == nil:
+				got[nm] = "empty"
+			default:
+				got[nm] = NodeSource(s.ExpressionStatement.ExpressionList)
+			}
+		}
+	})
+	exp := map[string]string{
+		"m": "g(p)",
+		"a": "g(p)",
+		"b": "g(p)",
+		"c": "empty",
+		"d": "empty",
+		"e": "empty",
+	}
+	if g, e := fmt.Sprint(got), fmt.Sprint(exp); g != e {
+		t.Errorf("got %v\nwant %v", g, e)
+	}
+	for _, nm := range []string{"q", "r"} {
+		if !declared[nm] {
+			t.Errorf("declaration of %s not found", nm)
+		}
+	}
+
+	// Where a statement is required, label attributes cannot be followed by
+	// a declaration.
+	if _, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: "int g(int x) { if (x) l: __attribute__((unused)) int y = 1; return 0; }\n"},
+	}); err == nil {
+		t.Fatal("got nil, want an error")
+	}
+}
+
+// TestHasBuiltin checks that Config.HasBuiltin decides __has_builtin, and that
+// without it every __builtin_ name is reported as present.
+func TestHasBuiltin(t *testing.T) {
+	const src = `
+#if __has_builtin(__builtin_ok)
+ok_yes
+#else
+ok_no
+#endif
+#if __has_builtin(__builtin_elementwise_sqrt)
+esqrt_yes
+#else
+esqrt_no
+#endif
+#if __has_builtin(plain)
+plain_yes
+#else
+plain_no
+#endif
+`
+	for _, test := range []struct {
+		hook func(string) bool
+		want []string
+	}{
+		{nil, []string{"ok_yes", "esqrt_yes", "plain_no"}},
+		{func(nm string) bool { return nm == "__builtin_ok" || nm == "plain" }, []string{"ok_yes", "esqrt_no", "plain_yes"}},
+	} {
+		cfg := defaultCfg()
+		cfg.HasBuiltin = test.hook
+		var b strings.Builder
+		if err := Preprocess(cfg, []Source{{Name: "test.c", Value: src}}, &b); err != nil {
+			t.Fatal(err)
+		}
+
+		got := strings.Fields(b.String())
+		if g, e := strings.Join(got, " "), strings.Join(test.want, " "); g != e {
+			t.Errorf("hook set %v: got %q, want %q", test.hook != nil, g, e)
+		}
+	}
+}
+
+// TestAtomicParameter checks that _Atomic, a type qualifier (C11 6.7.3) like
+// const and volatile, is accepted in a parameter declaration, named or not,
+// in its qualifier and in its specifier form, and that the declarator records
+// it. sqlite-multiwriter has
+//
+//	static inline int mw_knob_int (_Atomic int *cache, const char *name, int dflt)
+//
+// which was rejected with "invalid specifier(s) for parameter".
+func TestAtomicParameter(t *testing.T) {
+	const src = `
+int f(_Atomic int *p, _Atomic(long) *q, _Atomic int x);
+int g(_Atomic int *, _Atomic(long) *, _Atomic int);
+int f(_Atomic int *p, _Atomic(long) *q, _Atomic int x) { return *p + *q + x; }
+int h(const int *r) { return *r; }
+`
+	cfg := defaultCfg()
+	ast, err := Translate(cfg, []Source{
+		{Name: "<predefined>", Value: cfg.Predefined},
+		{Name: "<builtin>", Value: Builtin},
+		{Name: "test.c", Value: src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	testWalk(ast.TranslationUnit, func(n Node) {
+		if x, ok := n.(*ParameterDeclaration); ok && x.Declarator != nil && x.Position().Filename == "test.c" {
+			got[x.Declarator.Name()] = x.Declarator.IsAtomic()
+		}
+	})
+	exp := map[string]bool{"p": true, "q": true, "x": true, "r": false}
+	if g, e := fmt.Sprint(got), fmt.Sprint(exp); g != e {
+		t.Errorf("got %v\nwant %v", g, e)
+	}
+
+	// Storage classes, _Thread_local and _Alignas stay invalid there.
+	for _, s := range []string{
+		"int f(static int x);",
+		"int f(extern int x);",
+		"int f(auto int x);",
+		"int f(_Thread_local int x);",
+		"int f(_Alignas(8) int x);",
+		"int f(static int);",
+		"int f(_Thread_local int);",
+	} {
+		if _, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: s + "\n"},
+		}); err == nil {
+			t.Errorf("%s: got nil, want an error", s)
+		}
+	}
+}
+
+// TestAlignmentRequests checks struct and union layouts that depend on
+// _Atomic, _Alignas and the aligned attribute against the values gcc 14.2
+// computes for i386 and x86_64. Before, a member's _Alignas and a trailing
+// aligned attribute were ignored, _Alignas(N) used the alignment of N's type,
+// an aligned attribute before a struct tag was lost, one after the closing
+// brace did not round the size up, and _Atomic did not raise the alignment.
+// sqlite-multiwriter (cznic/sqlite#260) shares a header of _Atomic uint64_t
+// members after _Atomic int32_t ones between processes, which on 386 ended up
+// 4-aligned, laid out unlike gcc and unusable for 64-bit atomics.
+func TestAlignmentRequests(t *testing.T) {
+	const src = `
+#define OFF(t, f, v) _Static_assert(__builtin_offsetof(t, f) == v, #t "." #f)
+#define ALIGN(t, v) _Static_assert(_Alignof(t) == v, "_Alignof(" #t ")")
+#define SIZE(t, v) _Static_assert(sizeof(t) == v, "sizeof(" #t ")")
+
+typedef _Atomic unsigned long long atomic_ull;
+typedef unsigned long long u64a __attribute__((aligned(8)));
+struct p2 { int a, b; };
+struct p3 { char c[3]; };
+struct p12 { int a, b, c; };
+
+// _Atomic aligns a type of 1, 2, 4 or 8 bytes to its size.
+ALIGN(long long, V(4, 8));
+ALIGN(_Atomic long long, 8);
+ALIGN(_Atomic(long long), 8);
+ALIGN(atomic_ull, 8);
+ALIGN(_Atomic double, 8);
+ALIGN(_Atomic struct p2, 8);
+ALIGN(_Atomic struct p3, 1);
+SIZE(_Atomic struct p3, 3);
+ALIGN(_Atomic struct p12, 4);
+ALIGN(_Atomic char, 1);
+ALIGN(_Atomic short, 2);
+ALIGN(_Atomic long long *, V(4, 8));
+struct a { unsigned long long pos; unsigned seg; _Atomic unsigned long long end; };
+OFF(struct a, end, 16); ALIGN(struct a, 8); SIZE(struct a, 24);
+struct i { unsigned seg; atomic_ull x; };
+OFF(struct i, x, 8); ALIGN(struct i, 8);
+struct j { unsigned seg; _Atomic(unsigned long long) x; };
+OFF(struct j, x, 8);
+struct q { int i; _Atomic double x; };
+OFF(struct q, x, 8);
+struct v { int i; _Atomic long long *p; long long y; };
+OFF(struct v, y, V(8, 16)); SIZE(struct v, V(16, 24));
+
+// _Alignas applies to every declarator of a member declaration, an aligned
+// attribute after the last declarator to that one only.
+struct b { unsigned long long pos; unsigned seg; _Alignas(8) unsigned long long end; };
+OFF(struct b, end, 16); ALIGN(struct b, 8); SIZE(struct b, 24);
+struct c { unsigned long long pos; unsigned seg; unsigned long long end __attribute__((aligned(8))); };
+OFF(struct c, end, 16); ALIGN(struct c, 8); SIZE(struct c, 24);
+struct d { unsigned seg; _Alignas(16) int x; };
+OFF(struct d, x, 16); ALIGN(struct d, 16); SIZE(struct d, 32);
+struct g { unsigned seg; u64a x; };
+OFF(struct g, x, 8); ALIGN(struct g, 8);
+struct k { unsigned seg; unsigned long long a, b __attribute__((aligned(16))); };
+OFF(struct k, a, V(4, 8)); OFF(struct k, b, 16); ALIGN(struct k, 16); SIZE(struct k, 32);
+struct m { unsigned seg; _Alignas(8) char c, d; };
+OFF(struct m, c, 8); OFF(struct m, d, 16); ALIGN(struct m, 8); SIZE(struct m, 24);
+struct y { char c; _Alignas(long long) char d; };
+OFF(struct y, d, V(4, 8));
+union w { int i; _Alignas(8) char c; };
+ALIGN(union w, 8); SIZE(union w, 8);
+
+// An aligned attribute of a struct or union definition, before the tag or
+// after the closing brace, raises the alignment and rounds the size up.
+struct __attribute__((aligned(8))) e { unsigned long long pos, end; unsigned seg; };
+ALIGN(struct e, 8); SIZE(struct e, 24);
+struct f { unsigned long long pos, end; unsigned seg; } __attribute__((aligned(8)));
+ALIGN(struct f, 8); SIZE(struct f, 24);
+union __attribute__((aligned(16))) x2 { int i; };
+ALIGN(union x2, 16); SIZE(union x2, 16);
+
+// The aligned attribute of a definition aligns that type only, not a pointer
+// another declarator of the declaration derives from it. mingw's winnt.h has
+// typedef struct DECLSPEC_ALIGN(16) _CONTEXT { ... } CONTEXT, *PCONTEXT.
+typedef struct __attribute__((aligned(16))) s1 { int a; } T1, *P1;
+typedef struct s2 { int a; } __attribute__((aligned(16))) T2, *P2;
+typedef struct __attribute__((aligned(16))) { int a; } T3, *P3;
+union __attribute__((aligned(16))) u4 { int a; } v4, *p4;
+struct e1 { P1 p; P2 q; P3 r; };
+ALIGN(T1, 16); SIZE(T1, 16); ALIGN(P1, V(4, 8));
+ALIGN(T2, 16); ALIGN(P2, V(4, 8));
+ALIGN(T3, 16); ALIGN(P3, V(4, 8));
+ALIGN(union u4, 16); SIZE(union u4, 16); _Static_assert(_Alignof(p4) == V(4, 8), "_Alignof(p4)");
+ALIGN(struct e1, V(4, 8)); SIZE(struct e1, V(12, 24));
+`
+	for _, tc := range []struct{ arch, v string }{
+		{"386", "#define V(i386, x86_64) i386\n"},
+		{"amd64", "#define V(i386, x86_64) x86_64\n"},
+	} {
+		arch := tc.arch
+		cfg, err := NewConfig("linux", arch, LongDouble64Flag("linux", arch))
+		if err != nil {
+			t.Fatalf("%s: NewConfig: %v", arch, err)
+		}
+
+		if _, err := Translate(cfg, []Source{
+			{Name: "<predefined>", Value: cfg.Predefined},
+			{Name: "<builtin>", Value: Builtin},
+			{Name: "test.c", Value: tc.v + src},
+		}); err != nil {
+			t.Errorf("linux/%s: %v", arch, err)
+		}
+	}
+}

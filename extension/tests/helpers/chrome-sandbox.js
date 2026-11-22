@@ -160,7 +160,7 @@ function createDevice(name, serverBase) {
 // runExtensionCode is async now: the bundle is an ES module.
 async function runExtensionCode(device) {
   globalThis.chrome = device.chrome
-  const src = path.join(__dirname, '..', '..', 'dist', 'background.test.mjs')
+  const src = path.join(__dirname, '..', '..', 'dist', 'background.js')
   const url = 'file:///' + src.split(path.sep).join('/') + '?t=' + Date.now()
   await import(url)
 }
