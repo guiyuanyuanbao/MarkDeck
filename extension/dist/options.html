@@ -134,7 +134,7 @@
         两套同步会互相覆盖、产生副本。建议在浏览器设置中关闭「书签」这一项的同步
         （密码、历史记录等其他数据不受影响），让 MarkDeck 独占书签同步。
       </p>
-      <button id="openSyncSettings" class="btn-primary">一键打开浏览器同步设置</button>
+      <button id="openSyncSettingsFromWarning" class="btn-primary">一键打开浏览器同步设置</button>
     </div>
 
     <div class="card">
@@ -152,6 +152,12 @@
         <button id="resyncBtn" class="btn-ghost">手动全量同步</button>
       </div>
       <div class="msg" id="pairMsg"></div>
+      <hr class="divider" />
+      <p class="hint" style="margin-bottom: 10px">
+        如果同时开启了浏览器自带的账号书签同步（Chrome Sync / Edge 同步），
+        建议关闭其中的「书签」一项，让 MarkDeck 独占书签同步，避免两套同步互相冲突。
+      </p>
+      <button id="openSyncSettings" class="btn-ghost">🌐 打开浏览器同步设置</button>
     </div>
 
     <div class="card">

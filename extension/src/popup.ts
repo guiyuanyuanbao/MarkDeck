@@ -22,13 +22,17 @@ async function checkConflict() {
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'conflictStatus' })
     if (resp.hasConflict) {
-      ;($('conflictBar') as HTMLElement).style.display = 'block'
-      ;($('openSyncSettings') as HTMLButtonElement).onclick = async () => {
-        await chrome.runtime.sendMessage({ type: 'openSyncSettings' })
-        window.close()
-      }
+      ($('conflictBar') as HTMLElement).style.display = 'block'
     }
   } catch { /* status endpoint unavailable */ }
+}
+
+// 常驻功能：一键打开浏览器自带的同步设置页（Chrome/Edge 自动区分）
+function initSyncSettingsButton() {
+  ($('openSyncSettings') as HTMLButtonElement).onclick = async () => {
+    await chrome.runtime.sendMessage({ type: 'openSyncSettings' })
+    window.close()
+  }
 }
 
 async function refreshStatus() {
@@ -106,5 +110,6 @@ refreshStatus()
 checkConflict()
 initSave()
 initSearch()
+initSyncSettingsButton()
 
 export {}
