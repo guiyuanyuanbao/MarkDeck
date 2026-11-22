@@ -90,6 +90,12 @@ func (e *testEnv) route(method, path string, w http.ResponseWriter, r *http.Requ
 		e.api.requireAny(e.api.handleCreate)(w, r)
 	case method == "GET" && path == "/api/bookmarks/tree":
 		e.api.requireAny(e.api.handleTree)(w, r)
+	case method == "POST" && path == "/api/auth/totp-setup":
+		e.api.requireSession(e.api.handleTOTPSetup)(w, r)
+	case method == "POST" && path == "/api/auth/totp-enable":
+		e.api.requireSession(e.api.handleTOTPEnable)(w, r)
+	case method == "GET" && path == "/api/auth/me":
+		e.api.requireSession(e.api.handleMe)(w, r)
 	default:
 		panic("route not mapped: " + method + " " + path)
 	}
