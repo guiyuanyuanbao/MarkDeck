@@ -123,7 +123,7 @@ export type RemoteAction =
   | { action: 'move'; id: string; parentId: string; index: number }
   | { action: 'ignore'; id: string; why: string }
 
-export function planRemoteActions(changes: NodeState[], localNodes: Map<string, NodeState>): RemoteAction[] {
+export function planRemoteActions(changes: NodeState[], localNodes: Map<string, NodeState>, mapToLocalId?: (serverId: string) => string | null): RemoteAction[] {
   const actions: RemoteAction[] = []
   // 同一节点在本批可能带多条变更（created+changed 各自 bump 了 revision）；
   // 只保留 revision 最大的一条，避免对同一 id 重复 create/update。
@@ -134,9 +134,12 @@ export function planRemoteActions(changes: NodeState[], localNodes: Map<string, 
   }
   for (const c of latest.values()) {
     if (c.deviceId === '__self__') continue // our own echo
-    const local = localNodes.get(c.id)
+    // 服务器 id 需要映射为本地 id 才能在 localNodes 里找到（initialImport 用 UUID 时，
+    // 本地 chrome id 与服务器 id 不同）
+    const localId = mapToLocalId ? mapToLocalId(c.id) : c.id
+    const local = localId ? localNodes.get(localId) : undefined
     if (c.deletedAt && c.deletedAt > 0) {
-      if (local && !local.deletedAt) actions.push({ action: 'remove', id: c.id })
+      if (local && !local.deletedAt) actions.push({ action: 'remove', id: localId! })
       else actions.push({ action: 'ignore', id: c.id, why: 'already absent' })
       continue
     }

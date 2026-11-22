@@ -280,6 +280,16 @@ async function main() {
             resultOf = dump
             break
           }
+          case 'debugLocalBar': {
+            const bar = device.store.nodes.get('1')
+            const walk = (n) => {
+              const out = { title: n.title, url: n.url || undefined, children: [] }
+              for (const c of n.children || []) out.children.push(walk(c))
+              return out
+            }
+            resultOf = bar ? walk(bar) : null
+            break
+          }
           case 'config': {
             const st = await device.chrome.storage.local.get('md_config')
             resultOf = st.md_config || null

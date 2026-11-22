@@ -20,6 +20,9 @@ const QUEUE_KEY = 'md_queue'
 const CONFIG_KEY = 'md_config'
 const LOCAL_KEY = 'md_local_nodes'
 const IDMAP_KEY = 'md_id_map' // { serverId: localId } — local ids differ per browser
+let idMapSyncCache: Record<string, string> = {}
+function idMapSync(): Record<string, string> { return idMapSyncCache }
+function setIdMapSync(m: Record<string, string>) { idMapSyncCache = m }
 const ALARM = 'md-poll'
 
 let applyingRemote = false
@@ -129,6 +132,7 @@ async function idMap(): Promise<Record<string, string>> {
   return (st[IDMAP_KEY] as Record<string, string>) || {}
 }
 async function setIdMap(map: Record<string, string>) {
+  idMapSyncCache = map // keep the sync mirror coherent with storage
   await chrome.storage.local.set({ [IDMAP_KEY]: map })
 }
 async function mapToServerId(localId: string): Promise<string> {
@@ -143,6 +147,12 @@ async function recordIdMapping(serverId: string, localId: string) {
   const map = await idMap()
   map[serverId] = localId
   await setIdMap(map)
+}
+async function hydrateIdMapSync() {
+  // applyRemote plans actions synchronously, so it reads the in-memory copy;
+  // without hydrating it from storage every remote edit/tombstone from another
+  // device "looks absent" (deletes skipped, updates duplicated as creates)
+  setIdMapSync(await idMap())
 }
 
 function bookmarksBarRoot(): string {
@@ -198,20 +208,30 @@ async function pushQueue(cfg: Config): Promise<boolean> {
   }
 }
 
-async function pullRemote(cfg: Config): Promise<boolean> {
-  try {
-    const resp = await apiFetch(cfg, `/api/sync/device-pull?since=${cfg.rev}`)
-    if (resp.status === 401) { await setSyncStatus('unauthorized'); return false }
-    if (!resp.ok) throw new Error(`pull HTTP ${resp.status}`)
-    const data = await resp.json() as { changes: NodeState[]; head: number }
-    if (data.changes?.length) {
-      await applyRemote(data.changes)
+// pulls serialize: fullSync, the debounced flush and WS schedulePull can all
+// trigger one; overlapping runs fetched the same revision window and applied
+// it twice (duplicate creates). Chaining keeps fetch+apply atomic per pull.
+let pullChain: Promise<boolean> = Promise.resolve(false)
+function pullRemote(cfg: Config): Promise<boolean> {
+  const run = pullChain.catch(() => false).then(async () => {
+    try {
+      const cur = await getConfig()
+      const rev = cur?.rev ?? cfg.rev
+      const resp = await apiFetch(cfg, `/api/sync/device-pull?since=${rev}`)
+      if (resp.status === 401) { await setSyncStatus('unauthorized'); return false }
+      if (!resp.ok) throw new Error(`pull HTTP ${resp.status}`)
+      const data = await resp.json() as { changes: NodeState[]; head: number }
+      if (data.changes?.length) {
+        await applyRemote(data.changes)
+      }
+      await saveConfigPatch({ rev: data.head })
+      return true
+    } catch {
+      return false
     }
-    await saveConfigPatch({ rev: data.head })
-    return true
-  } catch {
-    return false
-  }
+  })
+  pullChain = run
+  return run
 }
 
 // Apply server changes to the browser tree under the re-entrancy guard.
@@ -222,6 +242,11 @@ async function applyRemote(changes: NodeState[]) {
     const actions = planRemoteActions(
       changes.map((c) => ({ ...c, deviceId: c.deviceId === deviceIdSafe() ? '__self__' : c.deviceId })),
       local,
+      (serverId) => {
+        // mapToLocalId from md_id_map, falling back to the raw server id
+        // (the creating device uses its local chrome id as the server id)
+        return idMapSync()[serverId] ?? serverId
+      },
     )
     for (const act of actions) {
       try {
@@ -288,7 +313,17 @@ let deviceIdCached = 'unknown'
 
 // ---- connectivity ----
 
+let statusCache: string | null = null
 async function setSyncStatus(status: string) {
+  if (statusCache === null) {
+    // seed from storage: a fresh SW must not downgrade a persisted state
+    statusCache = ((await chrome.storage.local.get('md_status')).md_status as string) || ''
+  }
+  // 'unauthorized' (revoked token) must stay visible: the WS reconnect loop
+  // keeps failing and its onclose would otherwise mask the real problem as a
+  // mere network blip. Only a successful auth (401 cleared / online) lifts it.
+  if (status === 'disconnected' && statusCache === 'unauthorized') return
+  statusCache = status
   await chrome.storage.local.set({ md_status: status })
   // distinct toolbar badges so the user can tell WHAT is wrong at a glance
   const badges: Record<string, { text: string; color: string }> = {
@@ -354,6 +389,7 @@ function schedulePull() {
 }
 
 async function fullSync() {
+  await hydrateIdMapSync()
   const cfg = await getConfig()
   if (!cfg?.token) return
   deviceIdCached = cfg.deviceId
@@ -532,3 +568,6 @@ async function initialImport() {
 // reconnect on startup
 chrome.runtime.onStartup.addListener(() => fullSync())
 fullSync()
+
+// test/debug hook: lets Playwright E2E drive a full sync directly from the SW
+;(globalThis as unknown as Record<string, unknown>).__markdeckResync = fullSync
