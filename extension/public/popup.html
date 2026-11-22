@@ -3,43 +3,152 @@
 <head>
   <meta charset="utf-8" />
   <style>
-    body { width: 320px; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; margin: 0; }
-    header { background: #1f2430; color: #fff; padding: 10px 14px; font-weight: 600; }
-    .row { padding: 10px 14px; }
-    .status { display: flex; align-items: center; gap: 8px; }
-    .dot { width: 10px; height: 10px; border-radius: 50%; }
-    .dot.online { background: #2e7d32; }
-    .dot.off { background: #c62828; }
-    .dot.unconfigured { background: #f9a825; }
-    input { width: 100%; padding: 6px 8px; margin: 4px 0 8px; box-sizing: border-box; }
-    button { padding: 6px 12px; border: none; background: #409eff; color: #fff; border-radius: 4px; cursor: pointer; }
-    button.secondary { background: #606266; }
-    .hint { color: #909399; font-size: 12px; }
-    .saved-msg { color: #2e7d32; font-size: 12px; margin-left: 8px; }
+    :root {
+      --bg: #f5f6fa;
+      --surface: #ffffff;
+      --border: #e8eaf1;
+      --text: #1a1c28;
+      --text2: #6f7488;
+      --text3: #9ca1b6;
+      --primary: #5b67f2;
+      --primary-soft: #eef0fe;
+      --danger: #e5484d;
+      --success: #23a877;
+      --warning: #f5a623;
+      --radius: 12px;
+      --radius-sm: 9px;
+      --shadow: 0 1px 2px rgba(24,28,58,.05), 0 2px 10px rgba(24,28,58,.06);
+      --font: 'Inter','Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    html, body { width: 340px; font-family: var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+
+    /* brand header */
+    header {
+      background: linear-gradient(135deg, #14172a 0%, #191d36 100%);
+      padding: 14px 16px 12px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .logo-mark {
+      width: 30px; height: 30px; border-radius: 9px;
+      background: linear-gradient(135deg, #5b67f2 0%, #8b5cf6 100%);
+      display: grid; place-items: center; color: #fff; flex-shrink: 0;
+      box-shadow: 0 3px 10px rgba(91,103,242,.45);
+    }
+    .logo-name { font-size: 15px; font-weight: 700; color: #fff; letter-spacing: .4px; flex: 1; }
+
+    /* status strip */
+    .status {
+      margin: 12px 12px 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      box-shadow: var(--shadow);
+      padding: 10px 12px;
+      display: flex; align-items: center; gap: 9px;
+      font-size: 13px;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .dot.online { background: var(--success); box-shadow: 0 0 0 3px rgba(35,168,119,.18); }
+    .dot.off    { background: var(--danger);  box-shadow: 0 0 0 3px rgba(229,72,77,.15); }
+    .dot.unconfigured { background: var(--warning); box-shadow: 0 0 0 3px rgba(245,166,35,.18); }
+    .dot.unauthorized { background: var(--danger);  box-shadow: 0 0 0 3px rgba(229,72,77,.15); }
+    #statusText { color: var(--text); font-weight: 600; }
+    #queueInfo { margin-left: auto; color: var(--text3); font-size: 12px; }
+
+    /* cards */
+    .card {
+      margin: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 12px 14px;
+    }
+    .card-label { font-size: 11px; font-weight: 700; color: var(--text3); letter-spacing: .4px; margin-bottom: 7px; }
+
+    input {
+      width: 100%; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      font-family: var(--font); font-size: 13px; color: var(--text);
+      background: #fafbfd; outline: none; margin-bottom: 8px;
+      transition: border-color .15s ease, background .15s ease;
+    }
+    input:focus { border-color: var(--primary); background: #fff; }
+    input::placeholder { color: var(--text3); }
+
+    button {
+      font-family: var(--font); font-size: 13px; font-weight: 600;
+      border: none; border-radius: var(--radius-sm);
+      padding: 8px 14px; cursor: pointer;
+      transition: filter .15s ease, transform .05s ease, background .15s ease;
+    }
+    button:active { transform: translateY(1px); }
+    .btn-primary {
+      width: 100%;
+      background: var(--primary); color: #fff;
+      padding: 9px; font-size: 14px;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-ghost { background: #eef0f6; color: var(--text2); flex: 1; }
+    .btn-ghost:hover { background: #e3e6ef; color: var(--text); }
+
+    .row { display: flex; gap: 8px; }
+    .saved-msg { color: var(--success); font-size: 12px; font-weight: 600; margin-left: 8px; }
+
+    /* local search results */
+    .search-results { margin-top: 4px; }
+    .search-results a {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 8px; border-radius: var(--radius-sm);
+      color: var(--text); text-decoration: none; font-size: 12.5px;
+      overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    }
+    .search-results a:hover { background: var(--primary-soft); color: var(--primary); }
+    .search-results a .fav-ico {
+      width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
+      display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #fff;
+    }
+
+    footer {
+      padding: 10px 14px 14px;
+      display: flex; gap: 8px;
+    }
   </style>
 </head>
 <body>
-  <header>📚 MarkDeck</header>
-  <div class="row status">
+  <header>
+    <div class="logo-mark">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+      </svg>
+    </div>
+    <div class="logo-name">MarkDeck</div>
+  </header>
+
+  <div class="status">
     <span class="dot" id="dot"></span>
     <span id="statusText">检查中…</span>
-    <span class="hint" id="queueInfo"></span>
+    <span id="queueInfo"></span>
   </div>
-  <div class="row">
-    <div class="hint">收藏当前页面</div>
+
+  <div class="card">
+    <div class="card-label">收藏当前页面</div>
     <input id="title" placeholder="标题" />
-    <div class="hint">标签（逗号分隔，可选）</div>
-    <input id="tags" placeholder="开发, 工具" />
-    <button id="saveBtn">⭐ 收藏</button>
-    <span class="saved-msg" id="savedMsg"></span>
+    <input id="tags" placeholder="标签（逗号分隔，可选）" />
+    <button id="saveBtn" class="btn-primary">⭐ 收藏此页面</button>
+    <div style="text-align:center; margin-top: 4px"><span class="saved-msg" id="savedMsg"></span></div>
   </div>
-  <div class="row">
-    <button id="searchBtn" class="secondary">🔍 打开搜索</button>
-    <button id="optionsBtn" class="secondary">设置</button>
+
+  <div class="card">
+    <div class="card-label">本地搜索书签（离线可用）</div>
+    <input id="localSearch" placeholder="输入关键词…" />
+    <div class="search-results" id="searchResults"></div>
   </div>
-  <div class="row">
-    <div class="hint" id="searchResults"></div>
-  </div>
+
+  <footer>
+    <button id="optionsBtn" class="btn-ghost">⚙️ 设置</button>
+  </footer>
   <script type="module" src="popup.js"></script>
 </body>
 </html>
