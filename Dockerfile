@@ -7,11 +7,15 @@ COPY web/ ./
 RUN npm run build
 
 # ---- go build (embeds the built UI) ----
-FROM golang:1.26-alpine AS build
+# arm64 uses native Go cross-compilation instead of qemu emulation, which is
+# ~10x faster and avoids the qemu+GOTOOLCHAIN deadlock.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY server/ ./server/
 COPY --from=web /src/server/internal/webapp/dist ./server/internal/webapp/dist
-RUN cd server && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/markdeck ./cmd/markdeck
+RUN cd server && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/markdeck ./cmd/markdeck
 
 # ---- runtime ----
 FROM alpine:3.20
