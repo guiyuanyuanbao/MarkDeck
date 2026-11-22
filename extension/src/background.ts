@@ -20,6 +20,7 @@ const QUEUE_KEY = 'md_queue'
 const CONFIG_KEY = 'md_config'
 const LOCAL_KEY = 'md_local_nodes'
 const IDMAP_KEY = 'md_id_map' // { serverId: localId } — local ids differ per browser
+const L2S_KEY = 'md_l2s' // { localId: serverId } — reverse direction for pushes
 let idMapSyncCache: Record<string, string> = {}
 function idMapSync(): Record<string, string> { return idMapSyncCache }
 function setIdMapSync(m: Record<string, string>) { idMapSyncCache = m }
@@ -47,36 +48,62 @@ async function getQueue(): Promise<QueuedOp[]> {
 async function setQueue(q: QueuedOp[]) {
   await chrome.storage.local.set({ [QUEUE_KEY]: q })
 }
-// Nodes created/updated by applyRemote fire chrome.bookmarks events that
+// Nodes created/updated/moved by applyRemote fire chrome.bookmarks events that
 // would be re-enqueued and pushed back, resurrecting tombstones. applyRemote
 // sets applyingRemote=true during its run, but its writes land BEFORE the
 // finally-block resets the flag only within the same tick; bookmark events
 // are async, so we also track recently-applied local ids explicitly.
-// id -> title applied by the last remote sync; a matching local event is
-// our own echo. A user edit right after sync has a different title and
-// still gets pushed.
-const recentlyApplied = new Map<string, string>()
+// id -> snapshot of what the last remote sync wrote; a local event matching
+// the snapshot is our own echo. Real browsers dispatch these events AFTER
+// applyRemote finished, and an unblocked 'created' echo re-pushes the node
+// under its local integer id, duplicating it on the server.
+const recentlyApplied = new Map<string, { title?: string; parentId?: string }>()
+// Events that arrive while applyRemote holds the guard are buffered, not
+// dropped: a burst of user edits overlapping a sync window would otherwise
+// lose ops permanently. On replay each op goes through the echo check again
+// with the final snapshots, so remote-write echoes are still blocked.
+const deferredOps: QueuedOp[] = []
+// bookmark listeners call enqueue fire-and-forget; rapid bursts overlap the
+// getQueue/setQueue round-trips and last-write-wins DROPS ops (10 rapid
+// creates lost ~half in real chromium). Serialize the read-modify-write.
+let enqueueChain: Promise<void> = Promise.resolve()
 async function enqueue(op: QueuedOp) {
-  if (applyingRemote) return
-  if (recentlyApplied.has(op.id)) {
-    if (op.kind === 'removed') { recentlyApplied.delete(op.id); return }
-    if (op.kind === 'changed' && op.title === recentlyApplied.get(op.id)) return
-    recentlyApplied.delete(op.id) // content differs: real user edit
-  }
-  const q = await getQueue()
-  q.push(op)
-  await setQueue(q)
-  scheduleFlush()
+  if (applyingRemote) { deferredOps.push(op); return }
+  const run = enqueueChain.catch(() => {}).then(async () => {
+    const echo = recentlyApplied.get(op.id)
+    if (echo) {
+      const isEcho =
+        op.kind === 'removed' ||
+        ((op.kind === 'created' || op.kind === 'changed') && op.title === echo.title) ||
+        ((op.kind === 'moved' || op.kind === 'reordered') && op.parentId === echo.parentId)
+      recentlyApplied.delete(op.id) // one-shot: a later real edit must push
+      if (isEcho) return
+    }
+    const q = await getQueue()
+    q.push(op)
+    await setQueue(q)
+    scheduleFlush()
+  })
+  enqueueChain = run
+  await run
 }
 
 // ---- local node cache for LWW decisions ----
 
-async function refreshLocalCache(): Promise<Map<string, NodeState>> {
+// overrides: localId -> {deviceId, updatedAt} of the last remote change that
+// wrote the node. chrome.bookmarks has no author info, so without this merge
+// every refresh would stamp nodes with OUR id and a frozen dateAdded — then
+// a same-second remote edit ties on updatedAt, the deviceId comparison
+// (local ours > theirs) wrongly declares "local newer" and the edit is
+// silently ignored (device->device updates could never propagate).
+async function refreshLocalCache(overrides?: Map<string, { deviceId: string; updatedAt: number }>): Promise<Map<string, NodeState>> {
+  const prev = await localCache()
   const tree = await chrome.bookmarks.getTree()
   const map = new Map<string, NodeState>()
   const deviceId = (await getConfig())?.deviceId || 'unknown'
   const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentId: string) => {
     for (const n of nodes) {
+      const ov = overrides?.get(n.id)
       map.set(n.id, {
         id: n.id,
         parentId,
@@ -85,8 +112,8 @@ async function refreshLocalCache(): Promise<Map<string, NodeState>> {
         url: n.url,
         position: (n.index ?? 0) + 1,
         revision: 0,
-        updatedAt: Math.floor((n.dateAdded || Date.now()) / 1000),
-        deviceId,
+        updatedAt: ov?.updatedAt || Math.floor((n.dateAdded || Date.now()) / 1000),
+        deviceId: ov?.deviceId || prev.get(n.id)?.deviceId || deviceId,
         createdAt: Math.floor((n.dateAdded || Date.now()) / 1000),
       })
       if (n.children) walk(n.children, n.id)
@@ -127,26 +154,65 @@ async function localCache(): Promise<Map<string, NodeState>> {
 // The server knows nodes by the creator device's local id. Other devices
 // create their own local ids when applying remote creates, so every device
 // keeps a serverId->localId map to translate push/pull payloads.
+// md_id_map holds serverId->localId; md_l2s holds localId->serverId. Small
+// integer local ids collide ACROSS devices and runs, so nodes created after
+// pairing get a minted UUID as their server id — pushing raw local ids made
+// two devices overwrite each other's rows (server merges different nodes
+// into one id, then devices ping-pong create/delete fighting over it).
 async function idMap(): Promise<Record<string, string>> {
   const st = await chrome.storage.local.get(IDMAP_KEY)
   return (st[IDMAP_KEY] as Record<string, string>) || {}
+}
+async function l2sMap(): Promise<Record<string, string>> {
+  const st = await chrome.storage.local.get(L2S_KEY)
+  return (st[L2S_KEY] as Record<string, string>) || {}
 }
 async function setIdMap(map: Record<string, string>) {
   idMapSyncCache = map // keep the sync mirror coherent with storage
   await chrome.storage.local.set({ [IDMAP_KEY]: map })
 }
 async function mapToServerId(localId: string): Promise<string> {
+  const l2s = await l2sMap()
+  if (localId in l2s) return l2s[localId]
   const map = await idMap()
-  return map[localId] || localId // creator devices use local id == server id
+  // `in` check (not ||) — the bar root maps to '' and must not fall through
+  return localId in map ? map[localId] : localId // creator devices use local id == server id
+}
+// mintedServerId = mapToServerId that always yields a globally-unique id
+async function mintedServerId(localId: string): Promise<string> {
+  const l2s = await l2sMap()
+  if (localId in l2s) return l2s[localId]
+  const map = await idMap()
+  if (localId in map) return map[localId] // initialImport already assigned one
+  return mintServerId(localId)
 }
 async function mapToLocalId(serverId: string): Promise<string | null> {
   const map = await idMap()
-  return map[serverId] ?? serverId // creator devices keep local id == server id
+  return serverId in map ? map[serverId] : serverId // creator devices keep local id == server id
 }
 async function recordIdMapping(serverId: string, localId: string) {
   const map = await idMap()
   map[serverId] = localId
   await setIdMap(map)
+  // keep the push-direction mirror in step: later local edits of this node
+  // must translate back to the same server row, or they land on a raw
+  // local-integer id row that no other device knows about
+  const l2s = await l2sMap()
+  if (!(localId in l2s)) {
+    l2s[localId] = serverId
+    await chrome.storage.local.set({ [L2S_KEY]: l2s })
+  }
+}
+// mint a globally-unique server id for a locally-created node and remember
+// both directions; minting must happen exactly once per local id
+async function mintServerId(localId: string): Promise<string> {
+  const l2s = await l2sMap()
+  if (localId in l2s) return l2s[localId]
+  const uuid = crypto.randomUUID()
+  l2s[localId] = uuid
+  await chrome.storage.local.set({ [L2S_KEY]: l2s })
+  await recordIdMapping(uuid, localId)
+  return uuid
 }
 async function hydrateIdMapSync() {
   // applyRemote plans actions synchronously, so it reads the in-memory copy;
@@ -180,32 +246,49 @@ async function apiFetch(cfg: Config, path: string, init?: RequestInit): Promise<
 async function pushQueue(cfg: Config): Promise<boolean> {
   let q = await getQueue()
   if (!q.length) return true
-  q = compressQueue(q)
-  // translate local ids to server ids (nodes created by remote devices)
-  for (const op of q) {
-    op.id = await mapToServerId(op.id)
-    if (op.parentId) op.parentId = await mapToServerId(op.parentId)
-  }
-  const nodes = await localCache()
-  const payload = opsToPushPayload(q, cfg.deviceId, nodes)
+  // claim the queue BEFORE the network round-trip: ops enqueued while the
+  // push is in flight must survive the post-push cleanup (the old
+  // read→push→setQueue([]) wiped them, losing edits permanently)
+  await setQueue([])
   try {
+    q = compressQueue(q)
+    // translate local ids to server ids (nodes created by remote devices).
+    // A created op for an unmapped local id mints a UUID server id first —
+    // pushing raw small-integer local ids let two devices push DIFFERENT
+    // nodes under the same server id and LWW-merge them into one row
+    for (const op of q) {
+      if (op.kind === 'created') op.id = await mintedServerId(op.id)
+      else op.id = await mapToServerId(op.id)
+      if (op.parentId) op.parentId = await mapToServerId(op.parentId)
+    }
+    const nodes = await localCache()
+    const payload = opsToPushPayload(q, cfg.deviceId, nodes)
     const resp = await apiFetch(cfg, '/api/sync/device-push', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
     if (resp.status === 401) {
+      await restoreQueue(q)
       await setSyncStatus('unauthorized')
       return false
     }
     if (!resp.ok) throw new Error(`push HTTP ${resp.status}`)
-    await setQueue([])
     await refreshLocalCache() // local creates bypass applyRemote; keep cache fresh
     return true
   } catch {
-    // offline: queue keeps accumulating (bounded to avoid runaway storage)
-    if (q.length > 5000) await setQueue(q.slice(-5000))
+    // offline: put the claimed ops back (merged with any new arrivals);
+    // bounded to avoid runaway storage
+    await restoreQueue(q)
     return false
   }
+}
+
+// merge claimed-but-unpushed ops back to the head of the current queue
+async function restoreQueue(claimed: QueuedOp[]) {
+  const fresh = await getQueue()
+  const back = [...claimed, ...fresh]
+  if (back.length > 5000) await setQueue(back.slice(-5000))
+  else await setQueue(back)
 }
 
 // pulls serialize: fullSync, the debounced flush and WS schedulePull can all
@@ -216,6 +299,9 @@ function pullRemote(cfg: Config): Promise<boolean> {
   const run = pullChain.catch(() => false).then(async () => {
     try {
       const cur = await getConfig()
+      // WS-triggered pulls bypass fullSync, so the echo-detection id must be
+      // (re)established here too — a fresh SW would otherwise see 'unknown'
+      if (cur?.deviceId) deviceIdCached = cur.deviceId
       const rev = cur?.rev ?? cfg.rev
       const resp = await apiFetch(cfg, `/api/sync/device-pull?since=${rev}`)
       if (resp.status === 401) { await setSyncStatus('unauthorized'); return false }
@@ -254,7 +340,7 @@ async function applyRemote(changes: NodeState[]) {
           const n = act.node
           // pre-mark BEFORE the chrome call: the bookmark event fires
           // asynchronously and must find the guard already in place
-          recentlyApplied.set('__pre__' + n.id, n.title)
+          recentlyApplied.set('__pre__' + n.id, { title: n.title })
           // parent may itself need translating (folder created by remote)
           // unknown remote parent (e.g. another device's 'Other Bookmarks'
           // holder) falls back to the bookmarks bar so the node is reachable
@@ -268,11 +354,11 @@ async function applyRemote(changes: NodeState[]) {
           // remember which server id this new local node corresponds to
           await recordIdMapping(n.id, created.id)
           recentlyApplied.delete('__pre__' + n.id)
-          recentlyApplied.set(created.id, n.title)
+          recentlyApplied.set(created.id, { title: n.title, parentId: created.parentId })
         } else if (act.action === 'update') {
           const localId = await mapToLocalId(act.node.id)
           if (localId) {
-            recentlyApplied.set(localId, act.node.title) // pre-mark
+            recentlyApplied.set(localId, { title: act.node.title }) // pre-mark
             await chrome.bookmarks.update(localId, { title: act.node.title, url: act.node.url })
           }
         } else if (act.action === 'remove') {
@@ -285,18 +371,30 @@ async function applyRemote(changes: NodeState[]) {
           const localId = await mapToLocalId(act.id)
           const parentLocal = await mapToLocalId(act.parentId)
           if (localId) {
-            await chrome.bookmarks.move(localId, { parentId: parentLocal || mapParent(act.parentId), index: act.index })
+            const target = parentLocal || mapParent(act.parentId)
+            await chrome.bookmarks.move(localId, { parentId: target, index: act.index })
             const movedTitle = 'node' in act ? (act.node as { title?: string } | undefined)?.title ?? '' : ''
-            recentlyApplied.set(localId, movedTitle)
+            recentlyApplied.set(localId, { title: movedTitle, parentId: target })
           }
         }
       } catch {
         // individual action failures shouldn't abort the batch
       }
     }
-    await refreshLocalCache()
+    // carry the authoring device + timestamp of each applied change into the
+    // local cache so future LWW ties resolve against the real author, not us
+    const overrides = new Map<string, { deviceId: string; updatedAt: number }>()
+    for (const c of changes) {
+      if (c.deletedAt && c.deletedAt > 0) continue
+      const localId = (await mapToLocalId(c.id)) || c.id
+      overrides.set(localId, { deviceId: c.deviceId, updatedAt: c.updatedAt })
+    }
+    await refreshLocalCache(overrides)
   } finally {
     applyingRemote = false
+    // replay edits buffered during the apply window (echoes get filtered)
+    const pending = deferredOps.splice(0)
+    for (const op of pending) enqueue(op).catch(() => {})
   }
 }
 
@@ -513,6 +611,9 @@ async function initialImport() {
     // and a local→server mapping. Without this, device B's initial import
     // overwrites device A's bookmarks that happen to share the same ids.
     const localToServer: Record<string, string> = {}
+    // local chrome roots have no server rows: bar root '1' maps to server
+    // top-level ('') and '2' maps to the per-device 其他书签 holder once pushed
+    localToServer['1'] = ''
     const serverIdOf = (localId: string): string => {
       if (localToServer[localId]) return localToServer[localId]
       const uuid = localId === 'others-root'
@@ -542,6 +643,7 @@ async function initialImport() {
     if (bar) walk(bar.children || [], '')
     if (others && others.children?.length) {
       const othersFolderId = serverIdOf('others-root')
+      localToServer['2'] = othersFolderId
       ops.push({
         id: othersFolderId, type: 'folder', parentId: '',
         title: '其他书签', url: '', position: 9999,
@@ -556,12 +658,22 @@ async function initialImport() {
       }
     }
     // persist local→server mapping so future local edits push to the right
-    // server nodes instead of colliding with other devices' ids
+    // server nodes instead of colliding with other devices' ids.
+    // NOTE: this must be the localToServer table — spreading the idMap
+    // function object here silently dropped every new mapping and made
+    // later edits of imported bookmarks duplicate on the server.
+    // The holder also needs the reverse entry so remote children of the
+    // 其他书签 folder land in the browser's root '2', not the bookmarks bar.
     const existing = await idMap()
-    await setIdMap({ ...existing, ...idMap })
+    const merged = { ...existing, ...localToServer }
+    const othersHolderId = localToServer['others-root']
+    if (othersHolderId) merged[othersHolderId] = '2'
+    await setIdMap(merged)
     await refreshLocalCache()
   } finally {
     applyingRemote = false
+    const pending = deferredOps.splice(0)
+    for (const op of pending) enqueue(op).catch(() => {})
   }
 }
 

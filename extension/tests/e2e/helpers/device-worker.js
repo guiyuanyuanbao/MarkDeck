@@ -243,6 +243,12 @@ async function main() {
             }
             break
           }
+          case 'localIdOf': {
+            // server id -> this device's local id (post-UUID-minting they differ)
+            const st = await device.chrome.storage.local.get('md_id_map')
+            resultOf = (st.md_id_map || {})[cmd.payload?.serverId ?? cmd.serverId] ?? null
+            break
+          }
           case 'setServer': {
             const st = await device.chrome.storage.local.get('md_config')
             if (st.md_config) {

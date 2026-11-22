@@ -46,6 +46,7 @@ class Device {
         buf = buf.slice(i + 1)
         if (!line.trim()) continue
         try {
+          fs2.appendFileSync('C:/Users/admin/AppData/Local/Temp/worker-dbg.log', line + '\n')
           const msg = JSON.parse(line)
           if (msg.ready) { this.ready = true; continue }
           if (msg.id !== undefined && this.pending.has(msg.id)) {
@@ -115,10 +116,15 @@ async function waitFor(fn, timeoutMs = 20000) {
     const tree = await api('/api/bookmarks/tree', undefined, { Cookie: cookie })
     const base = JSON.parse(tree.body).nodes.find(n => n.title === '冲突基准')
     // A writes first, B writes later → B wins
-    await A.cmd('update', { id: base.id, patch: { title: 'A 的修改' } })
+    const aLocal = (await A.cmd('localIdOf', { serverId: base.id })) || base.id
+    await A.cmd('update', { id: aLocal, patch: { title: 'A 的修改' } })
     await A.cmd('resync')
-    await new Promise(r => setTimeout(r, 1000))
-    const bId = await B.cmd('findIdByTitle', { title: 'A 的修改' })
+    // B learns via WS ping -> debounce pull; poll instead of a fixed sleep
+    let bId = null
+    for (let i = 0; i < 40 && !bId; i++) {
+      await new Promise(r => setTimeout(r, 500))
+      bId = await B.cmd('findIdByTitle', { title: 'A 的修改' }).catch(() => null)
+    }
     if (!bId) throw new Error('T4: B lacks the node')
     await B.cmd('update', { id: bId, patch: { title: 'B 的修改（更晚）' } })
     await B.cmd('resync')

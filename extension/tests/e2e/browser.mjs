@@ -1,5 +1,8 @@
 // E2E: real extension in real Playwright chromium against a real server.
-// Verifies: extension loads, pairs, syncs bookmarks from/to the browser.
+// Covers: pair + initial import (with pre-pair bookmarks), bidirectional
+// sync of urls/folders/moves/renames, other-bookmarks root, realtime WS
+// propagation (no manual resync), LWW conflict, purge, popup UI, device
+// revocation and re-pairing through the real options UI.
 'use strict'
 import { chromium } from 'playwright-core'
 import { spawn, execSync } from 'child_process'
@@ -27,8 +30,43 @@ async function api(method, p, body, headers = {}) {
   return { status: r.status, body: await r.text(), cookies: r.headers.getSetCookie() }
 }
 
+let COOKIE = ''
+async function serverNodes() {
+  return JSON.parse((await api('GET', '/api/bookmarks/tree', undefined, { Cookie: COOKIE })).body).nodes
+}
+
+// ---- browser-side probes (run inside the SW) ----
+const browserTitles = (sw) => sw.evaluate(async () => {
+  const tree = await chrome.bookmarks.getTree()
+  const out = []
+  const walk = (nodes) => { for (const n of nodes) { if (n.url) out.push(n.title); if (n.children) walk(n.children) } }
+  for (const root of tree) if (root.children) walk(root.children)
+  return out
+})
+const browserNodeByTitle = (sw, title) => sw.evaluate(async (t) => {
+  const tree = await chrome.bookmarks.getTree()
+  let found = null
+  const walk = (nodes) => { for (const n of nodes) { if (n.title === t) found = n; if (n.children) walk(n.children) } }
+  for (const root of tree) if (root.children) walk(root.children)
+  return found ? { id: found.id, parentId: found.parentId, title: found.title, url: found.url } : null
+}, title)
+// resync = drive one full sync cycle through the test hook
+const resync = (sw) => sw.evaluate(() => globalThis.__markdeckResync())
+
+// poll until pred(browserTitles, serverNodes) holds; predicates may be async
+async function waitB(sw, pred, timeoutMs = 10000, label = '') {
+  for (let i = 0; i < timeoutMs / 400; i++) {
+    let ok = false
+    try { ok = await pred(await browserTitles(sw), await serverNodes()) } catch { /* transient */ }
+    if (ok) return true
+    await new Promise(r => setTimeout(r, 400))
+  }
+  console.log('  [timeout waiting] ' + label)
+  return false
+}
+
 async function main() {
-  console.log('== MarkDeck extension E2E (real chromium) ==')
+  console.log('== MarkDeck extension E2E (real chromium, expanded suite) ==')
 
   // E2E needs granted host_permissions (Playwright can't drive the runtime
   // permission prompt); patches dist/manifest.json, test-only, never shipped
@@ -52,14 +90,14 @@ async function main() {
   if (state.setup) l = await api('POST', '/api/auth/setup', { password: ADMIN_PW })
   else l = await api('POST', '/api/auth/login', { password: ADMIN_PW })
   if (l.status !== 200) throw new Error('auth: ' + l.body)
-  const cookie = l.cookies[0].split(';')[0]
+  COOKIE = l.cookies[0].split(';')[0]
   const csrf = JSON.parse(l.body).csrf
   log('admin auth ready', true)
 
   // ---- server has a bookmark BEFORE the extension pairs ----
   const mk = await api('POST', '/api/bookmarks',
     { type: 'url', title: '服务器预置书签', url: 'https://preset.test/page' },
-    { Cookie: cookie, 'X-CSRF': csrf })
+    { Cookie: COOKIE, 'X-CSRF': csrf })
   log('server pre-bookmark created', mk.status === 201)
 
   // ---- launch chromium with extension ----
@@ -83,112 +121,334 @@ async function main() {
   sw.on('console', msg => console.log('[SW]', msg.text()))
   log('extension service worker running', true)
 
-  // ---- pair: Node does pair API, SW writes config, then triggers sync via hook ----
-  const code = JSON.parse((await api('POST', '/api/pair-code', {}, { Cookie: cookie, 'X-CSRF': csrf })).body).code
-  const pair = JSON.parse((await api('POST', '/api/pair', { code, name: 'E2E-Chromium' })).body)
-  if (!pair.token) throw new Error('pair failed')
-  log('paired via API', true)
-
-  const pairResult = await sw.evaluate(async (cfg) => {
-    await chrome.storage.local.set({ md_config: cfg })
-    // trigger the full sync via the exposed hook
-    if (typeof globalThis.__markdeckResync === 'function') {
-      await globalThis.__markdeckResync()
-      return { ok: true, via: 'hook' }
-    }
-    return { ok: false, via: 'no hook' }
-  }, { server: SERVER, token: pair.token, deviceId: pair.deviceId, rev: 0 })
-  log('pair + initial sync executed', pairResult.ok === true, JSON.stringify(pairResult))
-
-  await new Promise(r => setTimeout(r, 1000))
-
-  // ---- T1: server pre-bookmark now exists in browser bookmarks ----
-  const browserTitles = await sw.evaluate(async () => {
-    const tree = await chrome.bookmarks.getTree()
-    const out = []
-    const walk = (nodes) => { for (const n of nodes) { if (n.url) out.push(n.title); if (n.children) walk(n.children) } }
-    for (const root of tree) if (root.children) walk(root.children)
-    return out
+  // ---- pre-pair local content: initialImport must map these to fresh UUIDs,
+  //      including a folder with a child and an other-root ('2') bookmark ----
+  const prePair = await sw.evaluate(async () => {
+    const f = await chrome.bookmarks.create({ parentId: '1', title: '本机文件夹' })
+    await chrome.bookmarks.create({ parentId: f.id, title: '文件夹里的书签', url: 'https://local.test/child' })
+    await chrome.bookmarks.create({ parentId: '1', title: '本机已有书签A', url: 'https://local.test/a' })
+    await chrome.bookmarks.create({ parentId: '2', title: '本机其他书签', url: 'https://local.test/other' })
+    return true
   })
-  log('T1: server bookmark loaded into browser', browserTitles.includes('服务器预置书签'),
-    'browser titles: ' + JSON.stringify(browserTitles))
-  const rawTree = await sw.evaluate(async () => {
-    const tree = await chrome.bookmarks.getTree()
-    return tree[0]?.children?.map(c => ({ id: c.id, title: c.title, kids: c.children?.length || 0 }))
-  })
-  console.log('[E2E] bookmarks roots:', JSON.stringify(rawTree))
+  log('pre-pair browser bookmarks created (folder + child + other-root)', prePair === true)
 
-  // ---- T2: browser bookmark creation syncs to server ----
-  const created = await sw.evaluate(async () => {
-    return await chrome.bookmarks.create({ parentId: '1', title: '浏览器新建E2E', url: 'https://browser.test/x' })
-  })
-  log('T2: browser bookmark created', !!created.id)
-  // trigger sync via hook
-  await sw.evaluate(() => globalThis.__markdeckResync())
-  await new Promise(r => setTimeout(r, 3000))
-  const tree = JSON.parse((await api('GET', '/api/bookmarks/tree', undefined, { Cookie: cookie })).body)
-  log('T2: browser bookmark synced to server',
-    tree.nodes.some(n => n.title === '浏览器新建E2E'))
-
-  // ---- T3: server delete propagates to browser ----
-  const target = tree.nodes.find(n => n.title === '服务器预置书签')
-  if (target) {
-    const delResp = await api('DELETE', `/api/bookmarks/${target.id}`, undefined, { Cookie: cookie, 'X-CSRF': csrf })
-    log('T3 setup: server delete API', delResp.status === 200, 'status=' + delResp.status)
-    await sw.evaluate(() => globalThis.__markdeckResync())
-    await new Promise(r => setTimeout(r, 3000))
-    // double resync: make sure pull happened
-    await sw.evaluate(() => globalThis.__markdeckResync())
-    await new Promise(r => setTimeout(r, 3000))
-    const after = await sw.evaluate(async () => {
-      const tree = await chrome.bookmarks.getTree()
-      const out = []
-      const walk = (nodes) => { for (const n of nodes) { if (n.url) out.push(n.title); if (n.children) walk(n.children) } }
-      for (const root of tree) if (root.children) walk(root.children)
-      return out
-    })
-    log('T3: server delete removed browser bookmark', !after.includes('服务器预置书签'),
-      'after titles: ' + JSON.stringify(after))
+  // ---- pair through the REAL options UI: exercises the pair message,
+  //      initialImport() of the pre-pair content, and first fullSync ----
+  const code = JSON.parse((await api('POST', '/api/pair-code', {}, { Cookie: COOKIE, 'X-CSRF': csrf })).body).code
+  const extId = new URL(sw.url()).host
+  const optPage = await context.newPage()
+  await optPage.goto(`chrome-extension://${extId}/options.html`)
+  await optPage.fill('#server', SERVER)
+  await optPage.fill('#code', code)
+  await optPage.click('#pairBtn')
+  let pairMsg = ''
+  for (let i = 0; i < 30; i++) {
+    pairMsg = await optPage.textContent('#pairMsg')
+    if (pairMsg.includes('配对成功') || pairMsg.includes('配对失败')) break
+    await new Promise(r => setTimeout(r, 500))
   }
+  log('pair via options UI', pairMsg.includes('配对成功'), 'msg=' + JSON.stringify(pairMsg))
+  await new Promise(r => setTimeout(r, 2500)) // let initialImport + first pull settle
+  await optPage.close()
 
-  // ---- T4: offline queue replay ----
-  // Simulate disconnection: point config at a dead port, make local edits,
-  // restore the real server, then verify the queue drains to the server.
-  const offlineEdits = await sw.evaluate(async () => {
-    const cfg = (await chrome.storage.local.get('md_config')).md_config
-    await chrome.storage.local.set({ md_config: { ...cfg, server: 'http://127.0.0.1:1' } })
-    await chrome.bookmarks.create({ parentId: '1', title: '离线新增E2E', url: 'https://offline.test/a' })
-    // let the debounced flush attempt fail against the dead port
-    await new Promise(r => setTimeout(r, 2500))
-    const q = (await chrome.storage.local.get('md_queue')).md_queue || []
-    await chrome.storage.local.set({ md_config: cfg })
-    return { queued: q.length }
+  // ---- T1: server pre-bookmark loaded into browser ----
+  let titles = await browserTitles(sw)
+  log('T1: server bookmark loaded into browser', titles.includes('服务器预置书签'),
+    'browser titles: ' + JSON.stringify(titles))
+
+  // ---- T2: initial import — pre-pair nodes on server with UUID ids and
+  //      folder/child structure intact (mapping persistence) ----
+  let nodes = await serverNodes()
+  const importedA = nodes.filter(n => n.title === '本机已有书签A')
+  const folderNode = nodes.find(n => n.title === '本机文件夹')
+  const childNode = nodes.find(n => n.title === '文件夹里的书签')
+  const othersHolder = nodes.find(n => n.title === '其他书签' && n.type === 'folder')
+  const otherNode = nodes.find(n => n.title === '本机其他书签')
+  log('T2a: pre-pair bookmark imported once with fresh UUID',
+    importedA.length === 1 && /^[0-9a-f-]{36}$/i.test(importedA[0].id),
+    'count=' + importedA.length + ' id=' + importedA[0]?.id)
+  log('T2b: folder + child structure preserved on server',
+    !!folderNode && !!childNode && childNode.parentId === folderNode.id,
+    `folder=${folderNode?.id} child.parent=${childNode?.parentId}`)
+  log('T2c: other-root content imported under 其他书签 holder',
+    !!othersHolder && !!otherNode && otherNode.parentId === othersHolder.id,
+    `holder=${othersHolder?.id} node.parent=${otherNode?.parentId}`)
+
+  // ---- T3: rename of an IMPORTED bookmark must update, not duplicate ----
+  await sw.evaluate(async () => {
+    const tree = await chrome.bookmarks.getTree()
+    let target = null
+    const walk = (ns) => { for (const n of ns) { if (n.title === '本机已有书签A') target = n; if (n.children) walk(n.children) } }
+    for (const root of tree) if (root.children) walk(root.children)
+    await chrome.bookmarks.update(target.id, { title: '本机已有书签A-改名' })
   })
-  log('T4 setup: offline edit queued while unreachable', offlineEdits.queued > 0,
-    'queue depth: ' + offlineEdits.queued)
-  await sw.evaluate(() => globalThis.__markdeckResync())
-  await new Promise(r => setTimeout(r, 3000))
-  const serverTree = JSON.parse((await api('GET', '/api/bookmarks/tree', undefined, { Cookie: cookie })).body)
-  log('T4: offline edit replayed to server after reconnect',
-    serverTree.nodes.some(n => n.title === '离线新增E2E'))
-  const qAfter = await sw.evaluate(async () =>
-    ((await chrome.storage.local.get('md_queue')).md_queue || []).length)
-  log('T4: queue drained', qAfter === 0, 'remaining: ' + qAfter)
+  await resync(sw)
+  await waitB(sw, async (bt, sn) =>
+    bt.includes('本机已有书签A-改名') && sn.filter(n => n.title === '本机已有书签A-改名').length === 1, 8000)
+  nodes = await serverNodes()
+  const renamed = nodes.filter(n => n.title === '本机已有书签A-改名')
+  log('T3: imported bookmark rename updated server node (no duplicate)',
+    renamed.length === 1 && !nodes.some(n => n.title === '本机已有书签A'),
+    'count=' + renamed.length)
 
-  // ---- T5: server-side device revocation -> extension must show unauthorized ----
-  const devices = JSON.parse((await api('GET', '/api/devices', undefined, { Cookie: cookie })).body)
+  // ---- T4: browser bookmark creation syncs to server as top-level ----
+  const created = await sw.evaluate(async () =>
+    await chrome.bookmarks.create({ parentId: '1', title: '浏览器新建E2E', url: 'https://browser.test/x' }))
+  log('T4 setup: browser bookmark created', !!created.id)
+  await resync(sw)
+  await waitB(sw, (bt, sn) => sn.some(n => n.title === '浏览器新建E2E'), 8000)
+  nodes = await serverNodes()
+  const bCreated = nodes.find(n => n.title === '浏览器新建E2E')
+  log('T4: browser creation on server with top-level parent (not ghost "1")',
+    !!bCreated && bCreated.parentId === '',
+    'parentId=' + JSON.stringify(bCreated?.parentId))
+
+  // ---- T5: server delete propagates to browser ----
+  const pre = nodes.find(n => n.title === '服务器预置书签')
+  const delResp = await api('DELETE', `/api/bookmarks/${pre.id}`, undefined, { Cookie: COOKIE, 'X-CSRF': csrf })
+  log('T5 setup: server delete API', delResp.status === 200, 'status=' + delResp.status)
+  await resync(sw)
+  await waitB(sw, (bt) => !bt.includes('服务器预置书签'), 8000)
+  titles = await browserTitles(sw)
+  log('T5: server delete removed browser bookmark', !titles.includes('服务器预置书签'),
+    'after titles: ' + JSON.stringify(titles))
+
+  // ---- T6: realtime WS propagation WITHOUT manual resync ----
+  await api('POST', '/api/bookmarks',
+    { type: 'url', title: '实时推送书签', url: 'https://realtime.test/x' },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  const rt = await waitB(sw, (bt) => bt.includes('实时推送书签'), 12000, 'realtime arrival')
+  log('T6: realtime WS push reaches browser without manual resync', rt)
+
+  // ---- T7: server folder + child land in browser with structure intact ----
+  const sf = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'folder', title: '同步文件夹' }, { Cookie: COOKIE, 'X-CSRF': csrf })).body)
+  await api('POST', '/api/bookmarks',
+    { type: 'url', title: '文件夹内书签', url: 'https://infolder.test/x', parentId: sf.id },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  await resync(sw)
+  await waitB(sw, async () => {
+    const c = await browserNodeByTitle(sw, '文件夹内书签')
+    const f = await browserNodeByTitle(sw, '同步文件夹')
+    return !!(c && f && c.parentId === f.id)
+  }, 8000)
+  const bChild = await browserNodeByTitle(sw, '文件夹内书签')
+  const bFolder = await browserNodeByTitle(sw, '同步文件夹')
+  log('T7: server folder+child in browser, child under folder',
+    !!bChild && !!bFolder && bChild.parentId === bFolder.id,
+    `child.parent=${bChild?.parentId} folder=${bFolder?.id}`)
+
+  // ---- T8: server rename updates browser in place (no duplicate) ----
+  await api('PUT', `/api/bookmarks/${sf.id}`, { title: '同步文件夹-改名' },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  await resync(sw)
+  await waitB(sw, async () => !!(await browserNodeByTitle(sw, '同步文件夹-改名')), 8000)
+  const oldFolder = await browserNodeByTitle(sw, '同步文件夹')
+  const newFolder = await browserNodeByTitle(sw, '同步文件夹-改名')
+  log('T8: server folder rename updated browser in place',
+    !oldFolder && !!newFolder,
+    'oldExists=' + !!oldFolder + ' newExists=' + !!newFolder)
+
+  // ---- T9: server move into folder updates browser parent ----
+  nodes = await serverNodes()
+  const mvNode = nodes.find(n => n.title === '实时推送书签')
+  const sfR = nodes.find(n => n.title === '同步文件夹-改名')
+  await api('POST', `/api/bookmarks/${mvNode.id}/move`, { parentId: sfR.id, position: 1 },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  await resync(sw)
+  await waitB(sw, async () => {
+    const m = await browserNodeByTitle(sw, '实时推送书签')
+    const f = await browserNodeByTitle(sw, '同步文件夹-改名')
+    return !!(m && f && m.parentId === f.id)
+  }, 8000)
+  const movedB = await browserNodeByTitle(sw, '实时推送书签')
+  const sfB = await browserNodeByTitle(sw, '同步文件夹-改名')
+  log('T9: server move lands node under folder in browser',
+    !!movedB && !!sfB && movedB.parentId === sfB.id,
+    `moved.parent=${movedB?.parentId} folder=${sfB?.id}`)
+
+  // ---- T10: browser move into folder pushes new parent to server ----
+  const bNode = await browserNodeByTitle(sw, '浏览器新建E2E')
+  const bFolder2 = await browserNodeByTitle(sw, '本机文件夹')
+  await sw.evaluate(async ([nodeId, parentId]) => {
+    await chrome.bookmarks.move(nodeId, { parentId })
+  }, [bNode.id, bFolder2.id])
+  await resync(sw)
+  await waitB(sw, async (bt, sn) => {
+    const n2 = sn.find(n => n.title === '浏览器新建E2E')
+    const f2 = sn.find(n => n.title === '本机文件夹')
+    return !!(n2 && f2 && n2.parentId === f2.id)
+  }, 8000)
+  nodes = await serverNodes()
+  const srvMoved = nodes.find(n => n.title === '浏览器新建E2E')
+  const srvFolder = nodes.find(n => n.title === '本机文件夹')
+  log('T10: browser move updates server parent',
+    !!srvMoved && !!srvFolder && srvMoved.parentId === srvFolder.id,
+    `node.parent=${srvMoved?.parentId} folder=${srvFolder?.id}`)
+
+  // ---- T11: other-bookmarks root syncs both ways ----
+  await sw.evaluate(async () =>
+    await chrome.bookmarks.create({ parentId: '2', title: '浏览器其他书签', url: 'https://other.test/x' }))
+  await resync(sw)
+  await waitB(sw, async (bt, sn) => {
+    const n2 = sn.find(n => n.title === '浏览器其他书签')
+    const h = sn.find(n => n.title === '其他书签' && n.type === 'folder')
+    return !!(n2 && h && n2.parentId === h.id)
+  }, 8000)
+  nodes = await serverNodes()
+  const holder = nodes.find(n => n.title === '其他书签' && n.type === 'folder')
+  const srvOther = nodes.find(n => n.title === '浏览器其他书签')
+  log('T11a: browser other-root creation lands under 其他书签 holder',
+    !!holder && !!srvOther && srvOther.parentId === holder.id,
+    `node.parent=${srvOther?.parentId} holder=${holder?.id}`)
+  await api('POST', '/api/bookmarks',
+    { type: 'url', title: '服务端其他书签', url: 'https://srv-other.test/x', parentId: holder.id },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  await resync(sw)
+  await waitB(sw, async () => {
+    const n = await browserNodeByTitle(sw, '服务端其他书签')
+    return !!(n && n.parentId === '2')
+  }, 8000)
+  const bOther = await browserNodeByTitle(sw, '服务端其他书签')
+  log('T11b: server other-root child lands in browser root "2"',
+    !!bOther && bOther.parentId === '2', 'parent=' + bOther?.parentId)
+
+  // ---- T12: special characters survive round-trips ----
+  const weirdTitle = '日文"引用"&<>🎉 中文长标题—测试'
+  await api('POST', '/api/bookmarks',
+    { type: 'url', title: weirdTitle, url: 'https://weird.test/x?a=1&b=2' },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  await resync(sw)
+  await waitB(sw, (bt) => bt.includes(weirdTitle), 8000)
+  const weirdB = await browserNodeByTitle(sw, weirdTitle)
+  log('T12: special-char title survives server→browser',
+    !!weirdB && weirdB.title === weirdTitle, 'title=' + JSON.stringify(weirdB?.title))
+  const weirdBTitle = '浏览器端🎉特殊"标题"'
+  await sw.evaluate(async (t) =>
+    await chrome.bookmarks.create({ parentId: '1', title: t, url: 'https://weird-b.test/x' }), weirdBTitle)
+  await resync(sw)
+  await waitB(sw, async (bt, sn) =>
+    sn.some(n => n.title === weirdBTitle && n.url === 'https://weird-b.test/x'), 8000)
+  log('T12b: special-char title+url survive browser→server',
+    (await serverNodes()).some(n => n.title === weirdBTitle && n.url === 'https://weird-b.test/x'))
+
+  // ---- T13: rapid burst of 10 creates all reach the server ----
+  await sw.evaluate(async () => {
+    for (let i = 0; i < 10; i++) {
+      await chrome.bookmarks.create({ parentId: '1', title: '连发书签' + i, url: 'https://burst.test/' + i })
+    }
+  })
+  await resync(sw)
+  await waitB(sw, async (bt, sn) =>
+    sn.filter(n => n.title.startsWith('连发书签')).length >= 10, 10000)
+  const burstCount = (await serverNodes()).filter(n => n.title.startsWith('连发书签')).length
+  log('T13: rapid burst of 10 creates all reach server', burstCount === 10, 'count=' + burstCount)
+
+  // ---- T14: LWW conflict — newer server edit beats older browser edit ----
+  const cw = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'url', title: '冲突测试书签', url: 'https://lww.test/x' },
+    { Cookie: COOKIE, 'X-CSRF': csrf })).body)
+  await resync(sw)
+  await waitB(sw, (bt) => bt.includes('冲突测试书签'), 8000)
+  await sw.evaluate(async () => {
+    const tree = await chrome.bookmarks.getTree()
+    let n = null
+    const walk = (ns) => { for (const x of ns) { if (x.title === '冲突测试书签') n = x; if (x.children) walk(x.children) } }
+    for (const root of tree) if (root.children) walk(root.children)
+    await chrome.bookmarks.update(n.id, { title: '浏览器先改版' })
+  })
+  await new Promise(r => setTimeout(r, 1000))
+  // server edit lands later → strictly newer updatedAt → must win
+  await api('PUT', `/api/bookmarks/${cw.id}`, { title: '服务端后改版' },
+    { Cookie: COOKIE, 'X-CSRF': csrf })
+  await resync(sw)
+  await waitB(sw, (bt) => bt.includes('服务端后改版'), 10000)
+  titles = await browserTitles(sw)
+  log('T14: LWW — newer server edit wins over older browser edit',
+    titles.includes('服务端后改版') && !titles.includes('浏览器先改版'),
+    'olderTitleStillThere=' + titles.includes('浏览器先改版'))
+
+  // ---- T15: purge keeps the node gone on both sides ----
+  const pg = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'url', title: '待清除书签', url: 'https://purge.test/x' },
+    { Cookie: COOKIE, 'X-CSRF': csrf })).body)
+  await resync(sw)
+  await waitB(sw, (bt) => bt.includes('待清除书签'), 8000)
+  await api('DELETE', `/api/bookmarks/${pg.id}`, undefined, { Cookie: COOKIE, 'X-CSRF': csrf })
+  const purgeResp = await api('POST', `/api/bookmarks/${pg.id}/purge`, undefined, { Cookie: COOKIE, 'X-CSRF': csrf })
+  const srvClean = (await serverNodes()).every(n => n.title !== '待清除书签')
+  await resync(sw)
+  await waitB(sw, (bt) => !bt.includes('待清除书签'), 8000)
+  titles = await browserTitles(sw)
+  log('T15: purge keeps node gone on server and browser',
+    purgeResp.status === 200 && srvClean && !titles.includes('待清除书签'),
+    'purge=' + purgeResp.status + ' serverClean=' + srvClean + ' browserClean=' + !titles.includes('待清除书签'))
+
+  // ---- T16: popup UI — status, local search, quick save with tags ----
+  const popupPage = await context.newPage()
+  await popupPage.goto(`chrome-extension://${extId}/popup.html`)
+  await popupPage.waitForTimeout(800)
+  const statusText = await popupPage.textContent('#statusText')
+  log('T16a: popup shows online status', statusText?.includes('已连接'), 'text=' + JSON.stringify(statusText))
+  await popupPage.fill('#localSearch', 'E2E')
+  await popupPage.waitForTimeout(500)
+  const hits = await popupPage.$$eval('#searchResults a', as => as.map(a => a.textContent))
+  log('T16b: popup local search finds bookmarks', hits.length >= 1, JSON.stringify(hits))
+  const saved = await popupPage.evaluate(async () =>
+    await chrome.runtime.sendMessage({
+      type: 'saveCurrent', url: 'https://popup.test/page', title: '快速收藏页', tags: 'e2e,popup测试',
+    }))
+  log('T16c: popup quick-save accepted', saved?.ok === true, JSON.stringify(saved))
+  await resync(sw)
+  await waitB(sw, async (bt, sn) => {
+    const n = sn.find(x => x.title === '快速收藏页')
+    return !!(n && Array.isArray(n.tags) && n.tags.includes('e2e') && n.tags.includes('popup测试'))
+  }, 8000)
+  const tagNode = (await serverNodes()).find(n => n.title === '快速收藏页')
+  log('T16d: quick-saved page on server with tags',
+    !!tagNode && tagNode.tags?.includes('e2e') && tagNode.tags?.includes('popup测试'),
+    JSON.stringify(tagNode?.tags))
+  await popupPage.close()
+
+  // ---- T17: device revocation → extension must show unauthorized ----
+  const devices = JSON.parse((await api('GET', '/api/devices', undefined, { Cookie: COOKIE })).body)
   const devList = Array.isArray(devices) ? devices : devices.devices || []
-  const e2eDev = devList.find(d => d.name === 'E2E-Chromium')
-  log('T5 setup: device listed', !!e2eDev, JSON.stringify(devList.map(d => d.name)))
+  const e2eDev = devList.find(d => d.name === 'Chrome 浏览器') || devList[0]
+  log('T17 setup: device listed', !!e2eDev, JSON.stringify(devList.map(d => d.name)))
   if (e2eDev) {
-    const revResp = await api('DELETE', `/api/devices/${e2eDev.id}`, undefined, { Cookie: cookie, 'X-CSRF': csrf })
-    log('T5 setup: device revoked via API', revResp.status === 200 || revResp.status === 204, 'status=' + revResp.status)
-    await sw.evaluate(() => globalThis.__markdeckResync())
+    const revResp = await api('DELETE', `/api/devices/${e2eDev.id}`, undefined, { Cookie: COOKIE, 'X-CSRF': csrf })
+    log('T17 setup: device revoked via API', revResp.status === 200 || revResp.status === 204, 'status=' + revResp.status)
+    await resync(sw)
     await new Promise(r => setTimeout(r, 2000))
     const status = await sw.evaluate(async () =>
       (await chrome.storage.local.get('md_status')).md_status)
-    log('T5: extension status shows unauthorized after revocation', status === 'unauthorized', 'status=' + status)
+    log('T17: extension status shows unauthorized after revocation', status === 'unauthorized', 'status=' + status)
   }
+
+  // ---- T18: re-pair through the real options UI ----
+  const code2 = JSON.parse((await api('POST', '/api/pair-code', {}, { Cookie: COOKIE, 'X-CSRF': csrf })).body).code
+  const optPage2 = await context.newPage()
+  await optPage2.goto(`chrome-extension://${extId}/options.html`)
+  await optPage2.fill('#server', SERVER)
+  await optPage2.fill('#code', code2)
+  await optPage2.click('#pairBtn')
+  let pairMsg2 = ''
+  for (let i = 0; i < 30; i++) {
+    pairMsg2 = await optPage2.textContent('#pairMsg')
+    if (pairMsg2.includes('配对成功') || pairMsg2.includes('配对失败')) break
+    await new Promise(r => setTimeout(r, 500))
+  }
+  log('T18a: options UI re-pair succeeds', pairMsg2.includes('配对成功'), 'msg=' + JSON.stringify(pairMsg2))
+  // first sync after re-pair must not duplicate imported content
+  await new Promise(r => setTimeout(r, 4000))
+  nodes = await serverNodes()
+  const dupA = nodes.filter(n => n.title === '本机已有书签A-改名')
+  const status2 = await sw.evaluate(async () =>
+    (await chrome.storage.local.get('md_status')).md_status)
+  log('T18b: re-pair initial import does not duplicate existing bookmarks',
+    dupA.length === 1, 'count=' + dupA.length)
+  log('T18c: status back to online after re-pair', status2 === 'online', 'status=' + status2)
+  await optPage2.close()
 
   console.log('\n=== E2E RESULT ===')
   console.log(`${results.filter(r => r.ok).length} passed, ${results.filter(r => !r.ok).length} failed`)

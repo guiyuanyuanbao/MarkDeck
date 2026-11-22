@@ -76,6 +76,16 @@ func (a *API) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": out})
 }
 
+// validParent reports whether parentId refers to an existing row (or none).
+// A missing parent means the client pushed a local root id we don't model.
+func (a *API) validParent(parent string) bool {
+	if parent == "" {
+		return true
+	}
+	_, err := a.Store.Get(parent)
+	return err == nil
+}
+
 func (a *API) applyOp(op *pushOp) pushResult {
 	at := store.Now()
 	if op.UpdatedAt > at+300 { // future clock beyond 5 min: clamp
@@ -97,8 +107,15 @@ func (a *API) applyOp(op *pushOp) pushResult {
 		if op.Type == nil || (op.Type != nil && *op.Type != "folder" && *op.Type != "url") {
 			return pushResult{ID: op.ID, Error: "new row requires type folder|url"}
 		}
+		parent := deref(op.ParentID)
+		if !a.validParent(parent) {
+			// browsers push their fixed root ids ('1'/'2') as parentId; the
+			// server has no such rows, so an unnormalized parent would orphan
+			// the node in the web UI tree (fall back to top level)
+			parent = ""
+		}
 		b := &store.Bookmark{
-			ID: op.ID, ParentID: deref(op.ParentID), Type: *op.Type,
+			ID: op.ID, ParentID: parent, Type: *op.Type,
 			Title: deref(op.Title), URL: deref(op.URL), Note: deref(op.Note),
 			Favorite: derefB(op.Favorite), Archived: derefB(op.Archived),
 			Position: derefF(op.Position), DeletedAt: derefI(op.DeletedAt),
@@ -119,6 +136,9 @@ func (a *API) applyOp(op *pushOp) pushResult {
 	cand := *cur
 	if op.ParentID != nil {
 		cand.ParentID = *op.ParentID
+		if !a.validParent(cand.ParentID) {
+			cand.ParentID = ""
+		}
 	}
 	if op.Type != nil {
 		cand.Type = *op.Type

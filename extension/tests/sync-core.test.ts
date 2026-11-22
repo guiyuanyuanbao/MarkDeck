@@ -27,6 +27,35 @@ describe('compressQueue', () => {
     expect(a.kind).toBe('created')
     expect(a.title).toBe('x')
   })
+  it('cancels out created+removed pairs (node never reached the server)', () => {
+    const ops: QueuedOp[] = [
+      { kind: 'created', id: 'a', parentId: '1', title: 'tmp', url: 'https://t', at: 1 },
+      { kind: 'changed', id: 'a', title: 'tmp2', at: 2 },
+      { kind: 'removed', id: 'a', at: 3 },
+      { kind: 'created', id: 'b', parentId: '1', title: 'keep', url: 'https://k', at: 4 },
+    ]
+    expect(compressQueue(ops).map((o) => o.id)).toEqual(['b'])
+  })
+  it('keeps a removed op for a node known to the server (no created in batch)', () => {
+    const ops: QueuedOp[] = [{ kind: 'removed', id: 'srv-known', at: 5 }]
+    expect(compressQueue(ops)).toHaveLength(1)
+  })
+  it('keeps created when removed happened in an earlier batch (recreate)', () => {
+    // removed was pushed in a previous batch, so this batch starts with created
+    const ops: QueuedOp[] = [
+      { kind: 'created', id: 'a', parentId: '1', title: 'back', url: 'https://b', at: 9 },
+    ]
+    expect(compressQueue(ops)).toHaveLength(1)
+  })
+  it('merged moved op keeps creation fields for server materialization', () => {
+    const ops: QueuedOp[] = [
+      { kind: 'created', id: 'c', parentId: '1', title: 'T', url: 'https://c', index: 0, at: 1 },
+      { kind: 'moved', id: 'c', parentId: '2', index: 1, at: 2 },
+    ]
+    const out = compressQueue(ops)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ kind: 'created', parentId: '2', title: 'T', url: 'https://c', index: 1 })
+  })
 })
 
 describe('opsToPushPayload', () => {

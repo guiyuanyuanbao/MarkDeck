@@ -43,9 +43,21 @@ export interface SyncResult {
 // Dedupe queued ops per bookmark id, keeping order: later ops subsume
 // earlier ones for the same id except removal which always wins last.
 export function compressQueue(ops: QueuedOp[]): QueuedOp[] {
+  // a node created AND removed within one batch never existed on the server:
+  // drop the whole sequence instead of pushing a tombstone the server would
+  // reject (unknown id without a type). Safe: a successful push clears the
+  // queue, so both ops can only coexist if neither was pushed yet.
+  const lastById = new Map<string, QueuedOp>()
+  ops.forEach((op) => lastById.set(op.id, op))
+  const firstKind = new Map<string, QueuedOp['kind']>()
+  for (const op of ops) if (!firstKind.has(op.id)) firstKind.set(op.id, op.kind)
+  const neverSynced = new Set<string>()
+  for (const [id, last] of lastById) {
+    if (last.kind === 'removed' && firstKind.get(id) === 'created') neverSynced.add(id)
+  }
   const lastIdx = new Map<string, number>()
   ops.forEach((op, i) => lastIdx.set(op.id, i))
-  const compressed = ops.filter((op, i) => lastIdx.get(op.id) === i)
+  const compressed = ops.filter((op, i) => lastIdx.get(op.id) === i && !neverSynced.has(op.id))
   // A merged "changed"/"moved" op for a node whose "created" op was dropped
   // must still carry creation fields (type/url), otherwise the server cannot
   // materialize the new row. Fold creation data into the surviving op.

@@ -194,8 +194,9 @@ const { execSync } = require('child_process')
   await new Promise(r => setTimeout(r, 2000)) // let scheduleFlush drain
   const tree2 = await api('/api/bookmarks/tree', undefined, { Cookie: cookie })
   const base = JSON.parse(tree2.body).nodes.find(n => n.title === '冲突基准')
-  // A writes first
-  await A.cmd('update', { id: base.id, patch: { title: 'A 的修改' } })
+  // A writes first — resolve the server id to A's local id (minted UUIDs)
+  const aLocal = (await A.cmd('localIdOf', { serverId: base.id })) || base.id
+  await A.cmd('update', { id: aLocal, patch: { title: 'A 的修改' } })
   await A.cmd('resync')
   await new Promise(r => setTimeout(r, 1200))
   // B writes later — must win
