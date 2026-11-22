@@ -39,6 +39,24 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T
 }
 
+export async function uploadFile<T = any>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
+  const fd = new FormData()
+  fd.append('file', file)
+  for (const [k, v] of Object.entries(fields)) fd.append(k, v)
+  const headers: Record<string, string> = {}
+  if (csrfToken) headers['X-CSRF'] = csrfToken
+  const resp = await fetch(BASE + path, { method: 'POST', headers, credentials: 'same-origin', body: fd })
+  if (resp.status === 401) {
+    window.dispatchEvent(new CustomEvent('md:unauthorized'))
+    throw new ApiError(401, '登录已过期')
+  }
+  const text = await resp.text()
+  let data: any = null
+  if (text) { try { data = JSON.parse(text) } catch { data = { raw: text } } }
+  if (!resp.ok) throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
+  return data as T
+}
+
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { uploadFile } from '@/api/client'
 
 const uploading = ref(false)
 const mode = ref<'newfolder' | 'merge'>('merge')
@@ -14,13 +15,10 @@ async function upload() {
   uploading.value = true
   result.value = null
   try {
-    const fd = new FormData()
-    fd.append('file', f)
-    fd.append('mode', mode.value)
-    if (mode.value === 'newfolder') fd.append('rootName', rootName.value || '导入的书签')
-    const resp = await fetch('/api/import/html', { method: 'POST', body: fd, credentials: 'same-origin' })
-    const data = await resp.json()
-    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+    const data = await uploadFile<{ created: number; duplicates: number; errors?: string[] }>(
+      '/api/import/html', f,
+      { mode: mode.value, ...(mode.value === 'newfolder' ? { rootName: rootName.value || '导入的书签' } : {}) },
+    )
     result.value = data
     ElMessage.success(`导入完成：新增 ${data.created}，跳过重复 ${data.duplicates}`)
   } catch (e: any) {
