@@ -30,6 +30,7 @@ export interface QueuedOp {
   oldIndex?: number
   index?: number
   at: number
+  tags?: string[]  // popup quick-save tags (applied on create)
 }
 
 export interface SyncResult {
@@ -69,6 +70,7 @@ export function opsToPushPayload(ops: QueuedOp[], deviceId: string, nodes: Map<s
           title: op.title ?? '',
           url: op.url ?? '',
           position: (op.index ?? 0) + 1,
+          ...(op.tags && op.tags.length ? { tags: op.tags } : {}),
         }
       case 'changed':
         return { ...base, title: op.title ?? known?.title ?? '' }

@@ -338,7 +338,10 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
           title: msg.title,
           url: msg.url,
         })
-        await enqueue({ kind: 'created', id: created.id, parentId: created.parentId || '', title: msg.title, url: msg.url, index: created.index ?? 0, at: Math.floor(Date.now() / 1000) })
+        const tags = typeof msg.tags === 'string' && msg.tags.trim()
+          ? msg.tags.split(/[,，]/).map((t: string) => t.trim()).filter(Boolean)
+          : undefined
+        await enqueue({ kind: 'created', id: created.id, parentId: created.parentId || '', title: msg.title, url: msg.url, index: created.index ?? 0, at: Math.floor(Date.now() / 1000), tags })
         sendResponse({ ok: true })
       } catch (e: any) {
         sendResponse({ ok: false, error: e.message })
