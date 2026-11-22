@@ -22,7 +22,10 @@ describe('compressQueue', () => {
     ]
     const out = compressQueue(ops)
     expect(out.map((o) => o.id).sort()).toEqual(['a', 'b'])
-    expect(out.find((o) => o.id === 'a')!.kind).toBe('changed')
+    // created+changed merge: surviving op keeps creation fields, latest title
+    const a = out.find((o) => o.id === 'a')!
+    expect(a.kind).toBe('created')
+    expect(a.title).toBe('x')
   })
 })
 

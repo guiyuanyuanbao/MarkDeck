@@ -67,10 +67,17 @@ func (s *Store) UpdateLWW(in *Bookmark, tags []string) (*Bookmark, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
-	if cur.UpdatedAt > in.UpdatedAt ||
-		(cur.UpdatedAt == in.UpdatedAt && cur.DeviceID >= in.DeviceID) {
-		// incoming loses; keep current
+	if cur.UpdatedAt > in.UpdatedAt {
 		return cur, false, nil
+	}
+	if cur.UpdatedAt == in.UpdatedAt {
+		// Same second. Distinct devices: higher device id wins (deterministic).
+		// Same device: the device's own later edit always wins.
+		if cur.DeviceID != in.DeviceID {
+			if cur.DeviceID > in.DeviceID {
+				return cur, false, nil
+			}
+		}
 	}
 	tx, err := s.DB.Begin()
 	if err != nil {

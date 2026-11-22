@@ -45,9 +45,28 @@ export interface SyncResult {
 export function compressQueue(ops: QueuedOp[]): QueuedOp[] {
   const lastIdx = new Map<string, number>()
   ops.forEach((op, i) => lastIdx.set(op.id, i))
-  return ops.filter((op, i) => {
-    if (lastIdx.get(op.id) !== i) return false
-    return true
+  const compressed = ops.filter((op, i) => lastIdx.get(op.id) === i)
+  // A merged "changed"/"moved" op for a node whose "created" op was dropped
+  // must still carry creation fields (type/url), otherwise the server cannot
+  // materialize the new row. Fold creation data into the surviving op.
+  const createdById = new Map<string, QueuedOp>()
+  for (const op of ops) {
+    if (op.kind === 'created' && !createdById.has(op.id)) createdById.set(op.id, op)
+  }
+  return compressed.map((op) => {
+    const created = createdById.get(op.id)
+    if (op.kind !== 'created' && created) {
+      return {
+        ...op,
+        kind: 'created',
+        parentId: op.parentId ?? created.parentId,
+        title: op.title ?? created.title,
+        url: created.url,
+        index: op.index ?? created.index,
+        tags: op.tags ?? created.tags,
+      }
+    }
+    return op
   })
 }
 
@@ -56,9 +75,12 @@ export function opsToPushPayload(ops: QueuedOp[], deviceId: string, nodes: Map<s
   const now = Math.floor(Date.now() / 1000)
   return ops.map((op) => {
     const known = nodes.get(op.id)
+    // updatedAt must be the REAL local edit time (op.at) — inflating it to
+    // push time would let a stale queued edit overwrite a newer remote
+    // change and break LWW for everyone else.
     const base: Record<string, unknown> = {
       id: op.id,
-      updatedAt: Math.max(now, op.at),
+      updatedAt: op.at > 0 ? op.at : now,
       deviceId,
     }
     switch (op.kind) {
@@ -103,7 +125,14 @@ export type RemoteAction =
 
 export function planRemoteActions(changes: NodeState[], localNodes: Map<string, NodeState>): RemoteAction[] {
   const actions: RemoteAction[] = []
+  // 同一节点在本批可能带多条变更（created+changed 各自 bump 了 revision）；
+  // 只保留 revision 最大的一条，避免对同一 id 重复 create/update。
+  const latest = new Map<string, NodeState>()
   for (const c of changes) {
+    const cur = latest.get(c.id)
+    if (!cur || c.revision > cur.revision) latest.set(c.id, c)
+  }
+  for (const c of latest.values()) {
     if (c.deviceId === '__self__') continue // our own echo
     const local = localNodes.get(c.id)
     if (c.deletedAt && c.deletedAt > 0) {

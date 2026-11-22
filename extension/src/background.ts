@@ -19,6 +19,7 @@ interface Config {
 const QUEUE_KEY = 'md_queue'
 const CONFIG_KEY = 'md_config'
 const LOCAL_KEY = 'md_local_nodes'
+const IDMAP_KEY = 'md_id_map' // { serverId: localId } — local ids differ per browser
 const ALARM = 'md-poll'
 
 let applyingRemote = false
@@ -43,8 +44,22 @@ async function getQueue(): Promise<QueuedOp[]> {
 async function setQueue(q: QueuedOp[]) {
   await chrome.storage.local.set({ [QUEUE_KEY]: q })
 }
+// Nodes created/updated by applyRemote fire chrome.bookmarks events that
+// would be re-enqueued and pushed back, resurrecting tombstones. applyRemote
+// sets applyingRemote=true during its run, but its writes land BEFORE the
+// finally-block resets the flag only within the same tick; bookmark events
+// are async, so we also track recently-applied local ids explicitly.
+// id -> title applied by the last remote sync; a matching local event is
+// our own echo. A user edit right after sync has a different title and
+// still gets pushed.
+const recentlyApplied = new Map<string, string>()
 async function enqueue(op: QueuedOp) {
   if (applyingRemote) return
+  if (recentlyApplied.has(op.id)) {
+    if (op.kind === 'removed') { recentlyApplied.delete(op.id); return }
+    if (op.kind === 'changed' && op.title === recentlyApplied.get(op.id)) return
+    recentlyApplied.delete(op.id) // content differs: real user edit
+  }
   const q = await getQueue()
   q.push(op)
   await setQueue(q)
@@ -78,18 +93,19 @@ async function refreshLocalCache(): Promise<Map<string, NodeState>> {
   // Only sync the "Bookmarks Bar" subtree: find its root id
   const barRoot = tree[0]?.children?.find((c) => c.id === '1')
   const scope = new Map<string, NodeState>()
-  if (barRoot) scope.set(barRoot.id, map.get(barRoot.id)!)
-  const walkScoped = (id: string) => {
+  // async walk that fully awaits getChildren before persisting — a .then
+  // fire-and-forget here raced the storage.set below and left the cache
+  // incomplete (tombstone deletes then silently missed their local nodes).
+  const walkScoped = async (id: string): Promise<void> => {
     const n = map.get(id)
     if (!n) return
-    chrome.bookmarks.getChildren(id).then((kids) => {
-      for (const k of kids) {
-        scope.set(k.id, map.get(k.id)!)
-        if (!k.url) walkScoped(k.id)
-      }
-    })
+    scope.set(id, n)
+    const kids = await chrome.bookmarks.getChildren(id)
+    for (const k of kids) {
+      await walkScoped(k.id)
+    }
   }
-  if (barRoot) walkScoped(barRoot.id)
+  if (barRoot) await walkScoped(barRoot.id)
   await chrome.storage.local.set({ [LOCAL_KEY]: Object.fromEntries(scope) })
   return scope
 }
@@ -98,6 +114,31 @@ async function localCache(): Promise<Map<string, NodeState>> {
   const st = await chrome.storage.local.get(LOCAL_KEY)
   const obj = (st[LOCAL_KEY] as Record<string, NodeState>) || {}
   return new Map(Object.entries(obj))
+}
+
+// ---- server<->local id mapping ----
+// The server knows nodes by the creator device's local id. Other devices
+// create their own local ids when applying remote creates, so every device
+// keeps a serverId->localId map to translate push/pull payloads.
+async function idMap(): Promise<Record<string, string>> {
+  const st = await chrome.storage.local.get(IDMAP_KEY)
+  return (st[IDMAP_KEY] as Record<string, string>) || {}
+}
+async function setIdMap(map: Record<string, string>) {
+  await chrome.storage.local.set({ [IDMAP_KEY]: map })
+}
+async function mapToServerId(localId: string): Promise<string> {
+  const map = await idMap()
+  return map[localId] || localId // creator devices use local id == server id
+}
+async function mapToLocalId(serverId: string): Promise<string | null> {
+  const map = await idMap()
+  return map[serverId] ?? serverId // creator devices keep local id == server id
+}
+async function recordIdMapping(serverId: string, localId: string) {
+  const map = await idMap()
+  map[serverId] = localId
+  await setIdMap(map)
 }
 
 function bookmarksBarRoot(): string {
@@ -113,6 +154,7 @@ function apiBase(server: string) {
 async function apiFetch(cfg: Config, path: string, init?: RequestInit): Promise<Response> {
   return fetch(apiBase(cfg.server) + path, {
     ...init,
+    signal: AbortSignal.timeout(15000), // never let a hung connection block sync
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${cfg.token}`,
@@ -125,6 +167,11 @@ async function pushQueue(cfg: Config): Promise<boolean> {
   let q = await getQueue()
   if (!q.length) return true
   q = compressQueue(q)
+  // translate local ids to server ids (nodes created by remote devices)
+  for (const op of q) {
+    op.id = await mapToServerId(op.id)
+    if (op.parentId) op.parentId = await mapToServerId(op.parentId)
+  }
   const nodes = await localCache()
   const payload = opsToPushPayload(q, cfg.deviceId, nodes)
   try {
@@ -138,6 +185,7 @@ async function pushQueue(cfg: Config): Promise<boolean> {
     }
     if (!resp.ok) throw new Error(`push HTTP ${resp.status}`)
     await setQueue([])
+    await refreshLocalCache() // local creates bypass applyRemote; keep cache fresh
     return true
   } catch {
     // offline: queue keeps accumulating (bounded to avoid runaway storage)
@@ -175,17 +223,38 @@ async function applyRemote(changes: NodeState[]) {
       try {
         if (act.action === 'create') {
           const n = act.node
-          if (n.type === 'url') {
-            await chrome.bookmarks.create({ parentId: mapParent(n.parentId), title: n.title, url: n.url })
-          } else {
-            await chrome.bookmarks.create({ parentId: mapParent(n.parentId), title: n.title })
-          }
+          // pre-mark BEFORE the chrome call: the bookmark event fires
+          // asynchronously and must find the guard already in place
+          recentlyApplied.set('__pre__' + n.id, n.title)
+          // parent may itself need translating (folder created by remote)
+          const parentLocal = await mapToLocalId(n.parentId)
+          const created = n.type === 'url'
+            ? await chrome.bookmarks.create({ parentId: parentLocal ? parentLocal : bookmarksBarRoot(), title: n.title, url: n.url })
+            : await chrome.bookmarks.create({ parentId: parentLocal ? parentLocal : bookmarksBarRoot(), title: n.title })
+          // remember which server id this new local node corresponds to
+          await recordIdMapping(n.id, created.id)
+          recentlyApplied.delete('__pre__' + n.id)
+          recentlyApplied.set(created.id, n.title)
         } else if (act.action === 'update') {
-          await chrome.bookmarks.update(act.node.id, { title: act.node.title, url: act.node.url })
+          const localId = await mapToLocalId(act.node.id)
+          if (localId) {
+            recentlyApplied.set(localId, act.node.title) // pre-mark
+            await chrome.bookmarks.update(localId, { title: act.node.title, url: act.node.url })
+          }
         } else if (act.action === 'remove') {
-          await chrome.bookmarks.removeTree(act.id)
+          const localId = await mapToLocalId(act.id)
+          if (localId) {
+            recentlyApplied.delete(localId) // removal events must NOT be blocked
+            await chrome.bookmarks.removeTree(localId)
+          }
         } else if (act.action === 'move') {
-          await chrome.bookmarks.move(act.id, { parentId: mapParent(act.parentId), index: act.index })
+          const localId = await mapToLocalId(act.id)
+          const parentLocal = await mapToLocalId(act.parentId)
+          if (localId) {
+            await chrome.bookmarks.move(localId, { parentId: parentLocal || mapParent(act.parentId), index: act.index })
+            const movedTitle = 'node' in act ? (act.node as { title?: string } | undefined)?.title ?? '' : ''
+            recentlyApplied.set(localId, movedTitle)
+          }
         }
       } catch {
         // individual action failures shouldn't abort the batch
