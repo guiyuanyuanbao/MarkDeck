@@ -40,6 +40,13 @@ const browserNodeByTitle = (sw, title) => sw.evaluate(async (t) => {
 
 async function main() {
   console.log('== MarkDeck real-data import E2E (user export) ==')
+  // the fixture is PERSONAL data, gitignored, local-only by design
+  if (!fs.existsSync(FIXTURE)) {
+    console.log('SKIP: fixtures/user-bookmarks.html not present (personal data, gitignored).')
+    console.log('To run locally, place your Netscape export at:')
+    console.log('  ' + FIXTURE)
+    process.exit(0)
+  }
   execSync(`node "${path.resolve(__dirname, '..', 'helpers', 'patch-manifest-e2e.js')}"`, { stdio: 'ignore' })
 
   try { execSync('taskkill /F /IM markdeck-final.exe', { stdio: 'ignore' }) } catch {}
