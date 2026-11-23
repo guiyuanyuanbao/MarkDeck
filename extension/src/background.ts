@@ -422,6 +422,20 @@ async function applyRemote(changes: NodeState[]) {
       try {
         if (act.action === 'create') {
           const n = act.node
+          // same-URL adoption: when the mapping tables are empty (fresh
+          // device, or forceResync recovery) a live server row whose URL
+          // already exists in the browser must NOT be created again —
+          // adopt the existing local node instead, or a full replay would
+          // duplicate every bookmark the device already has
+          if (n.type === 'url' && n.url) {
+            const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
+            const hit = (existing as chrome.bookmarks.BookmarkTreeNode[]).find(b => !!b.id)
+            if (hit) {
+              await recordIdMapping(n.id, hit.id)
+              recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
+              continue
+            }
+          }
           // pre-mark BEFORE the chrome call: the bookmark event fires
           // asynchronously and must find the guard already in place
           recentlyApplied.set('__pre__' + n.id, { title: n.title })
@@ -666,6 +680,12 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
     } else if (msg.type === 'resync') {
       await fullSync()
       sendResponse({ ok: true })
+    } else if (msg.type === 'forceResync') {
+      // last-resort recovery: wipe every local sync artifact (mappings, node
+      // cache, revision cursor) and replay the whole server history as if
+      // the device had just paired (see forceResync() below for details)
+      forceResync().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
+      return true
     } else if (msg.type === 'deepDiag') {
       deepDiag().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
       return true
@@ -862,3 +882,39 @@ async function deepDiag() {
   }
 }
 ;(globalThis as unknown as Record<string, unknown>).__markdeckDeepDiag = deepDiag
+
+// recovery path shared with the options diagnostics card
+async function forceResync() {
+  applyingRemote = true
+  try {
+    const cfg0 = await getConfig()
+    if (!cfg0?.token) return { ok: false, error: 'not paired' }
+    await setIdMap({})
+    await chrome.storage.local.set({ [L2S_KEY]: {} })
+    await chrome.storage.local.set({ [LOCAL_KEY]: {} })
+    await saveConfigPatch({ rev: 0 })
+    let pulled = 0
+    let since = 0
+    for (let guard = 0; guard < 100; guard++) {
+      const resp = await apiFetch(cfg0, `/api/sync/device-pull?since=${since}`)
+      if (resp.status === 401) return { ok: false, error: 'token invalid' }
+      if (!resp.ok) throw new Error(`pull HTTP ${resp.status}`)
+      const data = await resp.json() as { changes: NodeState[]; head: number }
+      const batch = data.changes || []
+      pulled += batch.length
+      if (batch.length) await applyRemote(batch)
+      await saveConfigPatch({ rev: data.head })
+      if (!batch.length || data.head <= since) break
+      since = data.head
+    }
+    await refreshLocalCache()
+    return { ok: true, pulled }
+  } catch (e: any) {
+    return { ok: false, error: e.message }
+  } finally {
+    applyingRemote = false
+    const pending = deferredOps.splice(0)
+    for (const op of pending) enqueue(op).catch(() => {})
+  }
+}
+;(globalThis as unknown as Record<string, unknown>).__markdeckForceResync = forceResync

@@ -204,7 +204,30 @@ async function runDiagnostics() {
         row(true, '书签一致性', '浏览器已包含服务端全部 URL')
       } else {
         row(false, '书签一致性', `服务端有 ${deep.sampleMissing} 条 URL 浏览器没有（示例: ${deep.missingLocally.slice(0, 3).join(', ')}）`)
-        fail('拉取已完成但应用环节没有写入浏览器 — 请把本行详情反馈给开发者')
+        fail('拉取已完成但应用环节没有写入浏览器 — 点下方「强制重建同步」')
+        // expose the rebuild action next to the failed row
+        const card = document.getElementById('diagCard')!
+        if (!document.getElementById('rebuildBtn')) {
+          const actions = card.querySelector('.actions')!
+          const btn = document.createElement('button')
+          btn.id = 'rebuildBtn'
+          btn.className = 'btn-primary'
+          btn.textContent = '⚡ 强制重建同步（清空映射并重新全量拉取）'
+          btn.onclick = async () => {
+            btn.disabled = true
+            btn.textContent = '重建中…'
+            try {
+              const resp = await chrome.runtime.sendMessage({ type: 'forceResync' })
+              summary.textContent = resp?.ok
+                ? `重建完成 — 服务端 ${resp.pulled} 行已重新应用，点「重新检测」确认`
+                : '重建失败: ' + (resp?.error || '未知错误')
+            } finally {
+              btn.disabled = false
+              btn.textContent = '⚡ 强制重建同步（清空映射并重新全量拉取）'
+            }
+          }
+          actions.appendChild(btn)
+        }
       }
       row(null, '映射表健康', `server→local ${deep.mappingRows} 条 / local→server ${deep.l2sRows} 条，一致=${deep.idMapConsistent ? '是' : '否'}`)
     }

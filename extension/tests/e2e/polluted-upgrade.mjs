@@ -164,6 +164,52 @@ async function main() {
   }
   log('P3: post-repair push sync still works', postOk)
 
+  // ---- P4: user's exact terminal state — BOTH tables empty, browser has
+  // partial content, rev caught up. forceResync must rebuild everything. ----
+  await sw.evaluate(async () => {
+    await chrome.storage.local.set({ md_id_map: {} })
+    await chrome.storage.local.set({ md_l2s: {} })
+    // wipe a couple of bookmarks to simulate the browser being partially empty
+    const tree = await chrome.bookmarks.getTree()
+    const victims = []
+    const walk = (ns) => { for (const x of ns) { if (x.url && x.url.includes('pollute.sm')) victims.push(x); if (x.children) walk(x.children) } }
+    for (const root of tree) if (root.children) walk(root.children)
+    if (victims[0]) await chrome.bookmarks.remove(victims[0].id).catch(() => {})
+  })
+  await new Promise(r => setTimeout(r, 1500))
+  const fr = await sw.evaluate(async () => {
+    if (typeof globalThis.__markdeckForceResync === 'function') return await globalThis.__markdeckForceResync()
+    return chrome.runtime.sendMessage({ type: 'forceResync' })
+  })
+  console.log('[forceResync]', JSON.stringify(fr))
+  log('P4 setup: forceResync executed', fr?.ok === true, 'pulled=' + fr?.pulled)
+  let allAfter = false
+  for (let i = 0; i < 15; i++) {
+    const titles = await browserTitles(sw)
+    allAfter = ['升级场景书签A', '升级场景书签B', '升级场景书签C'].every(t => titles.includes(t))
+    if (allAfter) break
+    await new Promise(r => setTimeout(r, 600))
+  }
+  log('P4: forceResync restores ALL server bookmarks (including removed one)',
+    allAfter, 'titles=' + JSON.stringify(await browserTitles(sw)))
+  const health2 = await sw.evaluate(async () => {
+    const map = (await chrome.storage.local.get('md_id_map')).md_id_map || {}
+    const l2s = (await chrome.storage.local.get('md_l2s')).md_l2s || {}
+    return { mapRows: Object.keys(map).length, l2sRows: Object.keys(l2s).length }
+  })
+  log('P4b: mapping tables fully rebuilt', health2.mapRows > 0 && health2.l2sRows > 0,
+    JSON.stringify(health2))
+  const dupCount = await sw.evaluate(async () => {
+    const tree = await chrome.bookmarks.getTree()
+    const urls = new Map()
+    let dups = 0
+    const walk = (ns) => { for (const x of ns) { if (x.url) { urls.set(x.url, (urls.get(x.url) || 0) + 1) } if (x.children) walk(x.children) } }
+    for (const root of tree) if (root.children) walk(root.children)
+    for (const c of urls.values()) if (c > 1) dups++
+    return dups
+  })
+  log('P4c: no duplicate URLs after adoption-based rebuild', dupCount === 0, 'dupUrls=' + dupCount)
+
   await page.close()
   console.log('\n=== POLLUTED-UPGRADE E2E RESULT ===')
   console.log(`${results.filter(r => r.ok).length} passed, ${results.filter(r => !r.ok).length} failed`)
