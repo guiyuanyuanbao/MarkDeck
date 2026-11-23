@@ -66,6 +66,16 @@ func (s *Store) RestoreFromDump(rows []*Bookmark, deviceID string) error {
 	}
 	defer tx.Rollback()
 
+	// revision continuity: clients remember the last head they pulled (a
+	// changes.seq). Rewriting the change log would restart seq below that
+	// remembered head, so every client's next `since=head` pull would come
+	// back EMPTY and never learn about the restore. Reserve a seq block past
+	// the old watermark for the rewritten entries.
+	var oldMaxSeq int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM changes`).Scan(&oldMaxSeq); err != nil {
+		return err
+	}
+
 	// drop old state
 	if _, err := tx.Exec(`DELETE FROM bookmarks`); err != nil {
 		return err
@@ -112,12 +122,18 @@ func (s *Store) RestoreFromDump(rows []*Bookmark, deviceID string) error {
 			return err
 		}
 	}
-	// fresh change log: every restored row gets one entry
-	if _, err := tx.Exec(`INSERT INTO changes(bookmark_id, at)
-		SELECT id, ? FROM bookmarks`, at); err != nil {
+	// fresh change log: every restored row gets one entry, numbered from a
+	// block that starts past the pre-restore watermark so clients holding
+	// `since = oldHead` still see every restored row
+	if _, err := tx.Exec(`INSERT INTO changes(seq, bookmark_id, at)
+		SELECT ? + ROW_NUMBER() OVER (ORDER BY id), id, ? FROM bookmarks`, oldMaxSeq, at); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE bookmarks SET revision=(SELECT seq FROM changes c WHERE c.bookmark_id=bookmarks.id)`); err != nil {
+		return err
+	}
+	// keep sqlite_sequence past the block so future bumps never collide
+	if _, err := tx.Exec(`UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name='changes'`, oldMaxSeq); err != nil {
 		return err
 	}
 	return tx.Commit()

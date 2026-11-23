@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -71,12 +72,16 @@ func (s *Store) UpdateLWW(in *Bookmark, tags []string) (*Bookmark, bool, error) 
 		return cur, false, nil
 	}
 	if cur.UpdatedAt == in.UpdatedAt {
-		// Same second. Distinct devices: higher device id wins (deterministic).
-		// Same device: the device's own later edit always wins.
-		if cur.DeviceID != in.DeviceID {
-			if cur.DeviceID > in.DeviceID {
-				return cur, false, nil
-			}
+		// Same-second tie. The old rule compared device-id strings, which made
+		// the web UI's fixed "web" id beat EVERY extension id ('w' sorts above
+		// any uuid) — a rename pushed by the extension within the same second
+		// as a web edit was silently discarded. The tiebreaker must be
+		// deterministic ACROSS devices (every replica must resolve the same
+		// winner without extra communication), so it hashes the candidate
+		// content: every device comparing (cur, in) sees both payloads and
+		// computes the same verdict.
+		if cur.DeviceID != in.DeviceID && lwwTieKey(cur) > lwwTieKey(in) {
+			return cur, false, nil
 		}
 	}
 	tx, err := s.DB.Begin()
@@ -210,17 +215,27 @@ func (s *Store) Restore(id string, at int64, deviceID string) (*Bookmark, error)
 	if err != nil {
 		return nil, err
 	}
+	// restoring a folder must revive its whole subtree: DeleteSoft tombstoned
+	// every descendant, and without this they stayed invisible (revision
+	// unchanged, so remote devices never learned they were back either)
+	ids, err := s.SubtreeIDs(id)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, parent_id=?, position=?, updated_at=?, device_id=? WHERE id=?`,
-		parent, pos+1, at, deviceID, id); err != nil {
-		return nil, err
-	}
-	if _, err := bumpChange(tx, id); err != nil {
-		return nil, err
+	for i, bid := range ids {
+		newPos := pos + 1 + float64(i)
+		if _, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, parent_id=CASE WHEN id=? THEN ? ELSE parent_id END, position=CASE WHEN id=? THEN ? ELSE position END, updated_at=?, device_id=? WHERE id=?`,
+			id, parent, id, newPos, at, deviceID, bid); err != nil {
+			return nil, err
+		}
+		if _, err := bumpChange(tx, bid); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -366,13 +381,16 @@ func (s *Store) Move(id, newParent string, position float64, at int64, deviceID 
 	if err != nil {
 		return nil, err
 	}
+	// moving a trashed node would silently resurrect it outside the trash
+	// flow (no restore event, subtree left tombstoned); the UI's restore
+	// action is the only sanctioned un-delete path
+	if b.DeletedAt > 0 {
+		return nil, fmt.Errorf("node is in the trash; restore it before moving")
+	}
 	b.ParentID = newParent
 	b.Position = position
 	b.UpdatedAt = at
 	b.DeviceID = deviceID
-	if b.DeletedAt > 0 {
-		b.DeletedAt = 0 // moving out of trash restores it
-	}
 	out, _, err := s.UpdateLWW(b, nil)
 	return out, err
 }
@@ -458,6 +476,28 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// lwwTieKey is the same-second LWW tiebreaker: a deterministic, device-neutral
+// total order over candidate content. Both replicas evaluating (cur, in)
+// compute identical keys, so they converge without coordination. Device id is
+// deliberately NOT the key: a fixed id like the web UI's "web" sorts above
+// every uuid and would silently beat all extension edits made in the same
+// second. deletedAt participates with LIVE-PRECEDENCE: within one second a
+// live row beats a tombstone — a tombstone authored in that same second is
+// almost always a stale offline delete racing a newer upstream edit (a
+// genuinely newer delete carries a later second and wins on updatedAt).
+func lwwTieKey(b *Bookmark) string {
+	live := "1"
+	if b.DeletedAt > 0 {
+		live = "0"
+	}
+	parts := []string{
+		b.Title, b.URL, b.Note, b.ParentID,
+		strconv.FormatFloat(b.Position, 'f', -1, 64),
+		live,
+	}
+	return strings.Join(parts, "\x00")
 }
 
 // normalizeTag trims, collapses internal whitespace and lowercases the tag

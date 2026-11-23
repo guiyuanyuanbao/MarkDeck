@@ -120,10 +120,24 @@ export function opsToPushPayload(ops: QueuedOp[], deviceId: string, nodes: Map<s
 
 // ---- conflict-safe merge decision (client-side mirror of server LWW) ----
 
+// same-second tiebreaker — MUST stay in sync with the server's lwwTieKey
+// (store/bookmarks.go): content-only hash so every replica resolves
+// identically. Device id is excluded on purpose: the web UI's fixed 'web'
+// id sorts above every uuid and would silently beat same-second extension
+// edits. deletedAt participates with LIVE-PRECEDENCE: within one second a
+// live row beats a tombstone (a tombstone authored in that same second is
+// almost always a stale offline delete racing a newer upstream edit — if
+// the delete were genuinely newer it would carry a later second).
+export function lwwTieKey(n: { title: string; url?: string; note?: string; parentId: string; position: number; deletedAt?: number }): string {
+  return [n.title, n.url ?? '', n.note ?? '', n.parentId, String(n.position),
+    (n.deletedAt ?? 0) > 0 ? '0' : '1'].join('\x00')
+}
+
 export function clientWins(local: NodeState | undefined, remote: NodeState): boolean {
   if (!local) return false // remote wins for unknown nodes
   if (local.updatedAt !== remote.updatedAt) return local.updatedAt > remote.updatedAt
-  return local.deviceId > remote.deviceId // higher device id wins ties
+  if (local.deviceId === remote.deviceId) return true // our own later edit
+  return lwwTieKey(local) > lwwTieKey(remote)
 }
 
 // Apply a remote change description onto the local browser tree.
