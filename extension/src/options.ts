@@ -92,4 +92,112 @@ async function checkConflict() {
 }
 checkConflict()
 
+// ---- sync diagnostics: pinpoint WHERE the chain breaks ----
+// (pair -> permission -> push/pull -> WS realtime -> local apply)
+async function runDiagnostics() {
+  const card = document.getElementById('diagCard')!
+  const rows = document.getElementById('diagRows')!
+  const summary = document.getElementById('diagSummary')!
+  const hint = document.getElementById('diagHint')!
+  card.style.display = 'block'
+  rows.innerHTML = ''
+  const row = (ok: boolean | null, label: string, detail = '') => {
+    const div = document.createElement('div')
+    const icon = ok === true ? '✅' : ok === false ? '❌' : '⏳'
+    div.innerHTML = `${icon} ${label}${detail ? ` <span style="color:var(--text3)">${detail}</span>` : ''}`
+    rows.appendChild(div)
+    return ok
+  }
+
+  let broken: string | null = null
+  const fail = (why: string) => { if (!broken) broken = why }
+
+  // 1. config exists?
+  const cfg = (await chrome.storage.local.get('md_config')).md_config as {
+    server?: string; token?: string; rev?: number
+  } | undefined
+  if (!cfg?.token) {
+    row(false, '配对状态', '未配对')
+    fail('尚未完成配对')
+  } else {
+    row(true, '配对状态', cfg.server)
+  }
+
+  // 2. host permission granted? (MV3 fetch silently fails without it)
+  if (cfg?.server) {
+    let granted = false
+    try {
+      const origin = new URL(cfg.server).origin + '/*'
+      granted = await chrome.permissions.contains({ origins: [origin] })
+    } catch { /* malformed url */ }
+    if (granted) row(true, '站点访问权限')
+    else {
+      row(false, '站点访问权限', '未授权 — fetch 将全部失败')
+      fail('未授予服务器站点的访问权限（配对时应有弹窗授权）')
+    }
+  }
+
+  // 3. live reachability from the extension's own context
+  if (cfg?.server) {
+    let reachable = false
+    let serverRev = -1
+    try {
+      const r = await fetch(cfg.server.replace(/\/+$/, '') + '/api/auth/state', { signal: AbortSignal.timeout(6000) })
+      reachable = r.ok
+    } catch { /* offline */ }
+    if (reachable) {
+      try {
+        const pr = await fetch(cfg.server.replace(/\/+$/, '') + '/api/sync/status', {
+          headers: { Authorization: 'Bearer ' + cfg.token }, signal: AbortSignal.timeout(6000),
+        })
+        if (pr.ok) serverRev = (await pr.json()).head
+        row(true, '服务器可达')
+        if (serverRev >= 0) row(true, '服务端最新版本号 (head)', 'rev=' + serverRev)
+        else row(false, '服务端最新版本号', 'status 接口异常')
+      } catch {
+        row(false, '服务端最新版本号', '查询失败')
+        fail('服务器可达但同步接口异常')
+      }
+    } else {
+      row(false, '服务器可达', 'extension 内 fetch 失败')
+      fail('插件无法访问服务器（权限或网络）')
+    }
+
+    // 4. local pull progress vs server head
+    const rev = Number(cfg.rev) || 0
+    if (serverRev >= 0) {
+      if (rev >= serverRev && serverRev >= 0) row(true, '本地同步进度', `rev=${rev}/${serverRev}（已追平）`)
+      else {
+        row(null, '本地同步进度', `rev=${rev}/${serverRev}（落后，等待/触发同步）`)
+      }
+    }
+
+    // 5. offline queue
+    const qRaw = (await chrome.storage.local.get('md_queue')).md_queue
+    const q = Array.isArray(qRaw) ? qRaw.length : 0
+    if (q === 0) row(true, '离线队列', '空')
+    else row(null, '离线队列', `${q} 条待推送`)
+
+    // 6. WS realtime channel
+    const st = (await chrome.storage.local.get('md_status')).md_status
+    if (st === 'online') row(true, '实时通道 (WebSocket)')
+    else if (st === 'disconnected') {
+      row(false, '实时通道 (WebSocket)', '未连接')
+      fail('WebSocket 未连上（服务器可达时通常是 token 失效前兆或网络抖动）')
+    } else if (st === 'unauthorized') {
+      row(false, '实时通道 (WebSocket)', '令牌失效')
+      fail('设备令牌已失效，需要重新配对')
+    }
+  }
+
+  summary.textContent = broken
+    ? '发现问题：' + broken
+    : '各项正常 — 若服务端书签仍未出现在浏览器，点击「手动全量同步」并确认浏览器书签栏'
+  hint.textContent = broken
+    ? '按上面第一个 ❌ 项处理后点「重新检测」。'
+    : '浏览器书签同步范围 = 书签栏 + 其他书签；远端文件夹会原样出现在这两处。'
+}
+$('diagRefresh').onclick = runDiagnostics
+runDiagnostics()
+
 export {}

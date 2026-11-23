@@ -227,6 +227,54 @@ async function hydrateIdMapSync() {
   setIdMapSync(await idMap())
 }
 
+// sanitizeIdMaps repairs mapping tables written by older, buggy releases:
+// earlier versions pushed raw local ids, spread a function object over the
+// persisted map, or minted a fresh UUID per lookup. Corrupt entries make
+// mapToLocalId return ids that no longer exist in the browser, so remote
+// creates get attached to dead parents or silently dropped — exactly the
+// "server bookmarks never appear in the browser" report. A mapping is stale
+// when the local side no longer exists; stale server-side ids (rows the
+// server deleted) prune themselves via tombstones, so only the local side
+// needs validating.
+async function sanitizeIdMaps() {
+  const tree = await chrome.bookmarks.getTree()
+  const liveIds = new Set<string>()
+  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+    for (const n of nodes) { liveIds.add(n.id); if (n.children) walk(n.children) }
+  }
+  for (const root of tree) if (root.children) walk(root.children)
+
+  const map = await idMap() // serverId -> localId
+  const l2s = await l2sMap() // localId -> serverId
+  let changed = false
+  for (const [sid, lid] of Object.entries(map)) {
+    if (!liveIds.has(lid)) {
+      console.warn('[markdeck] pruning map entry (local id gone):', sid.slice(0, 8), '->', lid)
+      delete map[sid]; changed = true
+    }
+  }
+  for (const lid of Object.keys(l2s)) {
+    if (!liveIds.has(lid)) {
+      console.warn('[markdeck] pruning l2s entry (local id gone):', lid, '->', (l2s[lid] || '').slice(0, 8))
+      delete l2s[lid]; changed = true
+    }
+  }
+  // cross-consistency: both directions must agree where both exist
+  for (const [sid, lid] of Object.entries(map)) {
+    if (lid && l2s[lid] !== undefined && l2s[lid] !== sid) {
+      // divergent double-mapping (node reminted by an old bug): trust the
+      // server direction and drop the stale reverse entry
+      delete l2s[lid]
+      changed = true
+    }
+  }
+  if (changed) {
+    await setIdMap(map)
+    await chrome.storage.local.set({ [L2S_KEY]: l2s })
+    console.warn('[markdeck] repaired stale id mappings')
+  }
+}
+
 function bookmarksBarRoot(): string {
   return '1' // Chrome/Edge fixed root id for the bookmarks bar
 }
@@ -535,6 +583,7 @@ function schedulePull() {
 }
 
 async function fullSync() {
+  await sanitizeIdMaps()
   await hydrateIdMapSync()
   const cfg = await getConfig()
   if (!cfg?.token) return
@@ -716,18 +765,26 @@ async function initialImport() {
         await apiFetch(cfg, '/api/sync/device-push', { method: 'POST', body: JSON.stringify(ops.slice(i, i + 500)) })
       }
     }
-    // persist local→server mapping so future local edits push to the right
-    // server nodes instead of colliding with other devices' ids.
-    // NOTE: this must be the localToServer table — spreading the idMap
-    // function object here silently dropped every new mapping and made
-    // later edits of imported bookmarks duplicate on the server.
-    // The holder also needs the reverse entry so remote children of the
-    // 其他书签 folder land in the browser's root '2', not the bookmarks bar.
-    const existing = await idMap()
-    const merged = { ...existing, ...localToServer }
+    // persist BOTH directions of the mapping, each in its own table:
+    //   md_id_map  is serverId -> localId (for translating pulled changes)
+    //   md_l2s     is localId  -> serverId (for translating pushed ops)
+    // Merging localToServer INTO idMap wrote l2s-shaped entries under
+    // server-id keys — the sanitize pass then saw value '1'/'2'/'5' as a
+    // "local id" and pruned live mappings, and mapToLocalId looked up
+    // server ids in a table full of local-id keys. This is exactly the
+    // corruption older releases shipped with.
+    const existingIdMap = await idMap()
+    const existingL2s = await l2sMap()
+    const nextIdMap: Record<string, string> = { ...existingIdMap }
+    const nextL2s: Record<string, string> = { ...existingL2s }
+    for (const [localId, serverId] of Object.entries(localToServer)) {
+      if (serverId) nextL2s[localId] = serverId // '' root entry stays l2s-only
+      if (serverId && localId !== '1' && localId !== '2') nextIdMap[serverId] = localId
+    }
     const othersHolderId = localToServer['others-root']
-    if (othersHolderId) merged[othersHolderId] = '2'
-    await setIdMap(merged)
+    if (othersHolderId) nextIdMap[othersHolderId] = '2' // remote kids of the holder land in root '2'
+    await setIdMap(nextIdMap)
+    await chrome.storage.local.set({ [L2S_KEY]: nextL2s })
     await refreshLocalCache()
   } finally {
     applyingRemote = false
