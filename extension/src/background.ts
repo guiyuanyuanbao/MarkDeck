@@ -126,11 +126,12 @@ async function refreshLocalCache(overrides?: Map<string, { deviceId: string; upd
     }
   }
   walk(tree, '')
-  // Sync scope: the Bookmarks Bar plus Other Bookmarks (roots '1' and '2'),
-  // so bookmarks saved outside the bar also participate in sync.
+  // Sync scope: the Bookmarks Bar plus Other Bookmarks. Root ids are NOT
+  // fixed ('1'/'2' only on legacy profiles; newer Chromium uses GUID ids),
+  // so resolve by position: first child = bar, last child = other bookmarks.
   const roots = tree[0]?.children ?? []
-  const barRoot = roots.find((c) => c.id === '1')
-  const otherRoot = roots.find((c) => c.id === '2')
+  const barRoot = roots[0]
+  const otherRoot = roots[roots.length - 1] !== barRoot ? roots[roots.length - 1] : undefined
   const scope = new Map<string, NodeState>()
   // async walk that fully awaits getChildren before persisting — a .then
   // fire-and-forget here raced the storage.set below and left the cache
@@ -287,7 +288,26 @@ async function sanitizeIdMaps() {
 }
 
 function bookmarksBarRoot(): string {
-  return '1' // Chrome/Edge fixed root id for the bookmarks bar
+  return '1' // legacy Chrome/Edge fixed root id — use barRootId() where possible
+}
+
+// root ids are NOT fixed: newer Chromium profiles use GUID-style permanent
+// node ids, so hardcoding '1' made every chrome.bookmarks.create fail with
+// "Can't find parent bookmark for id". Resolve the real roots from the tree.
+let cachedRoots: { bar: string; other?: string } | null = null
+async function resolveRoots(): Promise<{ bar: string; other?: string }> {
+  if (cachedRoots) return cachedRoots
+  const tree = await chrome.bookmarks.getTree()
+  const roots = tree[0]?.children ?? []
+  // identify by position, not title (localized titles vary):
+  // the first child is always the bookmarks bar, the last is "other bookmarks"
+  const bar = roots[0]?.id || '1'
+  const other = roots.length > 1 ? roots[roots.length - 1].id : undefined
+  cachedRoots = { bar, other }
+  return cachedRoots
+}
+async function barRootId(): Promise<string> {
+  return (await resolveRoots()).bar
 }
 
 // ---- server API ----
@@ -460,9 +480,10 @@ async function applyRemote(changes: NodeState[]) {
           if (parentLocal) {
             try { await chrome.bookmarks.get(parentLocal) } catch { parentLocal = null }
           }
+          const barRoot = await barRootId()
           const created = n.type === 'url'
-            ? await chrome.bookmarks.create({ parentId: parentLocal || bookmarksBarRoot(), title: n.title, url: n.url })
-            : await chrome.bookmarks.create({ parentId: parentLocal || bookmarksBarRoot(), title: n.title })
+            ? await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title, url: n.url })
+            : await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title })
           // remember which server id this new local node corresponds to
           await recordIdMapping(n.id, created.id)
           recentlyApplied.delete('__pre__' + n.id)
@@ -486,7 +507,7 @@ async function applyRemote(changes: NodeState[]) {
           const localId = await mapToLocalId(act.id)
           const parentLocal = await mapToLocalId(act.parentId)
           if (localId) {
-            const target = parentLocal || mapParent(act.parentId)
+            const target = parentLocal || await mapParent(act.parentId)
             await chrome.bookmarks.move(localId, { parentId: target, index: act.index })
             const movedTitle = 'node' in act ? (act.node as { title?: string } | undefined)?.title ?? '' : ''
             recentlyApplied.set(localId, { title: movedTitle, parentId: target })
@@ -519,8 +540,8 @@ async function applyRemote(changes: NodeState[]) {
 }
 
 // Server stores '' as root; extension maps unknown parents to the bookmarks bar.
-function mapParent(parentId: string): string {
-  if (!parentId) return bookmarksBarRoot()
+async function mapParent(parentId: string): Promise<string> {
+  if (!parentId) return barRootId()
   return parentId
 }
 
@@ -735,7 +756,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
       if (!cfg?.token) { sendResponse({ ok: false, error: 'not paired' }); return }
       try {
         const created = await chrome.bookmarks.create({
-          parentId: bookmarksBarRoot(),
+          parentId: await barRootId(),
           title: msg.title,
           url: msg.url,
         })
@@ -764,10 +785,10 @@ async function initialImport() {
     await setQueue([])
     const tree = await chrome.bookmarks.getTree()
     const roots = tree[0]?.children ?? []
-    const bar = roots.find((c) => c.id === bookmarksBarRoot())
+    const bar = roots[0] // first child = bookmarks bar (id not fixed, may be a GUID)
     // 'Other Bookmarks' gets a server-side top-level folder so its content
     // is visible everywhere, while the local root stays untouched.
-    const others = roots.find((c) => c.id === '2')
+    const others = roots.length > 1 ? roots[roots.length - 1] : undefined
     const ops: Record<string, unknown>[] = []
     const now = Math.floor(Date.now() / 1000)
     // Local chrome ids collide across devices (every browser numbers its
@@ -775,9 +796,13 @@ async function initialImport() {
     // and a local→server mapping. Without this, device B's initial import
     // overwrites device A's bookmarks that happen to share the same ids.
     const localToServer: Record<string, string> = {}
-    // local chrome roots have no server rows: bar root '1' maps to server
-    // top-level ('') and '2' maps to the per-device 其他书签 holder once pushed
-    localToServer['1'] = ''
+    // local chrome roots have no server rows: the bar root maps to server
+    // top-level (''), the other-bookmarks root maps to the per-device
+    // 其他书签 holder once pushed. Root ids come from the tree, NOT the
+    // legacy '1'/'2' constants — newer Chromium profiles use GUID ids.
+    const barRootIdStr = bar?.id || '1'
+    const otherRootIdStr = others?.id || '2'
+    localToServer[barRootIdStr] = ''
     const serverIdOf = (localId: string): string => {
       // `in` check — root '1' legitimately maps to '' which is falsy; a
       // truthy check re-minted a UUID on every call
@@ -809,7 +834,7 @@ async function initialImport() {
     if (bar) walk(bar.children || [], '')
     if (others && others.children?.length) {
       const othersFolderId = serverIdOf('others-root')
-      localToServer['2'] = othersFolderId
+      localToServer[otherRootIdStr] = othersFolderId
       ops.push({
         id: othersFolderId, type: 'folder', parentId: '',
         title: '其他书签', url: '', position: 9999,
@@ -837,10 +862,14 @@ async function initialImport() {
     const nextL2s: Record<string, string> = { ...existingL2s }
     for (const [localId, serverId] of Object.entries(localToServer)) {
       if (serverId) nextL2s[localId] = serverId // '' root entry stays l2s-only
-      if (serverId && localId !== '1' && localId !== '2') nextIdMap[serverId] = localId
+      if (serverId && localId !== barRootIdStr && localId !== otherRootIdStr && localId !== 'others-root') {
+        nextIdMap[serverId] = localId
+      }
     }
     const othersHolderId = localToServer['others-root']
-    if (othersHolderId) nextIdMap[othersHolderId] = '2' // remote kids of the holder land in root '2'
+    // remote kids of the 其他书签 holder land in the browser's other-bookmarks
+    // root — resolved at runtime, NOT the legacy '2' constant
+    if (othersHolderId && others) nextIdMap[othersHolderId] = otherRootIdStr
     await setIdMap(nextIdMap)
     await chrome.storage.local.set({ [L2S_KEY]: nextL2s })
     await refreshLocalCache()
