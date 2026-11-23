@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -64,6 +63,12 @@ func (s *Store) Create(b *Bookmark, tags []string) (*Bookmark, error) {
 // the caller still gets the current authoritative state. A change entry is
 // only bumped when something actually changed.
 func (s *Store) UpdateLWW(in *Bookmark, tags []string) (*Bookmark, bool, error) {
+	return s.UpdateLWWBase(in, tags, 0)
+}
+
+// UpdateLWWBase is UpdateLWW with an authoring baseline: baseRev is the
+// change-log revision the incoming op was authored against (0 = unknown).
+func (s *Store) UpdateLWWBase(in *Bookmark, tags []string, baseRev int64) (*Bookmark, bool, error) {
 	cur, err := s.Get(in.ID)
 	if err != nil {
 		return nil, false, err
@@ -71,16 +76,15 @@ func (s *Store) UpdateLWW(in *Bookmark, tags []string) (*Bookmark, bool, error) 
 	if cur.UpdatedAt > in.UpdatedAt {
 		return cur, false, nil
 	}
-	if cur.UpdatedAt == in.UpdatedAt {
-		// Same-second tie. The old rule compared device-id strings, which made
-		// the web UI's fixed "web" id beat EVERY extension id ('w' sorts above
-		// any uuid) — a rename pushed by the extension within the same second
-		// as a web edit was silently discarded. The tiebreaker must be
-		// deterministic ACROSS devices (every replica must resolve the same
-		// winner without extra communication), so it hashes the candidate
-		// content: every device comparing (cur, in) sees both payloads and
-		// computes the same verdict.
-		if cur.DeviceID != in.DeviceID && lwwTieKey(cur) > lwwTieKey(in) {
+	if cur.UpdatedAt == in.UpdatedAt && cur.DeviceID != in.DeviceID {
+		// Same-second tie — author clocks are identical, so clock alone
+		// cannot order the writes. The baseline does: an op authored against
+		// the row the server already holds (baseRev >= cur.Revision) is a
+		// legitimate follow-up edit and wins; an op authored against older
+		// history or with no baseline at all (stale offline delete racing a
+		// snapshot restore) loses the tie. Same device: its own later edit
+		// always wins (edit chain).
+		if cur.Revision > baseRev {
 			return cur, false, nil
 		}
 	}
@@ -403,8 +407,18 @@ func (s *Store) Reorder(parentID string, orderedIDs []string, at int64, deviceID
 	}
 	defer tx.Rollback()
 	for i, id := range orderedIDs {
-		if _, err := tx.Exec(`UPDATE bookmarks SET parent_id=?, position=?, updated_at=?, device_id=? WHERE id=? AND deleted_at=0`,
-			parentID, float64(i+1), at, deviceID, id); err != nil {
+		// guard against cross-parent writes: the id must already live under
+		// parentID (an order list is a permutation of its children, not a
+		// reparenting tool — that's Move's job, with cycle checks)
+		var pid string
+		if err := tx.QueryRow(`SELECT parent_id FROM bookmarks WHERE id=? AND deleted_at=0`, id).Scan(&pid); err != nil {
+			return fmt.Errorf("reorder: id %q not found or deleted", id)
+		}
+		if pid != parentID {
+			return fmt.Errorf("reorder: id %q is not a child of %q", id, parentID)
+		}
+		if _, err := tx.Exec(`UPDATE bookmarks SET position=?, updated_at=?, device_id=? WHERE id=?`,
+			float64(i+1), at, deviceID, id); err != nil {
 			return err
 		}
 		if _, err := bumpChange(tx, id); err != nil {
@@ -478,27 +492,6 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// lwwTieKey is the same-second LWW tiebreaker: a deterministic, device-neutral
-// total order over candidate content. Both replicas evaluating (cur, in)
-// compute identical keys, so they converge without coordination. Device id is
-// deliberately NOT the key: a fixed id like the web UI's "web" sorts above
-// every uuid and would silently beat all extension edits made in the same
-// second. deletedAt participates with LIVE-PRECEDENCE: within one second a
-// live row beats a tombstone — a tombstone authored in that same second is
-// almost always a stale offline delete racing a newer upstream edit (a
-// genuinely newer delete carries a later second and wins on updatedAt).
-func lwwTieKey(b *Bookmark) string {
-	live := "1"
-	if b.DeletedAt > 0 {
-		live = "0"
-	}
-	parts := []string{
-		b.Title, b.URL, b.Note, b.ParentID,
-		strconv.FormatFloat(b.Position, 'f', -1, 64),
-		live,
-	}
-	return strings.Join(parts, "\x00")
-}
 
 // normalizeTag trims, collapses internal whitespace and lowercases the tag
 // so "Go Lang" and "go lang" share one entry.

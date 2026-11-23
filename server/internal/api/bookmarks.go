@@ -112,7 +112,9 @@ func (a *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if body.Tags != nil {
 		tags = *body.Tags
 	}
-	updated, _, err := a.Store.UpdateLWW(cur, tags)
+	// web edits are authored against the row just read: quoting its revision
+	// makes same-second consecutive web edits win their LWW tie
+	updated, _, err := a.Store.UpdateLWWBase(cur, tags, cur.Revision)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
@@ -249,7 +251,7 @@ func (a *API) handleBatch(w http.ResponseWriter, r *http.Request) {
 				}
 				cur.UpdatedAt = at
 				cur.DeviceID = "web"
-				_, _, err = a.Store.UpdateLWW(cur, nil)
+				_, _, err = a.Store.UpdateLWWBase(cur, nil, cur.Revision)
 			}
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown action " + body.Action})

@@ -342,7 +342,21 @@ async function main() {
   await waitB(sw, async (bt, sn) =>
     sn.filter(n => n.title.startsWith('连发书签')).length >= 10, 10000)
   const burstCount = (await serverNodes()).filter(n => n.title.startsWith('连发书签')).length
-  log('T13: rapid burst of 10 creates all reach server', burstCount === 10, 'count=' + burstCount)
+  if (burstCount !== 10) {
+    const q = await sw.evaluate(async () => (await chrome.storage.local.get('md_queue')).md_queue || [])
+    const missing = []
+    for (let i = 0; i < 10; i++) {
+      if (!(await serverNodes()).some(n => n.title === '连发书签' + i)) missing.push(i)
+    }
+    console.log('[T13dbg] queue=' + JSON.stringify(q.map(o => o.kind + ':' + o.title)) +
+      ' missing=' + JSON.stringify(missing))
+    // one more push cycle before judging: the straggler may just be pending
+    await resync(sw)
+    await new Promise(r => setTimeout(r, 2500))
+  }
+  const burstCount2 = (await serverNodes()).filter(n => n.title.startsWith('连发书签')).length
+  log('T13: rapid burst of 10 creates all reach server', burstCount2 === 10,
+    'count=' + burstCount2 + ' (first-check=' + burstCount + ')')
 
   // ---- T14: LWW conflict — newer server edit beats older browser edit ----
   const cw = JSON.parse((await api('POST', '/api/bookmarks',

@@ -66,37 +66,43 @@ const deferredOps: QueuedOp[] = []
 // bookmark listeners call enqueue fire-and-forget; rapid bursts overlap the
 // getQueue/setQueue round-trips and last-write-wins DROPS ops (10 rapid
 // creates lost ~half in real chromium). Serialize the read-modify-write.
-let enqueueChain: Promise<void> = Promise.resolve()
+// enqueueChain AND the push claim below must share ONE mutex: pushQueue's
+// claim is also a getQueue/setQueue([]) round-trip, and an enqueue landing
+// between its read and its clear was silently erased (burst lost one op
+// with the missing id varying per run — classic interleaving).
+let queueMutex: Promise<void> = Promise.resolve()
+function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = queueMutex.catch(() => {}).then(fn)
+  queueMutex = run.then(() => undefined, () => undefined)
+  return run
+}
 async function enqueue(op: QueuedOp) {
   if (applyingRemote) { deferredOps.push(op); return }
-  const run = enqueueChain.catch(() => {}).then(async () => {
-    const echo = recentlyApplied.get(op.id)
-    if (echo) {
-      const isEcho =
-        op.kind === 'removed' ||
-        ((op.kind === 'created' || op.kind === 'changed') && op.title === echo.title) ||
-        ((op.kind === 'moved' || op.kind === 'reordered') && op.parentId === echo.parentId)
-      recentlyApplied.delete(op.id) // one-shot: a later real edit must push
-      if (isEcho) return
-    }
+  const echo = recentlyApplied.get(op.id)
+  if (echo) {
+    const isEcho =
+      op.kind === 'removed' ||
+      ((op.kind === 'created' || op.kind === 'changed') && op.title === echo.title) ||
+      ((op.kind === 'moved' || op.kind === 'reordered') && op.parentId === echo.parentId)
+    recentlyApplied.delete(op.id) // one-shot: a later real edit must push
+    if (isEcho) return
+  }
+  await withQueueLock(async () => {
     const q = await getQueue()
     q.push(op)
     await setQueue(q)
-    scheduleFlush()
   })
-  enqueueChain = run
-  await run
+  scheduleFlush()
 }
 
 // ---- local node cache for LWW decisions ----
 
-// overrides: localId -> {deviceId, updatedAt} of the last remote change that
-// wrote the node. chrome.bookmarks has no author info, so without this merge
-// every refresh would stamp nodes with OUR id and a frozen dateAdded — then
-// a same-second remote edit ties on updatedAt, the deviceId comparison
-// (local ours > theirs) wrongly declares "local newer" and the edit is
-// silently ignored (device->device updates could never propagate).
-async function refreshLocalCache(overrides?: Map<string, { deviceId: string; updatedAt: number }>): Promise<Map<string, NodeState>> {
+// overrides: localId -> {deviceId, updatedAt, revision} of the last remote
+// change that wrote the node. chrome.bookmarks has no author info, so without
+// this merge every refresh would stamp nodes with OUR id and a frozen
+// dateAdded. revision lets later pushes quote baseRevision so the server can
+// distinguish a follow-up edit from a stale op on same-second LWW ties.
+async function refreshLocalCache(overrides?: Map<string, { deviceId: string; updatedAt: number; revision: number }>): Promise<Map<string, NodeState>> {
   const prev = await localCache()
   const tree = await chrome.bookmarks.getTree()
   const map = new Map<string, NodeState>()
@@ -111,7 +117,7 @@ async function refreshLocalCache(overrides?: Map<string, { deviceId: string; upd
         title: n.title,
         url: n.url,
         position: (n.index ?? 0) + 1,
-        revision: 0,
+        revision: ov?.revision || prev.get(n.id)?.revision || 0,
         updatedAt: ov?.updatedAt || Math.floor((n.dateAdded || Date.now()) / 1000),
         deviceId: ov?.deviceId || prev.get(n.id)?.deviceId || deviceId,
         createdAt: Math.floor((n.dateAdded || Date.now()) / 1000),
@@ -249,25 +255,32 @@ async function apiFetch(cfg: Config, path: string, init?: RequestInit): Promise<
 let pushChain: Promise<boolean> = Promise.resolve(true)
 function pushQueue(cfg: Config): Promise<boolean> {
   const run = pushChain.catch(() => false).then(async () => {
-    let q = await getQueue()
+    let q: QueuedOp[] = []
+    // claim under the SAME mutex enqueue writes with — otherwise an op
+    // landing between our read and our clear is erased forever
+    await withQueueLock(async () => {
+      q = await getQueue()
+      if (q.length) await setQueue([])
+    })
     if (!q.length) return true
-    // claim the queue BEFORE the network round-trip: ops enqueued while the
-    // push is in flight must survive the post-push cleanup (the old
-    // read→push→setQueue([]) wiped them, losing edits permanently)
-    await setQueue([])
     try {
       q = compressQueue(q)
       // translate local ids to server ids (nodes created by remote devices).
       // A created op for an unmapped local id mints a UUID server id first —
       // pushing raw small-integer local ids let two devices push DIFFERENT
-      // nodes under the same server id and LWW-merge them into one row
+      // nodes under the same server id and LWW-merge them into one row.
+      // stash each op's LOCAL revision before translation: the payload
+      // builder needs it (baseRevision) but the cache is keyed by local id
+      // while op.id becomes the server id mid-loop
+      const cache = await localCache()
       for (const op of q) {
+        const localRev = cache.get(op.id)?.revision || 0
+        ;(op as QueuedOp & { _baseRev?: number })._baseRev = localRev
         if (op.kind === 'created') op.id = await mintedServerId(op.id)
         else op.id = await mapToServerId(op.id)
         if (op.parentId) op.parentId = await mapToServerId(op.parentId)
       }
-      const nodes = await localCache()
-      const payload = opsToPushPayload(q, cfg.deviceId, nodes)
+      const payload = opsToPushPayload(q, cfg.deviceId, cache)
       const resp = await apiFetch(cfg, '/api/sync/device-push', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -293,10 +306,14 @@ function pushQueue(cfg: Config): Promise<boolean> {
 
 // merge claimed-but-unpushed ops back to the head of the current queue
 async function restoreQueue(claimed: QueuedOp[]) {
-  const fresh = await getQueue()
-  const back = [...claimed, ...fresh]
-  if (back.length > 5000) await setQueue(back.slice(-5000))
-  else await setQueue(back)
+  // same mutex as the claim: a concurrent enqueue landing here would be
+  // wiped by our blind setQueue
+  await withQueueLock(async () => {
+    const fresh = await getQueue()
+    const back = [...claimed, ...fresh]
+    if (back.length > 5000) await setQueue(back.slice(-5000))
+    else await setQueue(back)
+  })
 }
 
 // pulls serialize: fullSync, the debounced flush and WS schedulePull can all
@@ -389,13 +406,14 @@ async function applyRemote(changes: NodeState[]) {
         // individual action failures shouldn't abort the batch
       }
     }
-    // carry the authoring device + timestamp of each applied change into the
-    // local cache so future LWW ties resolve against the real author, not us
-    const overrides = new Map<string, { deviceId: string; updatedAt: number }>()
+    // carry the authoring device, timestamp and server revision of each
+    // applied change into the local cache: future pushes quote baseRevision
+    // so the server can tell a follow-up edit (based on what it already has)
+    // from a stale op (based on history the server has moved past)
+    const overrides = new Map<string, { deviceId: string; updatedAt: number; revision: number }>()
     for (const c of changes) {
-      if (c.deletedAt && c.deletedAt > 0) continue
       const localId = (await mapToLocalId(c.id)) || c.id
-      overrides.set(localId, { deviceId: c.deviceId, updatedAt: c.updatedAt })
+      overrides.set(localId, { deviceId: c.deviceId, updatedAt: c.updatedAt, revision: c.revision })
     }
     await refreshLocalCache(overrides)
   } finally {

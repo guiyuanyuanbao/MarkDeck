@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -134,11 +135,19 @@ func (l *Limiter) Cleanup() {
 	}
 }
 
-// ClientKey identifies the caller for throttling: X-Forwarded-For when the
-// request came through a proxy, else RemoteAddr.
+// trustProxy is only set when MARKDECK_TRUST_PROXY=1: behind a reverse proxy
+// every request shares the proxy's RemoteAddr, so X-Forwarded-For is the only
+// usable throttling key — but on a direct deployment trusting that header lets
+// an attacker rotate a fresh key per attempt and bypass the limiter entirely.
+var trustProxy = os.Getenv("MARKDECK_TRUST_PROXY") == "1"
+
+// ClientKey identifies the caller for throttling: X-Forwarded-For when a
+// trusted proxy is configured, else the socket address (uncorruptible).
 func ClientKey(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return strings.TrimSpace(strings.Split(xff, ",")[0])
+		}
 	}
 	return r.RemoteAddr
 }

@@ -44,6 +44,11 @@ type pushOp struct {
 	UpdatedAt int64     `json:"updatedAt"`
 	DeviceID  string    `json:"deviceId"`
 	Tags      *[]string `json:"tags,omitempty"`
+	// BaseRevision is the change-log revision the op was authored against
+	// (from the client's pulled copy). On same-second UpdatedAt ties it
+	// distinguishes a legitimate follow-up edit (base >= current row's
+	// revision) from a stale op racing a snapshot restore (base below).
+	BaseRevision int64 `json:"baseRevision,omitempty"`
 }
 
 type pushResult struct {
@@ -179,7 +184,7 @@ func (a *API) applyOp(op *pushOp) pushResult {
 		return pushResult{ID: op.ID, Win: false, State: cur}
 	}
 
-	merged, win, err := a.Store.UpdateLWW(&cand, derefTags(op.Tags))
+	merged, win, err := a.Store.UpdateLWWBase(&cand, derefTags(op.Tags), op.BaseRevision)
 	if err != nil {
 		return pushResult{ID: op.ID, Error: err.Error()}
 	}

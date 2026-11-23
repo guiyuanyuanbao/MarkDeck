@@ -89,14 +89,29 @@ func TestLWWConflict(t *testing.T) {
 		t.Fatalf("newer should win: %+v win=%v err=%v", got, win, err)
 	}
 
-	// tie (same UpdatedAt as current winner) -> higher device id wins
+	// tie (same UpdatedAt as current winner) from a DIFFERENT device:
+	// the current row is kept (author clocks are indistinguishable within
+	// one second; a genuinely newer edit carries a later second). This also
+	// protects snapshot-restored rows from stale same-second tombstones —
+	// the old "higher device id wins" rule handed the tie to whichever id
+	// sorted higher, letting the web UI's fixed "web" id beat every
+	// extension uuid.
 	tie := *b
 	tie.Title = "tie-b"
 	tie.UpdatedAt = b.UpdatedAt + 10
 	tie.DeviceID = "zzz"
 	got, _, _ = s.UpdateLWW(&tie, nil)
-	if got.Title != "tie-b" {
-		t.Fatalf("tie should go to higher device id: %q", got.Title)
+	if got.Title != "newer" {
+		t.Fatalf("different-device same-second tie must keep current row: %q", got.Title)
+	}
+	// same device continuing its edit chain within the same second wins
+	tieSameDev := *b
+	tieSameDev.Title = "chain-b"
+	tieSameDev.UpdatedAt = b.UpdatedAt + 10
+	tieSameDev.DeviceID = "bbb"
+	got, _, _ = s.UpdateLWW(&tieSameDev, nil)
+	if got.Title != "chain-b" {
+		t.Fatalf("same-device edit chain must win: %q", got.Title)
 	}
 }
 

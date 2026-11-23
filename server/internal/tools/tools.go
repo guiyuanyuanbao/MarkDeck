@@ -354,7 +354,7 @@ func (c *Chain) MergeDuplicate(keepID string, removeIDs []string) error {
 		}
 		keep.UpdatedAt = at
 		keep.DeviceID = "tools"
-		if _, _, err := c.Store.UpdateLWW(keep, newTags); err != nil {
+		if _, _, err := c.Store.UpdateLWWBase(keep, newTags, keep.Revision); err != nil {
 			return err
 		}
 		// move duplicate to trash

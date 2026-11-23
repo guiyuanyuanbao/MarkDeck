@@ -84,20 +84,13 @@ describe('clientWins (LWW mirror)', () => {
     const remote = node({ updatedAt: T, deviceId: 'd2' })
     expect(clientWins(local, remote)).toBe(true)
   })
-  it('same-second tie resolved by content key, not device id', () => {
-    // the old deviceId rule let the web UI's fixed 'web' id beat every
-    // extension uuid; tiebreak is now content (title/url/.../deletedAt)
-    const localWin = node({ updatedAt: T, deviceId: 'ext-dev', title: 'z' })
-    const remoteLose = node({ updatedAt: T, deviceId: 'web', title: 'a' })
-    expect(clientWins(localWin, remoteLose)).toBe(true)
-    // same content + same second from different devices: keys equal ->
-    // remote (later-arriving) wins, mirroring the server's applyOp tie
-    const same = node({ updatedAt: T, deviceId: 'other' })
-    expect(clientWins(node({ updatedAt: T, deviceId: 'me' }), same)).toBe(false)
-    // a tombstone and its live row differ in the key (deletedAt participates)
-    const live = node({ updatedAt: T, deviceId: 'web', deletedAt: 0 })
-    const tomb = node({ updatedAt: T, deviceId: 'ext', deletedAt: T + 1 })
-    expect(clientWins(live, tomb)).toBe(true) // live key > tombstone key ('0' < T+1)
+  it('same-second tie: remote always wins (own echoes are filtered upstream)', () => {
+    // applyRemote maps rows carrying OUR deviceId to '__self__' and skips
+    // them before clientWins, so any row reaching here arrived after the
+    // cached snapshot and applies — regardless of which device authored it
+    const local = node({ updatedAt: T, deviceId: 'ext-dev', title: 'z' })
+    expect(clientWins(local, node({ updatedAt: T, deviceId: 'web', title: 'a' }))).toBe(false)
+    expect(clientWins(local, node({ updatedAt: T, deviceId: 'other-ext' }))).toBe(false)
   })
   it('unknown local -> remote wins', () => {
     expect(clientWins(undefined, node())).toBe(false)

@@ -191,7 +191,7 @@ func (a *API) handleTOTPEnable(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no pending setup"})
 		return
 	}
-	if !auth.VerifyTOTP(pending, body.Code) {
+	if !auth.VerifyTOTPEnrollment(pending, body.Code) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": auth.ErrBadTOTP.Error()})
 		return
 	}
@@ -205,6 +205,9 @@ func (a *API) handleTOTPEnable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
+	if secret, _ := a.Store.SettingsGet("totp_secret"); secret != "" {
+		auth.ForgetTOTPSecret(secret)
+	}
 	_ = a.Store.SettingsSet("totp_enabled", "0")
 	_ = a.Store.SettingsSet("totp_secret", "")
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})

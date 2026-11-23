@@ -89,11 +89,18 @@ export function opsToPushPayload(ops: QueuedOp[], deviceId: string, nodes: Map<s
     const known = nodes.get(op.id)
     // updatedAt must be the REAL local edit time (op.at) — inflating it to
     // push time would let a stale queued edit overwrite a newer remote
-    // change and break LWW for everyone else.
+    // change and break LWW for everyone else. baseRevision quotes the server
+    // revision this op was authored against: on same-second ties the server
+    // treats base >= current row as a legitimate follow-up edit (wins) and
+    // base below it as a stale op (loses) — no device-id bias either way.
+    // pushQueue stashes the pre-translation revision on _baseRev because the
+    // cache is keyed by LOCAL id while op.id has already become the server id.
+    const baseRev = (op as QueuedOp & { _baseRev?: number })._baseRev || 0
     const base: Record<string, unknown> = {
       id: op.id,
       updatedAt: op.at > 0 ? op.at : now,
       deviceId,
+      ...(baseRev > 0 ? { baseRevision: baseRev } : {}),
     }
     switch (op.kind) {
       case 'created':
@@ -120,24 +127,29 @@ export function opsToPushPayload(ops: QueuedOp[], deviceId: string, nodes: Map<s
 
 // ---- conflict-safe merge decision (client-side mirror of server LWW) ----
 
-// same-second tiebreaker — MUST stay in sync with the server's lwwTieKey
-// (store/bookmarks.go): content-only hash so every replica resolves
-// identically. Device id is excluded on purpose: the web UI's fixed 'web'
-// id sorts above every uuid and would silently beat same-second extension
-// edits. deletedAt participates with LIVE-PRECEDENCE: within one second a
-// live row beats a tombstone (a tombstone authored in that same second is
-// almost always a stale offline delete racing a newer upstream edit — if
-// the delete were genuinely newer it would carry a later second).
-export function lwwTieKey(n: { title: string; url?: string; note?: string; parentId: string; position: number; deletedAt?: number }): string {
-  return [n.title, n.url ?? '', n.note ?? '', n.parentId, String(n.position),
-    (n.deletedAt ?? 0) > 0 ? '0' : '1'].join('\x00')
-}
+// The server is the single write point, so same-second ties resolve by
+// ARRIVAL order there: a push overwrites whatever row holds, and every
+// replica converges on the server's final state. The extension mirrors that:
+// a same-second remote change always applies (it arrived later than the
+// local cache row it supersedes), EXCEPT our own echo — a same-second row
+// carrying our own device id is the server's copy of what we just pushed.
+// Previous rules failed in both directions: device-id strings let the web
+// UI's fixed 'web' id beat every extension uuid; a content key let a stale
+// local copy out-rank a rename whose new title sorted lower.
+// ---- conflict-safe merge decision (client-side mirror of server LWW) ----
 
+// The server is the single write point, so a same-second remote change
+// ALWAYS applies: it arrived after the local cache row it supersedes (the
+// server kept it, and pull delivers only server-winning rows). Rows we
+// pushed ourselves never reach this function — applyRemote maps them to
+// deviceId '__self__' and skips them before planning. Earlier rules failed
+// in both directions: device-id strings let the web UI's fixed 'web' id beat
+// every extension uuid, and comparing the CACHED author id treated every
+// same-second web edit as "our echo" (the cache stamps rows with the
+// author's id, not ours).
 export function clientWins(local: NodeState | undefined, remote: NodeState): boolean {
   if (!local) return false // remote wins for unknown nodes
-  if (local.updatedAt !== remote.updatedAt) return local.updatedAt > remote.updatedAt
-  if (local.deviceId === remote.deviceId) return true // our own later edit
-  return lwwTieKey(local) > lwwTieKey(remote)
+  return local.updatedAt > remote.updatedAt // strictly newer local wins only
 }
 
 // Apply a remote change description onto the local browser tree.

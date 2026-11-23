@@ -55,10 +55,18 @@ func TestLimiterIndependentKeys(t *testing.T) {
 }
 
 func TestClientKeyForwarded(t *testing.T) {
+	// default (direct deployment): X-Forwarded-For must NOT be trusted —
+	// an attacker could otherwise rotate a fresh throttle key per attempt
 	r := httptest.NewRequest("POST", "/api/auth/login", nil)
 	r.Header.Set("X-Forwarded-For", "9.9.9.9, 10.0.0.1")
+	if got := ClientKey(r); got == "9.9.9.9" {
+		t.Fatal("XFF trusted without MARKDECK_TRUST_PROXY")
+	}
+	// behind a trusted proxy the header is the only usable key
+	trustProxy = true
+	defer func() { trustProxy = false }()
 	if got := ClientKey(r); got != "9.9.9.9" {
-		t.Fatalf("ClientKey = %q", got)
+		t.Fatalf("ClientKey with trust = %q", got)
 	}
 	r2 := httptest.NewRequest("POST", "/api/auth/login", nil)
 	r2.RemoteAddr = "7.7.7.7:1234"
