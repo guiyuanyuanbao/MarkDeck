@@ -171,6 +171,21 @@ const { execSync } = require('child_process')
     body: JSON.stringify([{ id: target.id, deletedAt: Math.floor(Date.now() / 1000), updatedAt: Math.floor(Date.now() / 1000), deviceId: 'admin-test' }]),
   })
   log('T3 setup: server tombstone pushed', delResp.status === 200)
+  {
+    const cfgA = await A.cmd('config')
+    const r = await fetch(SERVER + '/api/sync/device-pull?since=' + Math.max(0, cfgA.rev - 3), {
+      headers: { Authorization: 'Bearer ' + cfgA.token } })
+    const data = await r.json()
+    const rows = (data.changes || []).filter(c => c.deletedAt > 0 || c.title === 'A 创建的书签')
+    console.log('  [T3dbg] rows:', JSON.stringify(rows.map(x => ({ id: x.id.slice(0, 6), del: x.deletedAt, dev: x.deviceId, url: x.url }))))
+    console.log('  [T3dbg] A config rev:', cfgA.rev)
+  }
+  const stA2 = await A.cmd('applyStats').catch(e => ({ err: String(e) }))
+  console.log('  [T3dbg2] applyStats:', JSON.stringify(stA2))
+  {
+    const st = await A.cmd('storageDump').catch(e => ({ err: String(e) }))
+    console.log('  [T3dbg3] storage:', JSON.stringify(st).slice(0, 400))
+  }
   const goneInA = await waitFor(async () => {
     const rA = await A.cmd('resync')
     const tA2 = await A.cmd('titles')
@@ -182,6 +197,11 @@ const { execSync } = require('child_process')
     await B.cmd('resync')
     return !(await B.cmd('titles')).includes('A 创建的书签')
   })
+  if (!goneInA) {
+    const stPost = await A.cmd('applyStats').catch(e => ({ err: String(e) }))
+    const stPost2 = await A.cmd('storageDump').catch(e => ({ err: String(e) }))
+    console.log('  [T3post] stats:', JSON.stringify(stPost), 'storage:', JSON.stringify(stPost2).slice(0, 300))
+  }
   log('T3: deletion propagates to A', goneInA)
   log('T3: deletion propagates to B', goneInB)
 

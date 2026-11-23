@@ -612,10 +612,49 @@ async function applyRemote(changes: NodeState[]) {
             const found = await sw_findNodeByTitle(act.title)
             if (found) localId = found.id
           }
+          // duplicate-URL guard: if a LIVE server row shares this tombstone's
+          // URL, the local node belongs to the live row — deleting it would
+          // remove a bookmark that is supposed to exist (the graveyard-bind
+          // loop that kept re-deleting 7 bookmarks on every rebuild)
+          if (localId && 'url' in act && act.url) {
+            const node = await chrome.bookmarks.get(localId).catch(() => null)
+            if (node?.[0]?.url && node[0].url === act.url && act.serverId) {
+              const cfgNow = await getConfig()
+              const check = await apiFetch(cfgNow!, `/api/sync/device-pull?since=0`).catch(() => null)
+              if (check?.ok) {
+                const all = (await check.json() as { changes: NodeState[] }).changes || []
+                const liveRow = all.find(r => r.url === act.url && !(r.deletedAt && r.deletedAt > 0) && !r.purged)
+                if (liveRow && liveRow.id !== act.serverId) {
+                  // a live row owns this URL: bind it and skip the delete
+                  await recordIdMapping(liveRow.id, localId)
+                  applyStats.adopted++
+                  continue
+                }
+              }
+            }
+          }
+          // never touch chrome's permanent root folders
+          const rootNodeIds = new Set(['0', '1', '2'])
+          const resolvedRoots = await resolveRoots()
+          rootNodeIds.add(resolvedRoots.bar)
+          if (resolvedRoots.other) rootNodeIds.add(resolvedRoots.other)
+          if (localId && rootNodeIds.has(localId)) {
+            applyStats.failed++
+            applyStats.errors.push(`remove: refusing to delete root folder ${localId}`)
+            continue
+          }
           if (localId) {
             recentlyApplied.delete(localId) // removal events must NOT be blocked
             await chrome.bookmarks.removeTree(localId)
             applyStats.removed++
+            // purge queued ops for the removed node: stale created/changed
+            // events (echoes that slipped through, or bursts that raced the
+            // delete) would push the row back server-side and resurrect it —
+            // the deleted bookmark would reappear on the next pull forever
+            const q = await getQueue()
+            const serverIdOfRemoved = await mapToServerId(localId)
+            const filtered = q.filter(op => op.id !== localId && op.id !== serverIdOfRemoved)
+            if (filtered.length !== q.length) await setQueue(filtered)
           }
         } else if (act.action === 'move') {
           const localId = await mapToLocalIdStrict(act.id)

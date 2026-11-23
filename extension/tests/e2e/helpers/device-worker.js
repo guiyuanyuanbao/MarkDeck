@@ -121,6 +121,11 @@ const device = (() => {
       bookmarks: {
         getTree: (...a) => store.getTree(...a),
         getChildren: (...a) => store.getChildren(...a),
+        get: async (id) => {
+          const n = store.nodes.get(id)
+          if (!n) throw new Error('no node ' + id)
+          return [{ ...n }]
+        },
         create: (...a) => store.create(...a),
         update: (...a) => store.update(...a),
         move: (...a) => store.move(...a),
@@ -256,6 +261,21 @@ async function main() {
               await device.chrome.storage.local.set({ md_config: st.md_config })
             }
             resultOf = { ok: true }
+            break
+          }
+          case 'storageDump': {
+            const all = await device.chrome.storage.local.get(null)
+            resultOf = {
+              cacheKeys: Object.keys(all.md_local_nodes || {}),
+              mapRows: Object.entries(all.md_id_map || {}).map(([k, v]) => k.slice(0, 6) + '->' + v),
+              l2sRows: Object.entries(all.md_l2s || {}).map(([k, v]) => k + '->' + v.slice(0, 6)),
+              rev: all.md_config?.rev,
+            }
+            break
+          }
+          case 'applyStats': {
+            const r = await new Promise((resolve) => device.runtimeEvents.emit('message', { type: 'applyStats' }, {}, resolve))
+            resultOf = r
             break
           }
           case 'queueLength': {

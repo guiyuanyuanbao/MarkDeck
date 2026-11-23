@@ -157,7 +157,7 @@ export function clientWins(local: NodeState | undefined, remote: NodeState): boo
 export type RemoteAction =
   | { action: 'create'; node: NodeState }
   | { action: 'update'; node: NodeState }
-  | { action: 'remove'; id: string; title?: string }
+  | { action: 'remove'; id: string; title?: string; serverId: string; url?: string }
   | { action: 'move'; id: string; parentId: string; index: number }
   | { action: 'ignore'; id: string; why: string }
 
@@ -169,6 +169,18 @@ export function planRemoteActions(changes: NodeState[], localNodes: Map<string, 
   for (const c of changes) {
     const cur = latest.get(c.id)
     if (!cur || c.revision > cur.revision) latest.set(c.id, c)
+  }
+  // duplicate-URL guards: the server may hold a LIVE row sharing a URL with
+  // a tombstone (messy imports created duplicates). Only protect when the
+  // tombstone is OLDER than the live row — a later-created live row means
+  // the node was legitimately re-added after the deletion. A tombstone with
+  // a HIGHER revision than the live row is a normal delete and must proceed.
+  const liveByLatestUrl = new Map<string, NodeState>()
+  for (const c of latest.values()) {
+    if (!(c.deletedAt && c.deletedAt > 0) && c.url) {
+      const prev = liveByLatestUrl.get(c.url)
+      if (!prev || c.revision > prev.revision) liveByLatestUrl.set(c.url, c)
+    }
   }
   for (const c of latest.values()) {
     if (c.deviceId === '__self__') continue // our own echo
@@ -182,8 +194,13 @@ export function planRemoteActions(changes: NodeState[], localNodes: Map<string, 
       // 'already absent' is NOT safe to assume: mapToLocalId falls back to
       // the raw server id, so a node whose mapping was pruned looks absent
       // here but may exist in the tree under a different local id.
-      if (!local || !local.deletedAt) actions.push({ action: 'remove', id: localId ?? c.id, title: c.title })
-      else actions.push({ action: 'ignore', id: c.id, why: 'already absent' })
+      const liveCounterpart = c.url ? liveByLatestUrl.get(c.url) : undefined
+      const resurrected = liveCounterpart && liveCounterpart.id !== c.id && liveCounterpart.revision > c.revision
+      if ((!local || !local.deletedAt) && !resurrected) {
+        actions.push({ action: 'remove', id: localId ?? c.id, title: c.title, serverId: c.id, url: c.url })
+      } else {
+        actions.push({ action: 'ignore', id: c.id, why: 'already absent' })
+      }
       continue
     }
     if (!local) {
