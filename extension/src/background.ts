@@ -305,17 +305,24 @@ function bookmarksBarRoot(): string {
 
 // locate a local node by exact title (fallback for removes whose mapping
 // was lost); url nodes first via bookmarks.search, folders via tree walk
-async function sw_findNodeByTitle(title: string): Promise<{ id: string; url?: string } | null> {
+async function sw_findNodeByTitle(title: string, parentLocalId?: string): Promise<{ id: string; url?: string } | null> {
   const tree = await chrome.bookmarks.getTree()
   let found: { id: string; url?: string } | null = null
-  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+  let matchCount = 0
+  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentOfNode: string) => {
     for (const n of nodes) {
-      if (n.title === title && !found) found = { id: n.id, url: n.url }
-      if (n.children) walk(n.children)
+      // parent constraint: an unconstrained title match could delete an
+      // unrelated same-named node in another folder
+      if (n.title === title && (!parentLocalId || parentOfNode === parentLocalId)) {
+        matchCount++
+        if (!found) found = { id: n.id, url: n.url }
+      }
+      if (n.children) walk(n.children, n.id)
     }
   }
-  for (const root of tree) if (root.children) walk(root.children)
-  return found
+  for (const root of tree) if (root.children) walk(root.children, root.id)
+  // ambiguous (2+ candidates): refuse to guess — a wrong guess deletes real data
+  return matchCount === 1 ? found : null
 }
 
 // root ids are NOT fixed: newer Chromium profiles use GUID-style permanent
@@ -615,28 +622,34 @@ async function applyRemote(changes: NodeState[]) {
           }
           if (!localId && 'title' in act && act.title) {
             // last resort: a tombstoned node whose whole subtree lost its
-            // mappings — match by title in the tree
-            const found = await sw_findNodeByTitle(act.title)
+            // mappings — match by title, constrained to the resolved parent
+            // folder (an unconstrained match could delete an unrelated
+            // same-named node; ambiguous matches refuse to guess)
+            let parentHint: string | undefined
+            if ('parentId' in act && act.parentId) {
+              parentHint = (await mapToLocalIdStrict(act.parentId)) || undefined
+            }
+            const found = await sw_findNodeByTitle(act.title, parentHint)
             if (found) localId = found.id
           }
           // duplicate-URL guard: if a LIVE server row shares this tombstone's
           // URL, the local node belongs to the live row — deleting it would
           // remove a bookmark that is supposed to exist (the graveyard-bind
-          // loop that kept re-deleting 7 bookmarks on every rebuild)
-          if (localId && 'url' in act && act.url) {
+          // loop that kept re-deleting 7 bookmarks on every rebuild).
+          // Decided from LOCAL state only: the planRemoteActions URL guard
+          // already had the full batch, and idMap knows every binding built
+          // during this run. A server round-trip per tombstone was O(n²).
+          if (localId && 'url' in act && act.url && act.serverId) {
             const node = await chrome.bookmarks.get(localId).catch(() => null)
-            if (node?.[0]?.url && node[0].url === act.url && act.serverId) {
-              const cfgNow = await getConfig()
-              const check = await apiFetch(cfgNow!, `/api/sync/device-pull?since=0`).catch(() => null)
-              if (check?.ok) {
-                const all = (await check.json() as { changes: NodeState[] }).changes || []
-                const liveRow = all.find(r => r.url === act.url && !(r.deletedAt && r.deletedAt > 0) && !r.purged)
-                if (liveRow && liveRow.id !== act.serverId) {
-                  // a live row owns this URL: bind it and skip the delete
-                  await recordIdMapping(liveRow.id, localId)
-                  applyStats.adopted++
-                  continue
-                }
+            if (node?.[0]?.url && node[0].url === act.url) {
+              const map = await idMap()
+              const liveOwner = Object.entries(map).find(([sid, lid]) =>
+                lid === localId && sid !== act.serverId)
+              if (liveOwner) {
+                // the node is already bound to a DIFFERENT (live) server row:
+                // this tombstone is a stale duplicate — adopt it silently
+                applyStats.adopted++
+                continue
               }
             }
           }

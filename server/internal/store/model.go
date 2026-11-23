@@ -25,6 +25,12 @@ type Bookmark struct {
 	DeviceID  string   `json:"deviceId,omitempty"`
 	CreatedAt int64    `json:"createdAt"`
 	Tags      []string `json:"tags,omitempty"`
+
+	// SkipParentCheck: sync push normalizes unknown parents itself before
+	// calling Create (its rows may reference parents created EARLIER IN THE
+	// SAME BATCH, which are not yet committed). REST/import handlers leave
+	// this false and get full parent validation.
+	SkipParentCheck bool `json:"-"`
 }
 
 // ErrNotFound is returned when a bookmark id does not exist.

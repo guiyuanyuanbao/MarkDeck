@@ -157,7 +157,7 @@ export function clientWins(local: NodeState | undefined, remote: NodeState): boo
 export type RemoteAction =
   | { action: 'create'; node: NodeState }
   | { action: 'update'; node: NodeState }
-  | { action: 'remove'; id: string; title?: string; serverId: string; url?: string }
+  | { action: 'remove'; id: string; title?: string; serverId: string; url?: string; parentId?: string }
   | { action: 'move'; id: string; parentId: string; index: number }
   | { action: 'ignore'; id: string; why: string }
 
@@ -197,7 +197,7 @@ export function planRemoteActions(changes: NodeState[], localNodes: Map<string, 
       const liveCounterpart = c.url ? liveByLatestUrl.get(c.url) : undefined
       const resurrected = liveCounterpart && liveCounterpart.id !== c.id && liveCounterpart.revision > c.revision
       if ((!local || !local.deletedAt) && !resurrected) {
-        actions.push({ action: 'remove', id: localId ?? c.id, title: c.title, serverId: c.id, url: c.url })
+        actions.push({ action: 'remove', id: localId ?? c.id, title: c.title, serverId: c.id, url: c.url, parentId: c.parentId })
       } else {
         actions.push({ action: 'ignore', id: c.id, why: 'already absent' })
       }
@@ -214,7 +214,12 @@ export function planRemoteActions(changes: NodeState[], localNodes: Map<string, 
     if (local.parentId !== c.parentId || local.position !== c.position) {
       actions.push({ action: 'move', id: c.id, parentId: c.parentId, index: Math.max(0, Math.round(c.position) - 1) })
     }
-    if (local.title !== c.title || local.url !== c.url || local.note !== c.note) {
+    // NOTE the note comparison: chrome.bookmarks cannot store notes, so the
+    // local cache NEVER has one (undefined). Comparing `local.note !== c.note`
+    // made every server-side note trigger an update on EVERY sync — an
+    // infinite update churn (planned=N with N note rows each pull). Notes
+    // only flow server<->server (web UI); the extension ignores them.
+    if (local.title !== c.title || local.url !== c.url) {
       actions.push({ action: 'update', node: c })
     }
   }

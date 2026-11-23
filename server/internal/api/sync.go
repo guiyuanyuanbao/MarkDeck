@@ -130,6 +130,11 @@ func (a *API) applyOp(op *pushOp) pushResult {
 		if op.Tags != nil {
 			tags = *op.Tags
 		}
+		// sync batches reference parents created EARLIER IN THE SAME BATCH
+		// (folder ops precede their children); per-row parent validation was
+		// already done via validParent above, so skip the store-level check
+		// which would reject not-yet-committed parents
+		b.SkipParentCheck = true
 		created, err := a.Store.Create(b, tags)
 		if err != nil {
 			return pushResult{ID: op.ID, Error: err.Error()}

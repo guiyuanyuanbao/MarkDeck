@@ -12,6 +12,22 @@ func (s *Store) Create(b *Bookmark, tags []string) (*Bookmark, error) {
 	if b.Type != "folder" && b.Type != "url" {
 		return nil, fmt.Errorf("invalid type %q", b.Type)
 	}
+	if b.Type == "url" && b.URL == "" {
+		return nil, fmt.Errorf("url bookmarks require a URL")
+	}
+	// parent must exist and be alive — a missing/deleted parent orphaned the
+	// node invisibly (it appeared in no tree view but occupied the DB and
+	// synced to devices as an unplaceable row). Only sync push may skip this
+	// (it normalizes unknown parents itself before calling).
+	if b.ParentID != "" && !b.SkipParentCheck {
+		p, err := s.Get(b.ParentID)
+		if err != nil {
+			return nil, fmt.Errorf("parent %q does not exist", b.ParentID)
+		}
+		if p.DeletedAt > 0 {
+			return nil, fmt.Errorf("parent %q is in the trash", b.ParentID)
+		}
+	}
 	if b.ID == "" {
 		var err error
 		if b.ID, err = NewUUID(); err != nil {
@@ -380,6 +396,13 @@ func (s *Store) Move(id, newParent string, position float64, at int64, deviceID 
 	}
 	if _, err := s.Get(newParent); newParent != "" && err != nil {
 		return nil, err
+	}
+	// moving INTO a trashed folder re-parents the node into the void: it
+	// vanishes from every tree view (parent is tombstoned) but stays alive
+	if newParent != "" {
+		if p, err := s.Get(newParent); err == nil && p.DeletedAt > 0 {
+			return nil, fmt.Errorf("target parent is in the trash")
+		}
 	}
 	b, err := s.Get(id)
 	if err != nil {

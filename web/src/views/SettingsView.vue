@@ -66,9 +66,11 @@ async function loadAll() {
 async function changePassword() {
   if (newPw.value !== newPw2.value) { ElMessage.warning('两次输入不一致'); return }
   if (newPw.value.length < 8) { ElMessage.warning('新密码至少 8 个字符'); return }
-  await authApi.changePassword(oldPw.value, newPw.value)
-  ElMessage.success('密码已修改，所有会话已失效，请重新登录')
-  location.href = '/login'
+  try {
+    await authApi.changePassword(oldPw.value, newPw.value)
+    ElMessage.success('密码已修改，所有会话已失效，请重新登录')
+    location.href = '/login'
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 
 async function startTotp() {
@@ -96,38 +98,63 @@ async function confirmTotp() {
 }
 
 async function disableTotp() {
-  await ElMessageBox.confirm('关闭两步验证？', '确认', { type: 'warning' })
-  await authApi.totpDisable()
-  totpEnabled.value = false
-  ElMessage.success('已关闭')
+  try {
+    await ElMessageBox.confirm('关闭两步验证？', '确认', { type: 'warning' })
+    await authApi.totpDisable()
+    totpEnabled.value = false
+    ElMessage.success('已关闭')
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  }
 }
 
 async function newPairCode() {
-  const r = await authApi.newPairCode()
-  pairCode.value = r.code
-  pairExpiry.value = Date.now() + 300_000
+  try {
+    const r = await authApi.newPairCode()
+    pairCode.value = r.code
+    pairExpiry.value = Date.now() + 300_000
+  } catch (e: any) {
+    ElMessage.error('生成配对码失败: ' + e.message)
+  }
 }
 
 async function revoke(d: Device) {
-  await ElMessageBox.confirm(`吊销设备「${d.name}」？其同步将立即停止。`, '吊销设备', { type: 'warning' })
-  await authApi.revokeDevice(d.id)
-  loadAll()
-  ElMessage.success('已吊销')
+  try {
+    await ElMessageBox.confirm(`吊销设备「${d.name}」？其同步将立即停止。`, '吊销设备', { type: 'warning' })
+    await authApi.revokeDevice(d.id)
+    loadAll()
+    ElMessage.success('已吊销')
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  }
 }
 
 async function takeSnapshot() {
-  await toolsApi.createSnapshot()
-  ElMessage.success('快照已创建')
-  loadAll()
+  try {
+    await toolsApi.createSnapshot()
+    ElMessage.success('快照已创建')
+    loadAll()
+  } catch (e: any) {
+    ElMessage.error('快照创建失败: ' + e.message)
+  }
 }
 
+const restoring = ref(false)
 async function restoreSnap(s: Snapshot) {
-  await ElMessageBox.confirm(
-    `将书签库恢复到 ${new Date(s.createdAt * 1000).toLocaleString()} 的快照？\n当前状态会先自动备份（pre-restore 快照）。`,
-    '恢复快照', { type: 'warning' })
-  await toolsApi.restoreSnapshot(s.id)
-  ElMessage.success('已恢复，所有设备将自动同步')
-  loadAll()
+  if (restoring.value) return
+  restoring.value = true
+  try {
+    await ElMessageBox.confirm(
+      `将书签库恢复到 ${new Date(s.createdAt * 1000).toLocaleString()} 的快照？\n当前状态会先自动备份（pre-restore 快照）。`,
+      '恢复快照', { type: 'warning' })
+    await toolsApi.restoreSnapshot(s.id)
+    ElMessage.success('已恢复，所有设备将自动同步')
+    loadAll()
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error('恢复失败: ' + e.message)
+  } finally {
+    restoring.value = false
+  }
 }
 </script>
 

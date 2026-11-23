@@ -72,15 +72,23 @@ async function initSave() {
   try { [tab] = await chrome.tabs.query({ active: true, currentWindow: true }) } catch { /* noop */ }
   ;($('title') as HTMLInputElement).value = tab?.title || ''
   ;($('saveBtn') as HTMLButtonElement).onclick = async () => {
+    const btn = $('saveBtn') as HTMLButtonElement
+    if (btn.disabled) return
+    btn.disabled = true
     const title = ($('title') as HTMLInputElement).value || tab?.title || tab?.url || ''
-    const resp = await chrome.runtime.sendMessage({
-      type: 'saveCurrent',
-      url: tab?.url,
-      title,
-      tags: ($('tags') as HTMLInputElement).value,
-    })
-    $('savedMsg').textContent = resp.ok ? '已收藏 ✓' : resp.error || '失败'
-    setTimeout(() => ($('savedMsg').textContent = ''), 2200)
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        type: 'saveCurrent',
+        url: tab?.url,
+        title,
+        tags: ($('tags') as HTMLInputElement).value,
+      })
+      $('savedMsg').textContent = resp.ok ? '已收藏 ✓' : resp.error || '失败'
+    } catch (e: any) {
+      $('savedMsg').textContent = e?.message || '失败'
+    } finally {
+      setTimeout(() => { $('savedMsg').textContent = ''; btn.disabled = false }, 800)
+    }
   }
 }
 
