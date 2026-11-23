@@ -210,14 +210,14 @@ async function recordIdMapping(serverId: string, localId: string) {
   const map = await idMap()
   map[serverId] = localId
   await setIdMap(map)
-  // keep the push-direction mirror in step: later local edits of this node
-  // must translate back to the same server row, or they land on a raw
-  // local-integer id row that no other device knows about
+  // the push-direction mirror must ALWAYS track the newest binding: an old
+  // l2s entry pointing at a different server row (duplicate-URL rows, or a
+  // row rebuilt by forceResync) made map and l2s disagree — pushes then
+  // landed on the stale row while pulls bound the fresh one, and the two
+  // tables diverged further on every sync (diag: 一致=否)
   const l2s = await l2sMap()
-  if (!(localId in l2s)) {
-    l2s[localId] = serverId
-    await chrome.storage.local.set({ [L2S_KEY]: l2s })
-  }
+  l2s[localId] = serverId
+  await chrome.storage.local.set({ [L2S_KEY]: l2s })
 }
 // mint a globally-unique server id for a locally-created node and remember
 // both directions; minting must happen exactly once per local id
@@ -466,7 +466,23 @@ async function applyCreate(n: NodeState) {
   // instead, or a full replay would duplicate every bookmark the device has
   if (n.type === 'url' && n.url) {
     const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
-    const hit = (existing as chrome.bookmarks.BookmarkTreeNode[]).find(b => !!b.id)
+    const hits = (existing as chrome.bookmarks.BookmarkTreeNode[]).filter(b => !!b.id)
+    // prefer the row l2s already binds this local node to (server ids that
+    // share one URL must not cause the binding to drift between syncs —
+    // drift showed up as 一致=否 and rows flip-flopping between devices)
+    let hit = hits[0]
+    if (hit) {
+      const l2s = await l2sMap()
+      const bound = l2s[hit.id]
+      if (bound && hits.some(h => h.id === hit.id) && bound !== n.id) {
+        // local node already bound to a DIFFERENT server row with this URL:
+        // keep that binding stable instead of re-binding to this row
+        await recordIdMapping(n.id, hit.id)
+        recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
+        applyStats.adopted++
+        return
+      }
+    }
     if (hit) {
       await recordIdMapping(n.id, hit.id)
       recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
@@ -576,8 +592,8 @@ async function applyRemote(changes: NodeState[]) {
             applyStats.removed++
           }
         } else if (act.action === 'move') {
-          const localId = await mapToLocalId(act.id)
-          const parentLocal = await mapToLocalId(act.parentId)
+          const localId = await mapToLocalIdStrict(act.id)
+          const parentLocal = await mapToLocalIdStrict(act.parentId)
           if (localId) {
             const target = parentLocal || await mapParent(act.parentId)
             await chrome.bookmarks.move(localId, { parentId: target, index: act.index })
@@ -596,11 +612,15 @@ async function applyRemote(changes: NodeState[]) {
     // carry the authoring device, timestamp and server revision of each
     // applied change into the local cache: future pushes quote baseRevision
     // so the server can tell a follow-up edit (based on what it already has)
-    // from a stale op (based on history the server has moved past)
+    // from a stale op (based on history the server has moved past).
+    // STRICT lookup here: the lenient fallback keyed overrides by the raw
+    // server id for unmapped rows, poisoning the local-node cache with
+    // entries no chrome node would ever match (cache misses downstream,
+    // echo guards never firing, phantom nodes in LWW comparisons).
     const overrides = new Map<string, { deviceId: string; updatedAt: number; revision: number }>()
     for (const c of changes) {
-      const localId = (await mapToLocalId(c.id)) || c.id
-      overrides.set(localId, { deviceId: c.deviceId, updatedAt: c.updatedAt, revision: c.revision })
+      const localId = await mapToLocalIdStrict(c.id)
+      if (localId) overrides.set(localId, { deviceId: c.deviceId, updatedAt: c.updatedAt, revision: c.revision })
     }
     await refreshLocalCache(overrides)
   } finally {
