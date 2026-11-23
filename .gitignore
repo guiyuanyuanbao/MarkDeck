@@ -17,3 +17,4 @@ data/
 # Logs & misc
 *.log
 .zcode/
+extension/tests/e2e/fixtures/user-bookmarks.html
