@@ -139,17 +139,26 @@ async function refreshLocalCache(overrides?: Map<string, { deviceId: string; upd
   // async walk that fully awaits getChildren before persisting — a .then
   // fire-and-forget here raced the storage.set below and left the cache
   // incomplete (tombstone deletes then silently missed their local nodes).
-  const walkScoped = async (id: string): Promise<void> => {
+  // getTree() already returned the complete subtree (children included);
+  // per-node getChildren here was 1 API call PER NODE on every refresh —
+  // hundreds of redundant round-trips on large trees. Track chrome children
+  // in a side map during `walk` instead of re-querying.
+  const chromeChildren = new Map<string, chrome.bookmarks.BookmarkTreeNode[]>()
+  const walkWithKids = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentId: string) => {
+    for (const n of nodes) {
+      chromeChildren.set(n.id, n.children ?? [])
+      if (n.children) walkWithKids(n.children, n.id)
+    }
+  }
+  walkWithKids(tree[0]?.children ?? [], '')
+  const walkScoped = (id: string): void => {
     const n = map.get(id)
     if (!n) return
     scope.set(id, n)
-    const kids = await chrome.bookmarks.getChildren(id)
-    for (const k of kids) {
-      await walkScoped(k.id)
-    }
+    for (const k of chromeChildren.get(id) ?? []) walkScoped(k.id)
   }
-  if (barRoot) await walkScoped(barRoot.id)
-  if (otherRoot) await walkScoped(otherRoot.id)
+  if (barRoot) walkScoped(barRoot.id)
+  if (otherRoot) walkScoped(otherRoot.id)
   await chrome.storage.local.set({ [LOCAL_KEY]: Object.fromEntries(scope) })
   return scope
 }
