@@ -305,6 +305,27 @@ function bookmarksBarRoot(): string {
 
 // locate a local node by exact title (fallback for removes whose mapping
 // was lost); url nodes first via bookmarks.search, folders via tree walk
+// chrome.bookmarks.search({url}) is EXACT-match: a server row imported as
+// 'https://x.com/' never matches a browser node stored as 'https://x.com'
+// (and vice versa), so adoption silently failed and rebuilds duplicated
+// those bookmarks. Normalize before comparing.
+function normBookmarkUrl(u: string): string {
+  return (u || '').trim().replace(/\/+$/, '').toLowerCase()
+}
+async function findAdoptableByUrl(url: string): Promise<chrome.bookmarks.BookmarkTreeNode | null> {
+  const existing = await chrome.bookmarks.search({ url }).catch(() => [])
+  const hits = (existing as chrome.bookmarks.BookmarkTreeNode[]).filter(b => !!b.id && b.url)
+  if (!hits.length) {
+    // exact match failed — retry with normalized comparison over a title-less search
+    const all = await chrome.bookmarks.search(normBookmarkUrl(url).split('?')[0] || url).catch(() => [])
+    for (const b of (all as chrome.bookmarks.BookmarkTreeNode[])) {
+      if (b.url && normBookmarkUrl(b.url) === normBookmarkUrl(url)) return b
+    }
+    return null
+  }
+  return hits[0]
+}
+
 async function sw_findNodeByTitle(title: string, parentLocalId?: string): Promise<{ id: string; url?: string } | null> {
   const tree = await chrome.bookmarks.getTree()
   let found: { id: string; url?: string } | null = null

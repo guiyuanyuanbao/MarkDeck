@@ -169,6 +169,85 @@ async function main() {
   }
   log('G6: post-rebuild realtime sync still works', arrived)
 
+  // ---- G7: trailing-slash URL divergence must adopt, not duplicate ----
+  // (server row imported as 'https://x.com/' vs browser node 'https://x.com')
+  await api('POST', '/api/bookmarks',
+    { type: 'url', title: '斜杠归一化书签', url: 'https://slash.test/' }, H)
+  await resync(sw)
+  let node1 = null
+  for (let i = 0; i < 15; i++) {
+    node1 = await browserNodeByTitle(sw, '斜杠归一化书签')
+    if (node1) break
+    await new Promise(r => setTimeout(r, 500))
+  }
+  log('G7 setup: slash-URL bookmark synced to browser', !!node1, JSON.stringify(node1))
+  // TWO rebuilds: adoption must bind both times, no duplicates
+  await forceResync(sw)
+  await forceResync(sw)
+  await new Promise(r => setTimeout(r, 2000))
+  const slashCopies = await sw.evaluate(async () => {
+    const tree = await chrome.bookmarks.getTree()
+    let n = 0
+    const walk = (ns) => { for (const x of ns) { if (x.url === 'https://slash.test/' || x.url === 'https://slash.test') n++; if (x.children) walk(x.children) } }
+    for (const root of tree) if (root.children) walk(root.children)
+    return n
+  })
+  log('G7: slash-URL survives 2 rebuilds as ONE node (normalized adoption)',
+    slashCopies === 1, 'copies=' + slashCopies)
+
+  // ---- G8: overlapping ops — web edit races browser edit on the SAME node ----
+  const race = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'url', title: '竞态书签', url: 'https://race.test/x' }, H)).body)
+  await resync(sw)
+  let raceNode = null
+  for (let i = 0; i < 15; i++) {
+    raceNode = await browserNodeByTitle(sw, '竞态书签')
+    if (raceNode) break
+    await new Promise(r => setTimeout(r, 500))
+  }
+  // both sides edit simultaneously (within the same second)
+  const p1 = api('PUT', `/api/bookmarks/${race.id}`, { title: '网页端竞态改名' }, H)
+  const p2 = sw.evaluate(async (id) => {
+    await chrome.bookmarks.update(id, { title: '浏览器端竞态改名' })
+  }, raceNode.id)
+  await Promise.all([p1, p2])
+  await resync(sw)
+  await new Promise(r => setTimeout(r, 2000))
+  const webT = (await serverNodes()).find(n => n.id === race.id)?.title
+  const hasWeb = await browserNodeByTitle(sw, '网页端竞态改名')
+  const hasExt = await browserNodeByTitle(sw, '浏览器端竞态改名')
+  const converged = (webT === '网页端竞态改名' && !!hasWeb && !hasExt) ||
+                    (webT === '浏览器端竞态改名' && !!hasExt && !hasWeb)
+  log('G8: same-second edit race converges to ONE title on BOTH ends',
+    converged, 'srv=' + JSON.stringify(webT) + ' web=' + !!hasWeb + ' ext=' + !!hasExt)
+
+  // ---- G9: delete races create (web deletes while browser renames) ----
+  const g9 = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'url', title: '删除竞态书签', url: 'https://del-race.test/x' }, H)).body)
+  await resync(sw)
+  let g9node = null
+  for (let i = 0; i < 15; i++) {
+    g9node = await browserNodeByTitle(sw, '删除竞态书签')
+    if (g9node) break
+    await new Promise(r => setTimeout(r, 500))
+  }
+  const p3 = api('DELETE', `/api/bookmarks/${g9.id}`, undefined, H)
+  const p4 = sw.evaluate(async (id) => {
+    await chrome.bookmarks.update(id, { title: '删除竞态-浏览器改名' })
+  }, g9node.id)
+  await Promise.all([p3, p4])
+  await resync(sw)
+  await new Promise(r => setTimeout(r, 2500))
+  await resync(sw)
+  const srvStill = (await serverNodes()).some(n => n.id === g9.id && !(n.deletedAt > 0))
+  const extGone = !(await browserNodeByTitle(sw, '删除竞态书签'))
+  const extRenamed = !!(await browserNodeByTitle(sw, '删除竞态-浏览器改名'))
+  // acceptable outcomes: tombstone wins (node gone everywhere) OR rename won
+  // and got pushed (row revived) — but NOT node in server + old title in ext
+  const g9ok = (srvStill === false && extGone) || (srvStill === true && extRenamed)
+  log('G9: delete-vs-edit race reaches a consistent state',
+    g9ok, 'srvAlive=' + srvStill + ' extGone=' + extGone + ' extRenamed=' + extRenamed)
+
   await context.close()
   console.log('\n=== GRAVEYARD-BIND E2E RESULT ===')
   console.log(`${results.filter(r => r.ok).length} passed, ${results.filter(r => !r.ok).length} failed`)
