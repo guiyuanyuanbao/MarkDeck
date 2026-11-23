@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest'
 // profiles leave `other` undefined → callers fall back per-site)
 function resolveRoots(children: { id: string; title: string }[]) {
   const bar = children[0]?.id || '1'
-  const other = children.length > 1 ? children[children.length - 1].id : undefined
+  const other = children.length > 1 ? children[1].id : undefined
   return { bar, other }
 }
 
@@ -31,6 +31,18 @@ describe('root id resolution (GUID-safe)', () => {
     ])
     expect(r.bar).toBe('b0b1a1e2-7777-4d55-a3a0-guidbar0001')
     expect(r.other).toBe('c9d2b2f3-8888-4e66-b4b1-guidother002')
+  })
+  it('Edge: never picks Mobile bookmarks as the other-root', () => {
+    // Edge shows a third root 'Mobile bookmarks'; taking the LAST child
+    // routed the 其他书签 holder into Mobile and broke 94 bookmarks
+    const r = resolveRoots([
+      { id: 'edge-bar-guid', title: '书签栏' },
+      { id: 'edge-other-guid', title: '其他书签' },
+      { id: 'edge-mobile-guid', title: '手机书签' },
+    ])
+    expect(r.bar).toBe('edge-bar-guid')
+    expect(r.other).toBe('edge-other-guid') // children[1], NOT children[last]
+    expect(r.other).not.toBe('edge-mobile-guid')
   })
   it('never returns the same node as both bar and other', () => {
     const r = resolveRoots([{ id: 'only-root', title: '书签栏' }])

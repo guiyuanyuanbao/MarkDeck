@@ -128,10 +128,13 @@ async function refreshLocalCache(overrides?: Map<string, { deviceId: string; upd
   walk(tree, '')
   // Sync scope: the Bookmarks Bar plus Other Bookmarks. Root ids are NOT
   // fixed ('1'/'2' only on legacy profiles; newer Chromium uses GUID ids),
-  // so resolve by position: first child = bar, last child = other bookmarks.
+  // so resolve by Chromium's invariant ordering: first child = bar,
+  // SECOND child = other bookmarks (children[2] is Mobile bookmarks when
+  // present — taking the last child grabbed Mobile on Edge and silently
+  // excluded the real other-bookmarks content from the sync scope).
   const roots = tree[0]?.children ?? []
   const barRoot = roots[0]
-  const otherRoot = roots[roots.length - 1] !== barRoot ? roots[roots.length - 1] : undefined
+  const otherRoot = roots.length > 1 ? roots[1] : undefined
   const scope = new Map<string, NodeState>()
   // async walk that fully awaits getChildren before persisting — a .then
   // fire-and-forget here raced the storage.set below and left the cache
@@ -318,15 +321,19 @@ async function sw_findNodeByTitle(title: string): Promise<{ id: string; url?: st
 // root ids are NOT fixed: newer Chromium profiles use GUID-style permanent
 // node ids, so hardcoding '1' made every chrome.bookmarks.create fail with
 // "Can't find parent bookmark for id". Resolve the real roots from the tree.
+// Chromium invariant (Chrome AND Edge): children[0] = bookmarks bar,
+// children[1] = other bookmarks, children[2] = mobile bookmarks (when it
+// exists — Edge usually shows it). Taking the LAST child grabbed Mobile on
+// Edge and routed the 其他书签 holder into the wrong root (94 bookmarks
+// failing to apply on the user's Edge while Chrome worked).
 let cachedRoots: { bar: string; other?: string } | null = null
 async function resolveRoots(): Promise<{ bar: string; other?: string }> {
   if (cachedRoots) return cachedRoots
   const tree = await chrome.bookmarks.getTree()
   const roots = tree[0]?.children ?? []
-  // identify by position, not title (localized titles vary):
-  // the first child is always the bookmarks bar, the last is "other bookmarks"
   const bar = roots[0]?.id || '1'
-  const other = roots.length > 1 ? roots[roots.length - 1].id : undefined
+  // other bookmarks is the SECOND child when present; never the bar itself
+  const other = roots.length > 1 ? roots[1].id : undefined
   cachedRoots = { bar, other }
   return cachedRoots
 }
@@ -945,7 +952,8 @@ async function initialImport() {
     const bar = roots[0] // first child = bookmarks bar (id not fixed, may be a GUID)
     // 'Other Bookmarks' gets a server-side top-level folder so its content
     // is visible everywhere, while the local root stays untouched.
-    const others = roots.length > 1 ? roots[roots.length - 1] : undefined
+    // SECOND child per the Chromium invariant (children[2] is Mobile on Edge)
+    const others = roots.length > 1 ? roots[1] : undefined
     const ops: Record<string, unknown>[] = []
     const now = Math.floor(Date.now() / 1000)
     // Local chrome ids collide across devices (every browser numbers its
