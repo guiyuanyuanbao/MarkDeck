@@ -435,28 +435,47 @@ async function setSyncStatus(status: string) {
   chrome.action.setBadgeBackgroundColor({ color: badge.color })
 }
 
+let wsKeepalive: ReturnType<typeof setInterval> | null = null
+// diagnostics for the options page / tests: is the realtime channel alive?
+const wsDiag = { state: 'idle' as string, lastFrameAt: 0, lastFrameRev: 0 }
 async function connectWS(cfg: Config) {
   if (ws && ws.readyState <= 1) return
   try {
     const url = apiBase(cfg.server).replace(/^http/, 'ws') + `/api/ws?token=${encodeURIComponent(cfg.token)}`
+    wsDiag.state = 'connecting'
     ws = new WebSocket(url)
     ws.onopen = async () => {
       wsAttempt = 0
+      wsDiag.state = 'open'
       await setSyncStatus('online')
+      // app frames reset the server's read deadline and keep the SW alive
+      // (any extension API activity extends its lifetime) so realtime pings
+      // keep flowing instead of dying with a 30s idle restart
+      if (wsKeepalive) clearInterval(wsKeepalive)
+      wsKeepalive = setInterval(() => {
+        try { ws?.send('ping') } catch { /* closing */ }
+      }, 20000)
     }
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data)
-        if (msg.t === 'rev') schedulePull()
+        if (msg.t === 'rev') {
+          wsDiag.lastFrameAt = Date.now()
+          wsDiag.lastFrameRev = msg.rev
+          schedulePull()
+        }
       } catch { /* ignore */ }
     }
     ws.onclose = async () => {
       ws = null
+      wsDiag.state = 'closed'
+      if (wsKeepalive) { clearInterval(wsKeepalive); wsKeepalive = null }
       await setSyncStatus('disconnected')
       setTimeout(() => getConfig().then((c) => c && connectWS(c)), backoffDelay(wsAttempt++))
     }
     ws.onerror = () => { try { ws?.close() } catch { /* noop */ } }
   } catch {
+    wsDiag.state = 'error'
     await setSyncStatus('disconnected')
   }
 }
@@ -499,7 +518,10 @@ async function fullSync() {
 // ---- event wiring ----
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(ALARM, { periodInMinutes: 5 })
+  // 1-minute poll: MV3 kills the SW after ~30s idle, which also kills the WS
+  // socket and its reconnect timer. The alarm is what guarantees eventual
+  // convergence; 5 minutes felt like "sync is broken" to users.
+  chrome.alarms.create(ALARM, { periodInMinutes: 1 })
 })
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -615,7 +637,9 @@ async function initialImport() {
     // top-level ('') and '2' maps to the per-device 其他书签 holder once pushed
     localToServer['1'] = ''
     const serverIdOf = (localId: string): string => {
-      if (localToServer[localId]) return localToServer[localId]
+      // `in` check — root '1' legitimately maps to '' which is falsy; a
+      // truthy check re-minted a UUID on every call
+      if (localId in localToServer) return localToServer[localId]
       const uuid = localId === 'others-root'
         ? 'others-' + cfg.deviceId // stable holder id per device
         : crypto.randomUUID()
@@ -683,3 +707,4 @@ fullSync()
 
 // test/debug hook: lets Playwright E2E drive a full sync directly from the SW
 ;(globalThis as unknown as Record<string, unknown>).__markdeckResync = fullSync
+;(globalThis as unknown as Record<string, unknown>).__markdeckWsDiag = wsDiag

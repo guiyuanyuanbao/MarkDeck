@@ -35,7 +35,7 @@ func New(st *store.Store, cfg *config.Config, am *auth.Manager, hub *sync.Hub) *
 
 // broadcastRevision pushes the current head revision to all WS clients.
 func (a *API) broadcastRevision() {
-	if _, head, err := a.Store.ChangesSince(0, 1); err == nil {
+	if head, err := a.Store.MaxRevision(); err == nil {
 		a.broadcast(head)
 	}
 }
@@ -92,10 +92,18 @@ func (a *API) requireDevice(next http.HandlerFunc) http.HandlerFunc {
 // so CSRF does not apply).
 func (a *API) requireAny(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sess := a.Auth.SessionFromRequest(r)
-		if sess == nil && a.Auth.DeviceFromRequest(r) == nil {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "auth required"})
-			return
+		// an explicit Bearer token wins over cookies: in the SAME browser the
+		// extension's fetch rides along with the web UI's session cookie, and
+		// without this the request is treated as session traffic and rejected
+		// for a CSRF header the extension never had
+		dev := a.Auth.DeviceFromRequest(r)
+		var sess *auth.Session // zero value when device-authenticated
+		if dev == nil {
+			sess = a.Auth.SessionFromRequest(r)
+			if sess == nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "auth required"})
+				return
+			}
 		}
 		if sess != nil {
 			switch r.Method {

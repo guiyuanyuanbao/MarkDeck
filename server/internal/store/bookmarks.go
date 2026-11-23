@@ -262,12 +262,12 @@ func (s *Store) ChangesSince(since int64, limit int) ([]*Bookmark, int64, error)
 	if limit <= 0 || limit > 5000 {
 		limit = 2000
 	}
-	var maxSeq int64
-	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM changes`).Scan(&maxSeq); err != nil {
-		return nil, 0, err
-	}
 	// Rows changed by a change-entry with seq > since. A row may have several
 	// entries; dedupe by taking rows via revision (last entry seq).
+	// The returned head is the highest revision IN THIS PAGE, not the global
+	// max seq: callers save head as their next `since`, so returning the
+	// global value when the page was truncated would silently skip every
+	// row beyond the limit (large imports never fully synced).
 	rows, err := s.DB.Query(`SELECT `+scanCols+` FROM bookmarks
 		WHERE revision > ? ORDER BY revision ASC LIMIT ?`, since, limit)
 	if err != nil {
@@ -288,7 +288,15 @@ func (s *Store) ChangesSince(since int64, limit int) ([]*Bookmark, int64, error)
 	for _, b := range out {
 		b.Tags = loadTags(s.DB, b.ID)
 	}
-	return out, maxSeq, nil
+	// head = last revision in the page; equals the global max only when the
+	// whole backlog fits in one page
+	var head int64
+	if len(out) > 0 {
+		head = out[len(out)-1].Revision
+	} else if err := s.DB.QueryRow(`SELECT COALESCE(MAX(revision),?) FROM bookmarks`, since).Scan(&head); err != nil {
+		return nil, 0, err
+	}
+	return out, head, nil
 }
 
 // MaxPosition returns the highest position among live children of parent.
@@ -300,6 +308,14 @@ func (s *Store) MaxPosition(parentID string) (float64, error) {
 		return 0, err
 	}
 	return max.Float64, nil
+}
+
+// MaxRevision is the global head revision (the latest change-log seq that
+// any row carries). Status display uses it; pull uses page-scoped heads.
+func (s *Store) MaxRevision() (int64, error) {
+	var max int64
+	err := s.DB.QueryRow(`SELECT COALESCE(MAX(revision),0) FROM bookmarks`).Scan(&max)
+	return max, err
 }
 
 // SubtreeIDs returns id and all descendant ids (depth-first).

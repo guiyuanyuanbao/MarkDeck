@@ -189,7 +189,7 @@ func (a *API) applyOp(op *pushOp) pushResult {
 // SyncStatus reports the server head revision and node counts — used by
 // clients to decide between incremental pull and full re-sync.
 func (a *API) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
-	_, maxRev, err := a.Store.ChangesSince(0, 1)
+	maxRev, err := a.Store.MaxRevision()
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
