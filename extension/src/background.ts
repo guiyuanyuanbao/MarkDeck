@@ -490,6 +490,32 @@ async function applyCreate(n: NodeState) {
       return
     }
   }
+  // FOLDER adoption: URLs are unique per node, but folders are identified by
+  // name — without this every forceResync (which wipes mappings) re-created
+  // the whole folder tree as EMPTY SHELLS, one set per rebuild, while the
+  // child URLs adopted into the first set. Same title + same resolved parent
+  // = the same folder.
+  if (n.type === 'folder') {
+    const parentLocal = await mapToLocalIdStrict(n.parentId)
+    const parentKey = parentLocal || await barRootId()
+    const tree = await chrome.bookmarks.getTree()
+    let adopted: chrome.bookmarks.BookmarkTreeNode | null = null
+    const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentOfNode: string) => {
+      for (const node of nodes) {
+        if (adopted) return
+        if (!node.url && node.title === n.title && parentOfNode === parentKey) adopted = node
+        if (node.children) walk(node.children, node.id)
+      }
+    }
+    for (const root of tree) if (root.children) walk(root.children, root.id)
+    if (adopted) {
+      const shell = adopted as chrome.bookmarks.BookmarkTreeNode
+      await recordIdMapping(n.id, shell.id)
+      recentlyApplied.set(shell.id, { title: n.title, parentId: shell.parentId })
+      applyStats.adopted++
+      return
+    }
+  }
   // pre-mark BEFORE the chrome call: the bookmark event fires
   // asynchronously and must find the guard already in place
   recentlyApplied.set('__pre__' + n.id, { title: n.title })
@@ -1053,6 +1079,46 @@ async function forceResync() {
       since = data.head
     }
     await refreshLocalCache()
+    // ghost-shell sweep: rebuilds that ran before folder adoption existed
+    // left EMPTY duplicate folder trees behind (one set per rebuild). Any
+    // folder that is now unmapped, empty, and not a root is a leftover —
+    // remove it bottom-up. Bookmarks are never touched: only empty shells.
+    const mapNow = await idMap()
+    const collectShells = async (): Promise<string[]> => {
+      const tree = await chrome.bookmarks.getTree()
+      const shells: string[] = []
+      const visit = async (nodes: chrome.bookmarks.BookmarkTreeNode[]): Promise<boolean> => {
+        let empty = true
+        for (const node of nodes) {
+          if (node.url) { empty = false; continue }
+          const kidsEmpty = node.children && node.children.length ? await visit(node.children) : true
+          if (kidsEmpty && !(node.id in mapNow) && !(node.parentId === tree[0]?.id)) {
+            shells.push(node.id)
+          } else {
+            empty = false
+          }
+        }
+        return empty
+      }
+      const roots = tree[0]?.children ?? []
+      for (const root of roots) {
+        if (root.children?.length) await visit(root.children)
+      }
+      return shells
+    }
+    // two passes: removing an empty leaf unmasks its empty parent
+    for (let pass = 0; pass < 3; pass++) {
+      const shells = await collectShells()
+      if (!shells.length) break
+      for (const id of shells) {
+        try {
+          recentlyApplied.delete(id)
+          await chrome.bookmarks.removeTree(id)
+        } catch { /* concurrent change; next sweep catches it */ }
+      }
+      // let the shell-removal events settle before the next pass
+      await new Promise(r => setTimeout(r, 300))
+    }
     // per-row audit: what did applyRemote actually DO with those rows?
     // (the user's environment applied 348 rows and produced nothing —
     // this breakdown turns the silent catch{} into a concrete report)

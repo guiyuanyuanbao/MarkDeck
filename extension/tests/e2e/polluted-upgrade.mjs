@@ -250,6 +250,39 @@ async function main() {
     await new Promise(r => setTimeout(r, 500))
   }
   log('P5: folder shell removed even when its own mapping was lost', shellGone)
+
+  // ---- P6: double forceResync must NOT duplicate folder shells ----
+  // (user report: every rebuild added one more empty folder-tree set)
+  const fr1 = await sw.evaluate(async () =>
+    typeof globalThis.__markdeckForceResync === 'function'
+      ? await globalThis.__markdeckForceResync()
+      : chrome.runtime.sendMessage({ type: 'forceResync' }))
+  const fr2 = await sw.evaluate(async () =>
+    typeof globalThis.__markdeckForceResync === 'function'
+      ? await globalThis.__markdeckForceResync()
+      : chrome.runtime.sendMessage({ type: 'forceResync' }))
+  log('P6 setup: two forceResync runs', fr1?.ok === true && fr2?.ok === true,
+    'pulled=' + fr1?.pulled + '/' + fr2?.pulled)
+  await new Promise(r => setTimeout(r, 2500))
+  const shellCount = await sw.evaluate(async () => {
+    const tree = await chrome.bookmarks.getTree()
+    const folders = new Map()
+    let dups = 0
+    const walk = (ns, parent) => {
+      for (const x of ns) {
+        if (!x.url) {
+          const key = parent + '|' + x.title
+          folders.set(key, (folders.get(key) || 0) + 1)
+          if (folders.get(key) > 1) dups++
+          if (x.children) walk(x.children, x.id)
+        }
+      }
+    }
+    const roots = tree[0]?.children ?? []
+    for (const r of roots) if (r.children) walk(r.children, r.id)
+    return dups
+  })
+  log('P6: no duplicated folder shells after double rebuild', shellCount === 0, 'dupFolderTitles=' + shellCount)
   // diagnosis: what does the SW see after the delete?
   const dbg5 = await sw.evaluate(async (folderServerId) => {
     const cfg = (await chrome.storage.local.get('md_config')).md_config
