@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { authApi, toolsApi, type Device, type Snapshot } from '@/api/client'
 
@@ -20,7 +20,37 @@ const pairCode = ref('')
 const pairExpiry = ref(0)
 const snapshots = ref<Snapshot[]>([])
 
-onMounted(() => { loadAll() })
+onMounted(() => {
+  loadAll()
+  // any revision ping (incl. the one broadcast when a device pairs) refreshes
+  // the device list — no manual reload needed
+  window.addEventListener('md:revision', onRevision)
+  // while a pairing code is live, poll so a freshly paired device shows up
+  // within seconds even without a WS ping
+  pollTimer = window.setInterval(() => {
+    if (pairCode.value && Date.now() < pairExpiry.value) loadDevices()
+  }, 3000)
+})
+let pollTimer: number | undefined
+onUnmounted(() => {
+  window.removeEventListener('md:revision', onRevision)
+  if (pollTimer) clearInterval(pollTimer)
+})
+let lastDeviceSig = ''
+function onRevision() { loadDevices() }
+async function loadDevices() {
+  try {
+    const d = await authApi.devices()
+    const list = d.devices || []
+    devices.value = list
+    // a new device appeared while a pairing code is on screen: announce it
+    const sig = list.map(x => x.id).sort().join(',')
+    if (pairCode.value && lastDeviceSig && sig !== lastDeviceSig) {
+      ElMessage.success('新设备已配对，同步已开始')
+    }
+    lastDeviceSig = sig
+  } catch { /* not logged in */ }
+}
 
 async function loadAll() {
   try {
@@ -28,6 +58,7 @@ async function loadAll() {
     totpEnabled.value = me.totp
     const [d, s] = await Promise.all([authApi.devices(), toolsApi.snapshots()])
     devices.value = d.devices || []
+    lastDeviceSig = (d.devices || []).map((x: Device) => x.id).sort().join(',')
     snapshots.value = s.snapshots || []
   } catch (e: any) { /* not logged in */ }
 }
@@ -145,6 +176,12 @@ async function restoreSnap(s: Snapshot) {
         </div>
         <el-table :data="devices">
           <el-table-column prop="name" label="设备" min-width="180" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <span v-if="row.online" style="color:#67c23a">● 在线</span>
+              <span v-else style="color:#909399">○ 离线</span>
+            </template>
+          </el-table-column>
           <el-table-column label="配对时间" width="170">
             <template #default="{ row }">{{ new Date(row.createdAt * 1000).toLocaleString() }}</template>
           </el-table-column>

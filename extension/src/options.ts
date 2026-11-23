@@ -20,15 +20,29 @@ $('pairBtn').onclick = async () => {
     if (!granted) { msg.className = 'msg err'; msg.textContent = '未授予该站点的访问权限'; return }
   } catch { /* chrome may auto-grant in dev */ }
 
-  msg.className = 'msg'; msg.textContent = '配对中…'
+  // step feedback: pairing runs several network operations (exchange ->
+  // initial import -> full sync); without progress text a failure at any
+  // step looked like the whole thing hung
+  msg.className = 'msg'
+  msg.textContent = '① 正在连接服务器…'
+  try {
+    const st = await fetch(server + '/api/auth/state', { signal: AbortSignal.timeout(8000) })
+    if (!st.ok) throw new Error('服务器响应异常 HTTP ' + st.status)
+  } catch (e: any) {
+    msg.className = 'msg err'
+    msg.textContent = '① 无法连接服务器: ' + (e?.message || '网络错误') + '（检查地址与端口）'
+    return
+  }
+  msg.textContent = '② 正在交换配对码…'
   const resp = await chrome.runtime.sendMessage({
     type: 'pair', server, code,
     name: navigator.userAgent.includes('Edg') ? 'Edge 浏览器' : 'Chrome 浏览器',
   })
   if (resp?.ok) {
-    msg.className = 'msg ok'; msg.textContent = '✓ 配对成功，首次同步已开始'
+    msg.className = 'msg ok'; msg.textContent = '✓ 配对成功，首次同步已开始（书签栏内容将出现在管理页）'
   } else {
-    msg.className = 'msg err'; msg.textContent = '配对失败: ' + (resp?.error || '未知错误')
+    msg.className = 'msg err'; msg.textContent = '配对失败: ' + (resp?.error || '未知错误') +
+      (String(resp?.error || '').includes('pairing code') ? '（配对码已过期或已使用，请重新生成）' : '')
   }
 }
 

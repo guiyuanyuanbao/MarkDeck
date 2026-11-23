@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/sync"
 )
 
@@ -239,6 +240,8 @@ func (a *API) handlePairExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("paired device %s (%s)", id, body.Name)
+	// wake the admin UI: its device list refreshes on revision pings
+	a.broadcastRevision()
 	writeJSON(w, http.StatusOK, map[string]string{"deviceId": id, "token": token})
 }
 
@@ -248,7 +251,25 @@ func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"devices": devs})
+	// online = synced within the last 2 minutes (device tokens touch
+	// last_seen on every pull/push/WS-auth, so any live sync keeps it fresh)
+	type deviceView struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		CreatedAt int64  `json:"createdAt"`
+		LastSeen  int64  `json:"lastSeen"`
+		Online    bool   `json:"online"`
+	}
+	const onlineWindow = 120 // seconds
+	views := make([]deviceView, 0, len(devs))
+	now := store.Now()
+	for _, d := range devs {
+		views = append(views, deviceView{
+			ID: d.ID, Name: d.Name, CreatedAt: d.Created, LastSeen: d.LastSeen,
+			Online: d.LastSeen > 0 && now-d.LastSeen <= onlineWindow,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": views})
 }
 
 func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
