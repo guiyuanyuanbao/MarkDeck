@@ -157,7 +157,7 @@ export function clientWins(local: NodeState | undefined, remote: NodeState): boo
 export type RemoteAction =
   | { action: 'create'; node: NodeState }
   | { action: 'update'; node: NodeState }
-  | { action: 'remove'; id: string }
+  | { action: 'remove'; id: string; title?: string }
   | { action: 'move'; id: string; parentId: string; index: number }
   | { action: 'ignore'; id: string; why: string }
 
@@ -177,7 +177,12 @@ export function planRemoteActions(changes: NodeState[], localNodes: Map<string, 
     const localId = mapToLocalId ? mapToLocalId(c.id) : c.id
     const local = localId ? localNodes.get(localId) : undefined
     if (c.deletedAt && c.deletedAt > 0) {
-      if (local && !local.deletedAt) actions.push({ action: 'remove', id: localId! })
+      // title rides along so the adapter can still locate the local node by
+      // name when the mapping was lost (folder-shell ghosts, see applyRemote).
+      // 'already absent' is NOT safe to assume: mapToLocalId falls back to
+      // the raw server id, so a node whose mapping was pruned looks absent
+      // here but may exist in the tree under a different local id.
+      if (!local || !local.deletedAt) actions.push({ action: 'remove', id: localId ?? c.id, title: c.title })
       else actions.push({ action: 'ignore', id: c.id, why: 'already absent' })
       continue
     }

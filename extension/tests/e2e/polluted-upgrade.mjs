@@ -210,6 +210,66 @@ async function main() {
   })
   log('P4c: no duplicate URLs after adoption-based rebuild', dupCount === 0, 'dupUrls=' + dupCount)
 
+  // ---- P5: deleting a server folder whose OWN mapping is lost must still
+  // remove the local folder shell (children mappings present -> recover the
+  // folder's local id from a child's parentId) ----
+  const sf = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'folder', title: '待删除文件夹' }, H)).body)
+  const kid = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'url', title: '文件夹内书签P5', url: 'https://p5.sm/x', parentId: sf.id }, H)).body)
+  await sw.evaluate(() => globalThis.__markdeckResync())
+  let shellThere = false
+  for (let i = 0; i < 15; i++) {
+    const t = await browserTitles(sw)
+    if (t.includes('文件夹内书签P5')) { shellThere = true; break }
+    await new Promise(r => setTimeout(r, 500))
+  }
+  log('P5 setup: folder+child synced to browser', shellThere)
+  // simulate partial mapping loss: drop ONLY the folder's two entries
+  await sw.evaluate(async (folderServerId) => {
+    const map = (await chrome.storage.local.get('md_id_map')).md_id_map || {}
+    const l2s = (await chrome.storage.local.get('md_l2s')).md_l2s || {}
+    const folderLocal = map[folderServerId]
+    delete map[folderServerId]
+    if (folderLocal) delete l2s[folderLocal]
+    await chrome.storage.local.set({ md_id_map: map })
+    await chrome.storage.local.set({ md_l2s: l2s })
+  }, sf.id)
+  await api('DELETE', `/api/bookmarks/${sf.id}`, undefined, H)
+  await sw.evaluate(() => globalThis.__markdeckResync())
+  let shellGone = false
+  for (let i = 0; i < 15; i++) {
+    const node = await sw.evaluate(async (t) => {
+      const tree = await chrome.bookmarks.getTree()
+      let found = null
+      const walk = (ns) => { for (const x of ns) { if (x.title === t && !x.url) found = x; if (x.children) walk(x.children) } }
+      for (const root of tree) if (root.children) walk(root.children)
+      return found
+    }, '待删除文件夹')
+    if (!node) { shellGone = true; break }
+    await new Promise(r => setTimeout(r, 500))
+  }
+  log('P5: folder shell removed even when its own mapping was lost', shellGone)
+  // diagnosis: what does the SW see after the delete?
+  const dbg5 = await sw.evaluate(async (folderServerId) => {
+    const cfg = (await chrome.storage.local.get('md_config')).md_config
+    const st = (await chrome.storage.local.get('md_status')).md_status
+    const r = await fetch(cfg.server + '/api/sync/device-pull?since=' + Math.max(0, cfg.rev - 10), {
+      headers: { Authorization: 'Bearer ' + cfg.token } })
+    const data = await r.json()
+    const rows = (data.changes || []).filter(c => c.id === folderServerId
+      || (data.changes || []).some(x => x.parentId === folderServerId))
+    const tree = await chrome.bookmarks.getTree()
+    let shell = null
+    const walk = (ns) => { for (const x of ns) { if (x.title === '待删除文件夹' && !x.url) shell = { id: x.id }; if (x.children) walk(x.children) } }
+    for (const root of tree) if (root.children) walk(root.children)
+    const trace = (await chrome.storage.local.get(['md_trace', 'md_trace2']))
+    return { rev: cfg.rev, head: data.head, status: st,
+      rows: rows.map(x => ({ id: x.id.slice(0, 6), del: x.deletedAt, parent: (x.parentId || '').slice(0, 6) })),
+      shellStillThere: !!shell, shellId: shell?.id, trace }
+  }, sf.id)
+  console.log('[P5dbg]', JSON.stringify(dbg5))
+
   await page.close()
   console.log('\n=== POLLUTED-UPGRADE E2E RESULT ===')
   console.log(`${results.filter(r => r.ok).length} passed, ${results.filter(r => !r.ok).length} failed`)

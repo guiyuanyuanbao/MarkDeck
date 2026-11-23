@@ -212,6 +212,21 @@ async function main() {
   titles = await browserTitles(sw)
   log('T5: server delete removed browser bookmark', !titles.includes('服务器预置书签'),
     'after titles: ' + JSON.stringify(titles))
+  if (titles.includes('服务器预置书签')) {
+    const dbg = await sw.evaluate(async (server) => {
+      const cfg = (await chrome.storage.local.get('md_config')).md_config
+      const st = (await chrome.storage.local.get('md_status')).md_status
+      const r = await fetch(server + '/api/sync/device-pull?since=' + Math.max(0, cfg.rev - 5), {
+        headers: { Authorization: 'Bearer ' + cfg.token } })
+      const data = await r.json()
+      const rows = (data.changes || []).filter(c => c.title === '服务器预置书签' || (c.deletedAt || 0) > 0)
+      const map = (await chrome.storage.local.get('md_id_map')).md_id_map || {}
+      return { rev: cfg.rev, head: data.head, status: st,
+        rows: rows.map(x => ({ t: x.title, del: x.deletedAt })),
+        mapRows: Object.keys(map).length }
+    }, SERVER)
+    console.log('[T5dbg]', JSON.stringify(dbg))
+  }
 
   // ---- T6: realtime WS propagation WITHOUT manual resync ----
   await api('POST', '/api/bookmarks',

@@ -197,6 +197,15 @@ async function mapToLocalId(serverId: string): Promise<string | null> {
   const map = await idMap()
   return serverId in map ? map[serverId] : serverId // creator devices keep local id == server id
 }
+// STRICT variant: null when unmapped. The lenient fallback above returns the
+// raw server id, which callers used as a chrome node id — a GUID server id
+// can never exist in the browser tree, so unmapped updates/moves/removes
+// silently failed on "Can't find bookmark for id". Recovery paths (child
+// lookup, title match) need null to know they must engage.
+async function mapToLocalIdStrict(serverId: string): Promise<string | null> {
+  const map = await idMap()
+  return serverId in map ? map[serverId] : null
+}
 async function recordIdMapping(serverId: string, localId: string) {
   const map = await idMap()
   map[serverId] = localId
@@ -289,6 +298,21 @@ async function sanitizeIdMaps() {
 
 function bookmarksBarRoot(): string {
   return '1' // legacy Chrome/Edge fixed root id — use barRootId() where possible
+}
+
+// locate a local node by exact title (fallback for removes whose mapping
+// was lost); url nodes first via bookmarks.search, folders via tree walk
+async function sw_findNodeByTitle(title: string): Promise<{ id: string; url?: string } | null> {
+  const tree = await chrome.bookmarks.getTree()
+  let found: { id: string; url?: string } | null = null
+  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+    for (const n of nodes) {
+      if (n.title === title && !found) found = { id: n.id, url: n.url }
+      if (n.children) walk(n.children)
+    }
+  }
+  for (const root of tree) if (root.children) walk(root.children)
+  return found
 }
 
 // root ids are NOT fixed: newer Chromium profiles use GUID-style permanent
@@ -435,6 +459,41 @@ function resetApplyStats() {
   applyStats.failed = 0; applyStats.errors = []
 }
 
+async function applyCreate(n: NodeState) {
+  // same-URL adoption: when the mapping tables are empty (fresh device, or
+  // forceResync recovery) a live server row whose URL already exists in the
+  // browser must NOT be created again — adopt the existing local node
+  // instead, or a full replay would duplicate every bookmark the device has
+  if (n.type === 'url' && n.url) {
+    const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
+    const hit = (existing as chrome.bookmarks.BookmarkTreeNode[]).find(b => !!b.id)
+    if (hit) {
+      await recordIdMapping(n.id, hit.id)
+      recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
+      applyStats.adopted++
+      return
+    }
+  }
+  // pre-mark BEFORE the chrome call: the bookmark event fires
+  // asynchronously and must find the guard already in place
+  recentlyApplied.set('__pre__' + n.id, { title: n.title })
+  // parent may itself need translating (folder created by remote);
+  // unknown remote parent falls back to the bookmarks bar
+  let parentLocal = await mapToLocalIdStrict(n.parentId)
+  if (parentLocal) {
+    try { await chrome.bookmarks.get(parentLocal) } catch { parentLocal = null }
+  }
+  const barRoot = await barRootId()
+  const created = n.type === 'url'
+    ? await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title, url: n.url })
+    : await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title })
+  // remember which server id this new local node corresponds to
+  await recordIdMapping(n.id, created.id)
+  recentlyApplied.delete('__pre__' + n.id)
+  recentlyApplied.set(created.id, { title: n.title, parentId: created.parentId })
+  applyStats.created++
+}
+
 async function applyRemote(changes: NodeState[]) {
   applyingRemote = true
   try {
@@ -454,50 +513,63 @@ async function applyRemote(changes: NodeState[]) {
     for (const act of actions) {
       try {
         if (act.action === 'create') {
-          const n = act.node
-          // same-URL adoption: when the mapping tables are empty (fresh
-          // device, or forceResync recovery) a live server row whose URL
-          // already exists in the browser must NOT be created again —
-          // adopt the existing local node instead, or a full replay would
-          // duplicate every bookmark the device already has
-          if (n.type === 'url' && n.url) {
-            const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
-            const hit = (existing as chrome.bookmarks.BookmarkTreeNode[]).find(b => !!b.id)
-            if (hit) {
-              await recordIdMapping(n.id, hit.id)
-              recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
-              applyStats.adopted++
-              continue
-            }
-          }
-          // pre-mark BEFORE the chrome call: the bookmark event fires
-          // asynchronously and must find the guard already in place
-          recentlyApplied.set('__pre__' + n.id, { title: n.title })
-          // parent may itself need translating (folder created by remote)
-          // unknown remote parent (e.g. another device's 'Other Bookmarks'
-          // holder) falls back to the bookmarks bar so the node is reachable
-          let parentLocal = await mapToLocalId(n.parentId)
-          if (parentLocal) {
-            try { await chrome.bookmarks.get(parentLocal) } catch { parentLocal = null }
-          }
-          const barRoot = await barRootId()
-          const created = n.type === 'url'
-            ? await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title, url: n.url })
-            : await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title })
-          // remember which server id this new local node corresponds to
-          await recordIdMapping(n.id, created.id)
-          recentlyApplied.delete('__pre__' + n.id)
-          recentlyApplied.set(created.id, { title: n.title, parentId: created.parentId })
-          applyStats.created++
+          await applyCreate(act.node)
         } else if (act.action === 'update') {
-          const localId = await mapToLocalId(act.node.id)
+          const localId = await mapToLocalIdStrict(act.node.id)
           if (localId) {
             recentlyApplied.set(localId, { title: act.node.title }) // pre-mark
             await chrome.bookmarks.update(localId, { title: act.node.title, url: act.node.url })
             applyStats.updated++
+          } else {
+            // unmapped update: if the same-URL node exists in the browser,
+            // adopt the mapping and apply — otherwise the row is unknown
+            const n = act.node
+            if (n.type === 'url' && n.url) {
+              const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
+              const hit = (existing as chrome.bookmarks.BookmarkTreeNode[]).find(b => !!b.id)
+              if (hit) {
+                await recordIdMapping(n.id, hit.id)
+                await chrome.bookmarks.update(hit.id, { title: n.title, url: n.url })
+                recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
+                applyStats.updated++
+              } else {
+                // server row we've never seen: apply as a create
+                await applyCreate(n)
+              }
+            }
           }
         } else if (act.action === 'remove') {
-          const localId = await mapToLocalId(act.id)
+          // act.id is the MAPPED local id when planRemoteActions found the
+          // node (lenient callback translated it); it is the raw server id
+          // only when the mapping was missing. Try the id as-is first, then
+          // the recovery ladder.
+          let localId: string | null = null
+          try {
+            const node = await chrome.bookmarks.get(act.id)
+            if (node && node.length) localId = act.id
+          } catch { /* not a local id — fall through to recovery */ }
+          if (!localId) {
+            // raw server id case: mapping lost (corruption aftermath /
+            // pruned rows). Recover the folder's local id FROM ITS CHILDREN
+            // — any change in this batch whose parentId is the server id
+            // being removed tells us which local node hangs under it (child
+            // mappings often survive when the folder's own were pruned).
+            // Without this the folder shell stayed behind as an empty ghost.
+            const child = changes.find(c => c.parentId === act.id)
+            if (child) {
+              const childLocalId = await mapToLocalIdStrict(child.id)
+              if (childLocalId) {
+                const cached = (await localCache()).get(childLocalId)
+                if (cached?.parentId) localId = cached.parentId
+              }
+            }
+          }
+          if (!localId && 'title' in act && act.title) {
+            // last resort: a tombstoned node whose whole subtree lost its
+            // mappings — match by title in the tree
+            const found = await sw_findNodeByTitle(act.title)
+            if (found) localId = found.id
+          }
           if (localId) {
             recentlyApplied.delete(localId) // removal events must NOT be blocked
             await chrome.bookmarks.removeTree(localId)
