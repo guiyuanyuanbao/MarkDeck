@@ -218,9 +218,18 @@ async function runDiagnostics() {
             btn.textContent = '重建中…'
             try {
               const resp = await chrome.runtime.sendMessage({ type: 'forceResync' })
-              summary.textContent = resp?.ok
-                ? `重建完成 — 服务端 ${resp.pulled} 行已重新应用，点「重新检测」确认`
-                : '重建失败: ' + (resp?.error || '未知错误')
+              if (resp?.ok) {
+                const a = resp.applied || {}
+                summary.textContent =
+                  `重建完成 — 拉取 ${resp.pulled} 行 | 计划 ${a.planned ?? '?'} | 新建 ${a.created ?? '?'} | ` +
+                  `采纳 ${a.adopted ?? '?'} | 更新 ${a.updated ?? '?'} | 失败 ${a.failed ?? '?'} | ` +
+                  `浏览器现有 ${resp.bookmarkUrls} 条 URL、映射 ${resp.mappings} 条。点「重新检测」确认`
+                if ((a.errors || []).length) {
+                  summary.textContent += ' | 失败样例: ' + a.errors.slice(0, 2).join(' / ')
+                }
+              } else {
+                summary.textContent = '重建失败: ' + (resp?.error || '未知错误')
+              }
             } finally {
               btn.disabled = false
               btn.textContent = '⚡ 强制重建同步（清空映射并重新全量拉取）'

@@ -405,12 +405,23 @@ function pullRemote(cfg: Config): Promise<boolean> {
 }
 
 // Apply server changes to the browser tree under the re-entrancy guard.
+// per-action outcome counters for the diagnostics card: a silent catch{}
+// inside applyRemote once swallowed EVERY create on a user's device, and
+// nothing but these numbers could reveal it
+const applyStats = { planned: 0, created: 0, adopted: 0, updated: 0, removed: 0, moved: 0, failed: 0, errors: [] as string[] }
+function resetApplyStats() {
+  applyStats.planned = 0; applyStats.created = 0; applyStats.adopted = 0
+  applyStats.updated = 0; applyStats.removed = 0; applyStats.moved = 0
+  applyStats.failed = 0; applyStats.errors = []
+}
+
 async function applyRemote(changes: NodeState[]) {
   applyingRemote = true
   try {
     const local = await localCache()
+    const changesMarked = changes.map((c) => ({ ...c, deviceId: c.deviceId === deviceIdSafe() ? '__self__' : c.deviceId }))
     const actions = planRemoteActions(
-      changes.map((c) => ({ ...c, deviceId: c.deviceId === deviceIdSafe() ? '__self__' : c.deviceId })),
+      changesMarked,
       local,
       (serverId) => {
         // mapToLocalId from md_id_map, falling back to the raw server id
@@ -418,6 +429,8 @@ async function applyRemote(changes: NodeState[]) {
         return idMapSync()[serverId] ?? serverId
       },
     )
+    resetApplyStats()
+    applyStats.planned = actions.length
     for (const act of actions) {
       try {
         if (act.action === 'create') {
@@ -433,6 +446,7 @@ async function applyRemote(changes: NodeState[]) {
             if (hit) {
               await recordIdMapping(n.id, hit.id)
               recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
+              applyStats.adopted++
               continue
             }
           }
@@ -453,17 +467,20 @@ async function applyRemote(changes: NodeState[]) {
           await recordIdMapping(n.id, created.id)
           recentlyApplied.delete('__pre__' + n.id)
           recentlyApplied.set(created.id, { title: n.title, parentId: created.parentId })
+          applyStats.created++
         } else if (act.action === 'update') {
           const localId = await mapToLocalId(act.node.id)
           if (localId) {
             recentlyApplied.set(localId, { title: act.node.title }) // pre-mark
             await chrome.bookmarks.update(localId, { title: act.node.title, url: act.node.url })
+            applyStats.updated++
           }
         } else if (act.action === 'remove') {
           const localId = await mapToLocalId(act.id)
           if (localId) {
             recentlyApplied.delete(localId) // removal events must NOT be blocked
             await chrome.bookmarks.removeTree(localId)
+            applyStats.removed++
           }
         } else if (act.action === 'move') {
           const localId = await mapToLocalId(act.id)
@@ -473,10 +490,14 @@ async function applyRemote(changes: NodeState[]) {
             await chrome.bookmarks.move(localId, { parentId: target, index: act.index })
             const movedTitle = 'node' in act ? (act.node as { title?: string } | undefined)?.title ?? '' : ''
             recentlyApplied.set(localId, { title: movedTitle, parentId: target })
+            applyStats.moved++
           }
         }
-      } catch {
-        // individual action failures shouldn't abort the batch
+      } catch (e: any) {
+        // individual action failures shouldn't abort the batch — but they
+        // must not be invisible either
+        applyStats.failed++
+        if (applyStats.errors.length < 5) applyStats.errors.push(`${act.action}: ${e?.message || e}`)
       }
     }
     // carry the authoring device, timestamp and server revision of each
@@ -685,6 +706,9 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
       // cache, revision cursor) and replay the whole server history as if
       // the device had just paired (see forceResync() below for details)
       forceResync().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
+      return true
+    } else if (msg.type === 'applyStats') {
+      sendResponse({ ...applyStats })
       return true
     } else if (msg.type === 'deepDiag') {
       deepDiag().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
@@ -908,7 +932,23 @@ async function forceResync() {
       since = data.head
     }
     await refreshLocalCache()
-    return { ok: true, pulled }
+    // per-row audit: what did applyRemote actually DO with those rows?
+    // (the user's environment applied 348 rows and produced nothing —
+    // this breakdown turns the silent catch{} into a concrete report)
+    const mapAfter = await idMap()
+    const tree = await chrome.bookmarks.getTree()
+    let urlCount = 0
+    const walkCount = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+      for (const n of nodes) { if (n.url) urlCount++; if (n.children) walkCount(n.children) }
+    }
+    for (const root of tree) if (root.children) walkCount(root.children)
+    return {
+      ok: true,
+      pulled,
+      bookmarkUrls: urlCount,
+      mappings: Object.keys(mapAfter).length,
+      applied: { ...applyStats },
+    }
   } catch (e: any) {
     return { ok: false, error: e.message }
   } finally {
