@@ -259,7 +259,18 @@ async function sanitizeIdMaps() {
       delete l2s[lid]; changed = true
     }
   }
-  // cross-consistency: both directions must agree where both exist
+  // cross-consistency: both directions must agree where both exist.
+  // Also REBUILD the server->local direction from l2s when it lost rows
+  // (the pre-v0.0.12 corruption overwrote md_id_map with l2s-shaped data;
+  // pruning those rows left devices with zero pull mappings while md_l2s
+  // still held every valid pair — the browser tree keeps matching local
+  // ids alive, so the reverse table is trustworthy).
+  for (const [lid, sid] of Object.entries(l2s)) {
+    if (sid && liveIds.has(lid) && map[sid] === undefined) {
+      map[sid] = lid
+      changed = true
+    }
+  }
   for (const [sid, lid] of Object.entries(map)) {
     if (lid && l2s[lid] !== undefined && l2s[lid] !== sid) {
       // divergent double-mapping (node reminted by an old bug): trust the
@@ -655,6 +666,9 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
     } else if (msg.type === 'resync') {
       await fullSync()
       sendResponse({ ok: true })
+    } else if (msg.type === 'deepDiag') {
+      deepDiag().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
+      return true
     } else if (msg.type === 'conflictStatus') {
       ;(async () => {
         const tree = await chrome.bookmarks.getTree()
@@ -800,3 +814,51 @@ fullSync()
 // test/debug hook: lets Playwright E2E drive a full sync directly from the SW
 ;(globalThis as unknown as Record<string, unknown>).__markdeckResync = fullSync
 ;(globalThis as unknown as Record<string, unknown>).__markdeckWsDiag = wsDiag
+
+// Deep comparison of what the server holds vs what the browser tree holds —
+// turns "rev is caught up but nothing appeared" into a concrete diagnosis.
+async function deepDiag() {
+  const cfg = await getConfig()
+  if (!cfg?.token) return { ok: false, error: 'not paired' }
+  // server rows via full device pull
+  const rows: any[] = []
+  let since = 0
+  for (let guard = 0; guard < 100; guard++) {
+    const resp = await apiFetch(cfg, `/api/sync/device-pull?since=${since}`)
+    if (!resp.ok) break
+    const data = await resp.json()
+    rows.push(...(data.changes || []))
+    if (!data.changes?.length || data.head <= since) break
+    since = data.head
+  }
+  const live = new Map<string, { title: string; url: string; parent: string }>()
+  for (const r of rows) {
+    if (r.deletedAt > 0 || r.purged) { live.delete(r.id); continue }
+    if (r.type === 'url') live.set(r.id, { title: r.title || '', url: r.url || '', parent: r.parentId })
+  }
+  // browser tree
+  const tree = await chrome.bookmarks.getTree()
+  const local: { id: string; title: string; url: string }[] = []
+  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+    for (const n of nodes) { if (n.url) local.push({ id: n.id, title: n.title, url: n.url }); if (n.children) walk(n.children) }
+  }
+  for (const root of tree) if (root.children) walk(root.children)
+  const map = await idMap()
+  const l2s = await l2sMap()
+  const localUrls = new Set(local.map(b => (b.url || '').replace(/\/+$/, '')))
+  const serverUrls = new Set([...live.values()].map(b => (b.url || '').replace(/\/+$/, '')))
+  const missingLocally = [...serverUrls].filter(u => !localUrls.has(u))
+  const idMapOk = Object.entries(map).every(([sid, lid]) => l2s[lid] === sid)
+  return {
+    ok: true,
+    serverUrls: live.size,
+    localUrls: local.length,
+    missingLocally: missingLocally.slice(0, 10),
+    sampleMissing: missingLocally.length,
+    mappingRows: Object.keys(map).length,
+    l2sRows: Object.keys(l2s).length,
+    idMapConsistent: idMapOk,
+    rev: cfg.rev,
+  }
+}
+;(globalThis as unknown as Record<string, unknown>).__markdeckDeepDiag = deepDiag

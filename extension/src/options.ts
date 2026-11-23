@@ -188,6 +188,26 @@ async function runDiagnostics() {
       row(false, '实时通道 (WebSocket)', '令牌失效')
       fail('设备令牌已失效，需要重新配对')
     }
+
+    // 7. deep compare: server rows vs browser tree
+    let deep: any = null
+    try {
+      deep = await chrome.runtime.sendMessage({ type: 'deepDiag' })
+    } catch { deep = null }
+    if (!deep?.ok) {
+      // SW may be asleep and the message channel unavailable; the hook
+      // path exists for tests, so surface the failure plainly either way
+      row(false, '内容对比', deep?.error || '查询失败（service worker 未响应）')
+    } else {
+      row(null, '内容对比', `服务端 ${deep.serverUrls} 条 URL / 浏览器 ${deep.localUrls} 条`)
+      if (deep.sampleMissing === 0) {
+        row(true, '书签一致性', '浏览器已包含服务端全部 URL')
+      } else {
+        row(false, '书签一致性', `服务端有 ${deep.sampleMissing} 条 URL 浏览器没有（示例: ${deep.missingLocally.slice(0, 3).join(', ')}）`)
+        fail('拉取已完成但应用环节没有写入浏览器 — 请把本行详情反馈给开发者')
+      }
+      row(null, '映射表健康', `server→local ${deep.mappingRows} 条 / local→server ${deep.l2sRows} 条，一致=${deep.idMapConsistent ? '是' : '否'}`)
+    }
   }
 
   summary.textContent = broken
