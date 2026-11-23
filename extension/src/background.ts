@@ -243,44 +243,52 @@ async function apiFetch(cfg: Config, path: string, init?: RequestInit): Promise<
   })
 }
 
-async function pushQueue(cfg: Config): Promise<boolean> {
-  let q = await getQueue()
-  if (!q.length) return true
-  // claim the queue BEFORE the network round-trip: ops enqueued while the
-  // push is in flight must survive the post-push cleanup (the old
-  // read→push→setQueue([]) wiped them, losing edits permanently)
-  await setQueue([])
-  try {
-    q = compressQueue(q)
-    // translate local ids to server ids (nodes created by remote devices).
-    // A created op for an unmapped local id mints a UUID server id first —
-    // pushing raw small-integer local ids let two devices push DIFFERENT
-    // nodes under the same server id and LWW-merge them into one row
-    for (const op of q) {
-      if (op.kind === 'created') op.id = await mintedServerId(op.id)
-      else op.id = await mapToServerId(op.id)
-      if (op.parentId) op.parentId = await mapToServerId(op.parentId)
-    }
-    const nodes = await localCache()
-    const payload = opsToPushPayload(q, cfg.deviceId, nodes)
-    const resp = await apiFetch(cfg, '/api/sync/device-push', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-    if (resp.status === 401) {
+// pushes serialize like pulls: scheduleFlush's debounce and fullSync can
+// overlap; concurrent runs double-push and the loser's restoreQueue puts
+// already-pushed ops back, causing redundant network churn
+let pushChain: Promise<boolean> = Promise.resolve(true)
+function pushQueue(cfg: Config): Promise<boolean> {
+  const run = pushChain.catch(() => false).then(async () => {
+    let q = await getQueue()
+    if (!q.length) return true
+    // claim the queue BEFORE the network round-trip: ops enqueued while the
+    // push is in flight must survive the post-push cleanup (the old
+    // read→push→setQueue([]) wiped them, losing edits permanently)
+    await setQueue([])
+    try {
+      q = compressQueue(q)
+      // translate local ids to server ids (nodes created by remote devices).
+      // A created op for an unmapped local id mints a UUID server id first —
+      // pushing raw small-integer local ids let two devices push DIFFERENT
+      // nodes under the same server id and LWW-merge them into one row
+      for (const op of q) {
+        if (op.kind === 'created') op.id = await mintedServerId(op.id)
+        else op.id = await mapToServerId(op.id)
+        if (op.parentId) op.parentId = await mapToServerId(op.parentId)
+      }
+      const nodes = await localCache()
+      const payload = opsToPushPayload(q, cfg.deviceId, nodes)
+      const resp = await apiFetch(cfg, '/api/sync/device-push', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+      if (resp.status === 401) {
+        await restoreQueue(q)
+        await setSyncStatus('unauthorized')
+        return false
+      }
+      if (!resp.ok) throw new Error(`push HTTP ${resp.status}`)
+      await refreshLocalCache() // local creates bypass applyRemote; keep cache fresh
+      return true
+    } catch {
+      // offline: put the claimed ops back (merged with any new arrivals);
+      // bounded to avoid runaway storage
       await restoreQueue(q)
-      await setSyncStatus('unauthorized')
       return false
     }
-    if (!resp.ok) throw new Error(`push HTTP ${resp.status}`)
-    await refreshLocalCache() // local creates bypass applyRemote; keep cache fresh
-    return true
-  } catch {
-    // offline: put the claimed ops back (merged with any new arrivals);
-    // bounded to avoid runaway storage
-    await restoreQueue(q)
-    return false
-  }
+  })
+  pushChain = run
+  return run
 }
 
 // merge claimed-but-unpushed ops back to the head of the current queue
@@ -482,6 +490,9 @@ async function connectWS(cfg: Config) {
 
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleFlush() {
+  // token dead: pushing is futile until the user re-pairs; queue locally and
+  // wait (the next fullSync — alarm or re-pair — will drain it)
+  if (statusCache === 'unauthorized') return
   if (flushTimer) return
   flushTimer = setTimeout(async () => {
     flushTimer = null
@@ -553,8 +564,14 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         if (!resp.ok) throw new Error(data.error || 'pair failed')
         await saveConfigPatch({ server, token: data.token, deviceId: data.deviceId, rev: 0 })
         deviceIdCached = data.deviceId
-        // First sync after pairing: push whole local bar up (import), then pull
-        await initialImport()
+        // Only a FIRST pairing runs the whole-tree import. A re-pair (device
+        // was revoked / token expired) must keep the offline queue: those ops
+        // carry edits against already-synced nodes and initialImport would
+        // (a) wipe the queue and (b) re-push edited nodes as brand-new UUID
+        // rows, resurrecting pre-edit titles. The offline edits are replayed
+        // by the fullSync below instead.
+        const knownNodes = Object.keys(await idMap()).length
+        if (knownNodes === 0) await initialImport()
         await fullSync()
         await setSyncStatus('online')
         sendResponse({ ok: true })
