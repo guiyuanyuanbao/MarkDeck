@@ -46,8 +46,7 @@ export default defineConfig({
         try {
           const json = JSON.parse(readFileSync(mf, 'utf8'))
           json.version = repoVersion()
-          writeFileSync(mf, JSON.stringify(json, null, 2) + '
-')
+          writeFileSync(mf, JSON.stringify(json, null, 2) + String.fromCharCode(10))
         } catch (e) {
           console.warn('manifest version stamp failed:', e)
         }
