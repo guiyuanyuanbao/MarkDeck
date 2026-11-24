@@ -278,6 +278,9 @@ func sniffType(b []byte) string {
 }
 
 // sanitizeHost keeps only reasonable hostname characters.
+// SanitizeHost is the exported form of sanitizeHost (device favicon push).
+func SanitizeHost(host string) string { return sanitizeHost(host) }
+
 func sanitizeHost(host string) string {
 	host = strings.TrimSpace(strings.ToLower(host))
 	host = strings.TrimSuffix(host, "/")

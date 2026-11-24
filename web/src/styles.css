@@ -333,6 +333,16 @@ body {
 }
 .bm-avatar.folder { background: linear-gradient(135deg, #f7b955, #f59e0b); }
 .bm-avatar.folder svg { width: 18px; height: 18px; }
+/* letter avatar fill: full-size flex-center so the glyph is truly centered
+   (grid place-items + 100% child used to sit the glyph top-left, off-center) */
+.bm-avatar-letter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  line-height: 1;
+  padding-bottom: 1px; /* optical centering for CJK glyphs */
+}
 
 .bm-main { min-width: 0; flex: 1; }
 .bm-title {

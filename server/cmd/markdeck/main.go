@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"encoding/json"
+	"io"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +63,39 @@ func main() {
 	a.RegisterToolsRoutes(mux, chain)
 	mux.HandleFunc("GET /api/favicon/{host}", func(w http.ResponseWriter, r *http.Request) {
 		fetcher.ServeHTTP(w, r, r.PathValue("host"))
+	})
+	// devices push browser-resolved favicons (MV3 _favicon/ endpoint yields
+	// the same icon chrome shows, including its Google fallback) so every
+	// client shares accurate icons without the server guessing per-site
+	mux.HandleFunc("PUT /api/favicon/{host}", func(w http.ResponseWriter, r *http.Request) {
+		if a.Auth.DeviceFromRequest(r) == nil && a.Auth.SessionFromRequest(r) == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "auth required"})
+			return
+		}
+		host := favicon.SanitizeHost(r.PathValue("host"))
+		if host == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "bad host"})
+			return
+		}
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256<<10))
+		if err != nil || len(data) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "bad body"})
+			return
+		}
+		ctype := r.Header.Get("Content-Type")
+		if ctype == "" || !strings.HasPrefix(ctype, "image/") {
+			ctype = "image/png"
+		}
+		if err := st.FaviconPut(host, ctype, data); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"ok": "1"})
 	})
 	mux.Handle("/", securityHeaders(webapp.Handler()))
 

@@ -34,11 +34,7 @@ onMounted(() => {
   <div v-else class="md-layout">
     <aside class="md-sidebar">
       <div class="md-logo">
-        <div class="md-logo-mark">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-          </svg>
-        </div>
+        <div class="md-logo-mark"><img src="/logo.png" alt="MarkDeck" style="width:100%;height:100%;display:block;border-radius:inherit" /></div>
         <div class="md-logo-name">MarkDeck</div>
       </div>
 

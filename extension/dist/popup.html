@@ -31,10 +31,10 @@
     }
     .logo-mark {
       width: 30px; height: 30px; border-radius: 9px;
-      background: linear-gradient(135deg, #5b67f2 0%, #8b5cf6 100%);
       display: grid; place-items: center; color: #fff; flex-shrink: 0;
-      box-shadow: 0 3px 10px rgba(91,103,242,.45);
+      overflow: hidden;
     }
+    .logo-mark img { width: 100%; height: 100%; display: block; border-radius: inherit; }
     .logo-name { font-size: 15px; font-weight: 700; color: #fff; letter-spacing: .4px; flex: 1; }
 
     /* status strip */
@@ -147,11 +147,7 @@
 </head>
 <body>
   <header>
-    <div class="logo-mark">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-      </svg>
-    </div>
+    <div class="logo-mark"><img src="icons/icon128.png" alt="MarkDeck"></div>
     <div class="logo-name">MarkDeck</div>
   </header>
 

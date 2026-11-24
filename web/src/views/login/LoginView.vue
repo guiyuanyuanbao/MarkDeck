@@ -55,11 +55,7 @@ async function submit() {
   <div class="login-wrap">
     <el-card class="login-card" :shadow="false">
       <div class="login-brand">
-        <div class="md-logo-mark">
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-          </svg>
-        </div>
+        <div class="md-logo-mark"><img src="/logo.png" alt="MarkDeck" style="width:100%;height:100%;display:block;border-radius:inherit" /></div>
         <div class="login-title">{{ mode === 'setup' ? '欢迎使用 MarkDeck' : '登录 MarkDeck' }}</div>
         <div class="login-sub">
           {{ mode === 'setup' ? '首次使用，请先设置管理员密码' : '自托管书签同步服务' }}
