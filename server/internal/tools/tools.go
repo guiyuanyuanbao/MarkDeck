@@ -236,6 +236,117 @@ type DupGroup struct {
 
 // FindDuplicates groups live URL bookmarks by normalized URL (same rules as
 // import dedupe: tracking params stripped, www/scheme ignored).
+// FolderDupGroup is a set of same-named folders under the same parent —
+// artifacts of the multi-device initial-import bug (each device pushed its
+// own folder tree before UUID adoption existed).
+type FolderDupGroup struct {
+	ParentID string            `json:"parentId"`
+	Title    string            `json:"title"`
+	Items    []*store.Bookmark `json:"items"`
+}
+
+// FindFolderDuplicates groups live folders by (parent, title).
+func (c *Chain) FindFolderDuplicates() ([]FolderDupGroup, error) {
+	nodes, err := c.Store.Tree()
+	if err != nil {
+		return nil, err
+	}
+	groups := map[string][]*store.Bookmark{}
+	var order []string
+	for _, n := range nodes {
+		if n.Type != "folder" {
+			continue
+		}
+		// 其他书签 holders are per-device buckets, not user duplicates —
+		// exclude them by their stable id prefix instead of by parent
+		// (the user's duplicated folders live at top level!)
+		if strings.HasPrefix(n.ID, "others-") {
+			continue
+		}
+		key := n.ParentID + "\x00" + strings.TrimSpace(n.Title)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], n)
+	}
+	var out []FolderDupGroup
+	for _, k := range order {
+		items := groups[k]
+		if len(items) >= 2 {
+			parts := strings.SplitN(k, "\x00", 2)
+			out = append(out, FolderDupGroup{ParentID: parts[0], Title: parts[1], Items: items})
+		}
+	}
+	return out, nil
+}
+
+// MergeFolderDuplicates merges a duplicate-folder group: every child of each
+// removed folder moves into the kept folder (deduped by url|title within the
+// target), then the shells are trashed. Children of children follow their
+// parent, so deep subtrees move intact.
+func (c *Chain) MergeFolderDuplicates(keepID string, removeIDs []string) (moved int, err error) {
+	keep, err := c.Store.Get(keepID)
+	if err != nil {
+		return 0, err
+	}
+	if keep.Type != "folder" {
+		return 0, fmt.Errorf("keepID must be a folder")
+	}
+	at := store.Now()
+	for _, id := range removeIDs {
+		rm, err := c.Store.Get(id)
+		if err != nil {
+			continue
+		}
+		if rm.Type != "folder" || rm.DeletedAt > 0 {
+			continue
+		}
+		// re-parent every live child into the kept folder
+		kids, err := c.Store.Children(id)
+		if err != nil {
+			return moved, err
+		}
+		// build the target's existing url|title set for dedup
+		targetKids, err := c.Store.Children(keepID)
+		if err != nil {
+			return moved, err
+		}
+		seen := map[string]bool{}
+		for _, tk := range targetKids {
+			if tk.URL != "" {
+				seen[strings.TrimRight(tk.URL, "/")+"|"+tk.Title] = true
+			}
+		}
+		pos := float64(len(targetKids))
+		for _, kid := range kids {
+			// url children that already exist (url|title) in the target are
+			// dropped along with their subtree; folders always move
+			if kid.URL != "" && seen[strings.TrimRight(kid.URL, "/")+"|"+kid.Title] {
+				if _, err := c.Store.DeleteSoft(kid.ID, at, "tools"); err != nil {
+					return moved, err
+				}
+				continue
+			}
+			if _, err := c.Store.Move(kid.ID, keepID, pos+1, at, "tools"); err != nil {
+				return moved, err
+			}
+			pos++
+			moved++
+			if kid.URL != "" {
+				seen[strings.TrimRight(kid.URL, "/")+"|"+kid.Title] = true
+			}
+		}
+		// shell is now empty — trash it (subtree was already moved out)
+		if _, err := c.Store.DeleteSoft(id, at, "tools"); err != nil {
+			return moved, err
+		}
+	}
+	if c.Broadcast != nil {
+		c.Broadcast(0)
+	}
+	return moved, nil
+}
+
 func (c *Chain) FindDuplicates() ([]DupGroup, error) {
 	nodes, err := c.Store.Tree()
 	if err != nil {

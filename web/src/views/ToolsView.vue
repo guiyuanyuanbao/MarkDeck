@@ -7,6 +7,7 @@ const tab = ref('dead')
 const scanning = ref(false)
 const dead = ref<{ bookmark: Bookmark; status: string; checked: number }[]>([])
 const dups = ref<{ key: string; items: Bookmark[] }[]>([])
+const folderDups = ref<{ parentId: string; title: string; items: Bookmark[] }[]>([])
 const loading = ref(false)
 
 onMounted(load)
@@ -14,9 +15,10 @@ onMounted(load)
 async function load() {
   loading.value = true
   try {
-    const [d, g] = await Promise.all([toolsApi.deadLinks(), toolsApi.duplicates()])
+    const [d, g, fg] = await Promise.all([toolsApi.deadLinks(), toolsApi.duplicates(), toolsApi.folderDuplicates()])
     dead.value = d.links || []
     dups.value = g.groups || []
+    folderDups.value = fg.groups || []
   } finally {
     loading.value = false
   }
@@ -60,12 +62,32 @@ function statusTag(s: string) {
 async function mergeGroup(g: { key: string; items: Bookmark[] }) {
   const keep = g.items[0]
   const removes = g.items.slice(1).map((i) => i.id)
-  await ElMessageBox.confirm(
-    `保留「${keep.title || keep.url}」（最早创建），其余 ${removes.length} 条移入回收站，标签与备注会合并到保留项。继续？`,
-    '合并重复', { type: 'warning' })
-  await toolsApi.mergeDup(keep.id, removes)
-  ElMessage.success('已合并')
-  load()
+  try {
+    await ElMessageBox.confirm(
+      `保留「${keep.title || keep.url}」（最早创建），其余 ${removes.length} 条移入回收站，标签与备注会合并到保留项。继续？`,
+      '合并重复', { type: 'warning' })
+    await toolsApi.mergeDup(keep.id, removes)
+    ElMessage.success('已合并')
+    load()
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error('合并失败: ' + e.message)
+  }
+}
+
+const mergingFolder = ref(false)
+async function mergeFolderGroup(g: { parentId: string; title: string; items: Bookmark[] }) {
+  const keep = g.items[0]
+  const removes = g.items.slice(1).map((i) => i.id)
+  try {
+    await ElMessageBox.confirm(
+      `保留第一个「${g.title}」文件夹，其余 ${removes.length} 个副本中的书签会并入保留文件夹（URL 重复的丢弃），副本壳移入回收站。继续？`,
+      '合并重复文件夹', { type: 'warning' })
+    const r = await toolsApi.mergeFolderDup(keep.id, removes)
+    ElMessage.success(`已合并，${r.moved ?? 0} 条书签移入保留文件夹`)
+    load()
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error('合并失败: ' + e.message)
+  }
 }
 </script>
 
@@ -111,6 +133,19 @@ async function mergeGroup(g: { key: string; items: Bookmark[] }) {
           </div>
         </div>
         <el-empty v-if="!dups.length" description="没有发现重复书签 🎉" />
+      </el-tab-pane>
+
+      <el-tab-pane :label=" `重复文件夹 (${folderDups.length})` " name="folderdup">
+        <el-alert type="info" :closable="false" style="margin-bottom: 12px"
+          title="同名文件夹的多份副本（多设备历史同步产生）。合并会把副本中的书签并入保留文件夹，URL 重复的丢弃，副本壳移入回收站。" />
+        <div v-for="g in folderDups" :key="g.parentId + g.title" style="margin-bottom: 16px; border: 1px solid #ebeef5; border-radius: 6px; padding: 10px">
+          <div style="display:flex; justify-content:space-between; margin-bottom: 8px">
+            <b style="color:#909399">📁 {{ g.title }} × {{ g.items.length }}</b>
+            <el-button size="small" type="primary" plain :loading="mergingFolder" @click="mergeFolderGroup(g)">一键合并（保留第一个）</el-button>
+          </div>
+          <div style="color:#909399; font-size:12px">副本位置：同层并列，各自包含独立内容</div>
+        </div>
+        <el-empty v-if="!folderDups.length" description="没有发现重复文件夹 🎉" />
       </el-tab-pane>
     </el-tabs>
   </el-card>

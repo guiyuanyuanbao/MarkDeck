@@ -418,7 +418,10 @@ func (s *Store) Move(id, newParent string, position float64, at int64, deviceID 
 	b.Position = position
 	b.UpdatedAt = at
 	b.DeviceID = deviceID
-	out, _, err := s.UpdateLWW(b, nil)
+	// authored against the row just read: quoting its revision wins the
+	// same-second LWW tie (moves within a merge batch are all same-second;
+	// baseRev=0 let the tie keep the OLD row and the move silently no-oped)
+	out, _, err := s.UpdateLWWBase(b, nil, b.Revision)
 	return out, err
 }
 

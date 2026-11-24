@@ -135,6 +135,10 @@ export const toolsApi = {
   duplicates: () => api.get<{ groups: { key: string; items: Bookmark[] }[] }>('/api/tools/duplicates'),
   mergeDup: (keepId: string, removeIds: string[]) =>
     api.post('/api/tools/duplicates/merge', { keepId, removeIds }),
+  folderDuplicates: () =>
+    api.get<{ groups: { parentId: string; title: string; items: Bookmark[] }[] }>('/api/tools/folder-duplicates'),
+  mergeFolderDup: (keepId: string, removeIds: string[]) =>
+    api.post<{ moved: number }>('/api/tools/folder-duplicates/merge', { keepId, removeIds }),
   snapshots: () => api.get<{ snapshots: Snapshot[] }>('/api/snapshots'),
   createSnapshot: () => api.post<Snapshot>('/api/snapshots'),
   restoreSnapshot: (id: string) => api.post(`/api/snapshots/${id}/restore`),

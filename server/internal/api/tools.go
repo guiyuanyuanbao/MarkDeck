@@ -22,6 +22,8 @@ func (a *API) RegisterToolsRoutes(mux *http.ServeMux, chain *tools.Chain) {
 	mux.HandleFunc("POST /api/tools/deadlinks/scan", a.requireAny(a.handleDeadScan))
 	mux.HandleFunc("GET /api/tools/duplicates", a.requireAny(a.handleDuplicates))
 	mux.HandleFunc("POST /api/tools/duplicates/merge", a.requireAny(a.handleDupMerge))
+	mux.HandleFunc("GET /api/tools/folder-duplicates", a.requireAny(a.handleListFolderDuplicates))
+	mux.HandleFunc("POST /api/tools/folder-duplicates/merge", a.requireAny(a.handleFolderDupMerge))
 
 	mux.HandleFunc("GET /api/snapshots", a.requireAny(a.handleListSnapshots))
 	mux.HandleFunc("POST /api/snapshots", a.requireAny(a.handleCreateSnapshot))
@@ -167,6 +169,33 @@ func (a *API) handleDupMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	a.broadcastRevision()
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+}
+
+func (a *API) handleListFolderDuplicates(w http.ResponseWriter, r *http.Request) {
+	groups, err := a.chain.FindFolderDuplicates()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}
+
+func (a *API) handleFolderDupMerge(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		KeepID    string   `json:"keepId"`
+		RemoveIDs []string `json:"removeIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.KeepID == "" || len(body.RemoveIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId and removeIds required"})
+		return
+	}
+	moved, err := a.chain.MergeFolderDuplicates(body.KeepID, body.RemoveIDs)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	a.broadcastRevision()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": "1", "moved": moved})
 }
 
 func (a *API) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
