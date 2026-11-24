@@ -434,6 +434,21 @@ export function planSync(input: PlanInput): SyncPlan {
   for (const sn of server) {
     newBaseEntries[sn.id] = { server: sn, localId: binding.get(sn.id) ?? null }
   }
+  // rows this plan PUSHES as creates (minted ids) must enter the new base
+  // too — otherwise the next reconcile sees them as "server has, base has
+  // not" and re-plans them (endless duplicate-create churn)
+  const mintedOps = serverOps.filter((o) => o.op === 'create') as Array<{ id: string; title: string; url?: string; parentId: string; position: number; updatedAt: number; type: 'folder' | 'url' }>
+  for (const o of mintedOps) {
+    if (newBaseEntries[o.id]) continue
+    newBaseEntries[o.id] = {
+      server: {
+        id: o.id, parentId: o.parentId, type: o.type, title: o.title,
+        url: o.url || undefined, position: o.position, revision: 0,
+        updatedAt: o.updatedAt, deviceId,
+      },
+      localId: binding.get(o.id) ?? null,
+    }
+  }
   // rebind rescues keep their (stale) server row in the base: the binding
   // must survive to the next reconcile even though the tree request raced
   Object.assign(newBaseEntries, rebindingEntries)

@@ -162,7 +162,7 @@ function makeParentResolver(plan: SyncPlan, roots: ResolvedRoots, othersId: stri
   }
 }
 
-async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: string) => string | null, stats: typeof reconcileStats) {
+async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: string) => string | null, stats: typeof reconcileStats, createdBindings: Map<string, string>) {
   for (const op of ops) {
     try {
       switch (op.kind) {
@@ -175,8 +175,11 @@ async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: s
             ...(op.url ? { url: op.url } : {}),
             index: op.index,
           })
+          // the new node's chrome id is only known NOW: record it so base
+          // advances with a real binding (a null binding here would make
+          // the next reconcile re-create the row — endless duplicates)
+          createdBindings.set(op.serverId, created.id)
           stats.chromeCreates++
-          void created
           break
         }
         case 'update': {
@@ -279,22 +282,15 @@ async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: str
       // the fresh tree; nothing is lost).
     }
 
-    // 5. apply chrome ops (parents ordered by the engine's topo sort)
+    // 5. apply chrome ops (parents ordered by the engine's topo sort) and
+    // collect the chrome ids of nodes this run CREATED — they become base
+    // bindings, without which the next reconcile would re-create every row
+    const createdBindings = new Map<string, string>()
     const resolveParent = makeParentResolver(plan, roots, othersId)
-    await applyChromeOps(plan.chromeOps, resolveParent, stats)
-    for (const [sid, e] of Object.entries(plan.newBaseEntries)) {
-      if (e.localId === null) continue
-      const exists = plan.chromeOps.some((o) => o.kind === 'create' && o.serverId === sid)
-      if (exists && stats.failed > 0) {
-        // a create may have failed: its binding is untrustworthy. Null it so
-        // the next reconcile re-plans instead of holding a dead binding.
-        const bound = plan.newBaseEntries[sid]
-        if (bound && stats.errors.some((err) => err.startsWith('create'))) {
-          // conservative: keep the binding — the next reconcile's adoption
-          // pass repairs wrong bindings by URL/title anyway
-          void bound
-        }
-      }
+    await applyChromeOps(plan.chromeOps, resolveParent, stats, createdBindings)
+    for (const [sid, lid] of createdBindings) {
+      const e = plan.newBaseEntries[sid]
+      if (e && !e.localId) e.localId = lid
     }
 
     // 6. advance base atomically: the new snapshot is the server tree plus

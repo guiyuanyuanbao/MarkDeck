@@ -1,7 +1,11 @@
-// Multi-device sync test orchestrator.
+// Multi-device sync test orchestrator (snapshot-reconciliation era).
 // Spawns two isolated device workers (each running the REAL extension bundle
 // against its own chrome.* sandbox) and verifies end-to-end synchronization
 // through a real MarkDeck server over HTTP.
+//
+// 0.1.0: the offline-queue checks became touch-journal checks (no queue
+// exists anymore); server-side mutations drive /api/sync/apply; deletions
+// propagate through the live-tree absence signal.
 'use strict'
 const fs2 = require('fs')
 fs2.copyFileSync(__dirname + '/../../dist/background.js', __dirname + '/../../dist/background.test.mjs')
@@ -17,9 +21,9 @@ function log(name, ok, detail = '') {
   console.log((ok ? '✓' : '✗ FAIL'), name, detail || '')
 }
 
-async function api(p, body, headers = {}) {
+async function api(p, body, headers = {}, method) {
   const r = await fetch(SERVER + p, {
-    method: body === undefined ? 'GET' : 'POST',
+    method: method || (body === undefined ? 'GET' : 'POST'),
     headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   })
@@ -145,58 +149,45 @@ const { execSync } = require('child_process')
   // ---- T1: create on A → appears on B ----
   await A.cmd('create', { title: 'A 创建的书签', url: 'https://a-device.test/one' })
   await A.cmd('resync')
-  const qA = await A.cmd('queueLength')
-  const stA1 = await A.cmd('status')
+  const pendA = await A.cmd('pendingCount')
   const srvAfterT1 = await api('/api/bookmarks/tree', undefined, { Cookie: cookie })
   const srvTitles1 = JSON.parse(srvAfterT1.body).nodes.map(n => n.title)
-  const gotByB = await waitFor(async () => (await B.cmd('titles')).includes('A 创建的书签'))
+  const gotByB = await waitFor(async () => {
+    await B.cmd('resync')
+    return (await B.cmd('titles')).includes('A 创建的书签')
+  })
   log('T1: B receives bookmark created on A', gotByB,
-    'qA=' + qA + ' stA=' + stA1.status + ' srv=' + JSON.stringify(srvTitles1) + ' B=' + JSON.stringify(await B.cmd('titles')))
+    'pendingA=' + pendA + ' srv=' + JSON.stringify(srvTitles1) + ' B=' + JSON.stringify(await B.cmd('titles')))
 
   // ---- T2: create on B → appears on A ----
   await B.cmd('create', { title: 'B 创建的书签', url: 'https://b-device.test/two' })
   await B.cmd('resync')
-  const gotByA = await waitFor(async () => (await A.cmd('titles')).includes('B 创建的书签'))
+  const gotByA = await waitFor(async () => {
+    await A.cmd('resync')
+    return (await A.cmd('titles')).includes('B 创建的书签')
+  })
   log('T2: A receives bookmark created on B', gotByA, gotByA ? '' : 'A titles: ' + JSON.stringify(await A.cmd('titles')))
 
-  // ---- T3: delete via server tombstone → both devices learn it ----
+  // ---- T3: delete on the server → both devices learn it ----
   const tree = await api('/api/bookmarks/tree', undefined, { Cookie: cookie })
   const nodes = JSON.parse(tree.body).nodes
   const target = nodes.find(n => n.title === 'A 创建的书签')
   if (!target) throw new Error('T3: server lost the bookmark')
-  const stA = await A.cmd('config')
-  const delResp = await fetch(SERVER + '/api/sync/device-push', {
+  const cfgAT3 = await A.cmd('config')
+  const delResp = await fetch(SERVER + '/api/sync/apply', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + stA.token },
-    body: JSON.stringify([{ id: target.id, deletedAt: Math.floor(Date.now() / 1000), updatedAt: Math.floor(Date.now() / 1000), deviceId: 'admin-test' }]),
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfgAT3.token },
+    body: JSON.stringify([{ id: target.id, op: 'delete', updatedAt: Math.floor(Date.now() / 1000), deviceId: 'admin-test' }]),
   })
-  log('T3 setup: server tombstone pushed', delResp.status === 200)
-  {
-    const cfgA = await A.cmd('config')
-    const r = await fetch(SERVER + '/api/sync/device-pull?since=' + Math.max(0, cfgA.rev - 3), {
-      headers: { Authorization: 'Bearer ' + cfgA.token } })
-    const data = await r.json()
-    const rows = (data.changes || []).filter(c => c.deletedAt > 0 || c.title === 'A 创建的书签')
-    console.log('  [T3dbg] rows:', JSON.stringify(rows.map(x => ({ id: x.id.slice(0, 6), del: x.deletedAt, dev: x.deviceId, url: x.url }))))
-    console.log('  [T3dbg] A config rev:', cfgA.rev)
-  }
-  const stA2 = await A.cmd('applyStats').catch(e => ({ err: String(e) }))
-  console.log('  [T3dbg2] applyStats:', JSON.stringify(stA2))
-  {
-    const st = await A.cmd('storageDump').catch(e => ({ err: String(e) }))
-    console.log('  [T3dbg3] storage:', JSON.stringify(st).slice(0, 400))
-  }
+  log('T3 setup: server delete applied', delResp.status === 200)
   const goneInA = await waitFor(async () => {
-    const rA = await A.cmd('resync')
-    const tA2 = await A.cmd('titles')
-    if (!tA2.includes('A 创建的书签')) return true
-    if (globalThis.__t3log !== false) { console.log('  [T3 A] resync rev:', rA.rev, 'titles:', JSON.stringify(tA2)); globalThis.__t3log = false }
-    return false
-  })
+    await A.cmd('resync')
+    return !(await A.cmd('titles')).includes('A 创建的书签')
+  }, 25000)
   const goneInB = await waitFor(async () => {
     await B.cmd('resync')
     return !(await B.cmd('titles')).includes('A 创建的书签')
-  })
+  }, 25000)
   if (!goneInA) {
     const stPost = await A.cmd('applyStats').catch(e => ({ err: String(e) }))
     const stPost2 = await A.cmd('storageDump').catch(e => ({ err: String(e) }))
@@ -208,13 +199,15 @@ const { execSync } = require('child_process')
   // ---- T4: conflict — both write to same bookmark; later timestamp wins ----
   await A.cmd('create', { title: '冲突基准', url: 'https://conflict.test/x' })
   await A.cmd('resync')
-  const bGot = await waitFor(async () => (await B.cmd('titles')).includes('冲突基准'))
+  const bGot = await waitFor(async () => {
+    await B.cmd('resync')
+    return (await B.cmd('titles')).includes('冲突基准')
+  })
   log('T4 setup: base bookmark on both sides', bGot)
-  await A.cmd('queueLength') // give A's worker a moment; also acts as a ping
-  await new Promise(r => setTimeout(r, 2000)) // let scheduleFlush drain
+  await new Promise(r => setTimeout(r, 1500)) // let debounce timers drain
   const tree2 = await api('/api/bookmarks/tree', undefined, { Cookie: cookie })
   const base = JSON.parse(tree2.body).nodes.find(n => n.title === '冲突基准')
-  // A writes first — resolve the server id to A's local id (minted UUIDs)
+  // A writes first — resolve the server id to A's local id via base bindings
   const aLocal = (await A.cmd('localIdOf', { serverId: base.id })) || base.id
   await A.cmd('update', { id: aLocal, patch: { title: 'A 的修改' } })
   await A.cmd('resync')
@@ -233,17 +226,15 @@ const { execSync } = require('child_process')
   log('T4: conflict resolves to latest writer (LWW)', converged,
     converged ? '' : 'A: ' + JSON.stringify(await A.cmd('titles')) + ' B: ' + JSON.stringify(await B.cmd('titles')))
 
-  // ---- T5: offline queue — B "goes offline" (server unreachable), makes
-  // local edits, then comes back and everything replays ----
-  // Simulate offline by giving B a bad server address, doing local edits,
-  // then restoring the address and resyncing.
-  const cfgB2 = await B.cmd("config")
+  // ---- T5: offline edits — B "goes offline" (unreachable server), makes
+  // local edits (touch journal holds them), reconnects, reconcile replays ----
+  const cfgB2 = await B.cmd('config')
   await B.cmd('setServer', { server: 'http://127.0.0.1:1' }) // unreachable port
   await B.cmd('create', { title: '离线期间创建', url: 'https://offline.test/1' })
-  const created2 = await B.cmd('create', { title: '离线期间创建2', url: 'https://offline.test/2' })
-  await B.cmd('resync') // fails silently, queue keeps ops
-  const queued = await B.cmd('queueLength')
-  log('T5 setup: offline edits queued locally', queued >= 2, 'queue=' + queued)
+  await B.cmd('create', { title: '离线期间创建2', url: 'https://offline.test/2' })
+  await B.cmd('resync') // fails, touch journal keeps the edits
+  const pending = await B.cmd('pendingCount')
+  log('T5 setup: offline edits journalled locally', pending >= 2, 'pending=' + pending)
   await B.cmd('setServer', { server: SERVER })
   await B.cmd('resync')
   const replayedOnServer = await waitFor(async () => {
@@ -263,8 +254,6 @@ const { execSync } = require('child_process')
   const devs = JSON.parse((await api('/api/devices', undefined, { Cookie: cookie })).body).devices
   const devBRow = devs.find(d => d.id === cfgB2.deviceId)
   if (!devBRow) throw new Error('T6: B device row missing')
-  const rv = await api('/api/devices/' + devBRow.id, undefined, {})
-  // DELETE verb via fetch:
   const rvDel = await fetch(SERVER + '/api/devices/' + devBRow.id, {
     method: 'DELETE', headers: { Cookie: cookie, 'X-CSRF': csrf },
   })
@@ -274,6 +263,11 @@ const { execSync } = require('child_process')
   await new Promise(r => setTimeout(r, 1500))
   const bStatus = await B.cmd('status')
   log('T6: B sync rejected after revoke', bStatus.status === 'unauthorized', 'status=' + bStatus.status)
+
+  // ---- T7: legacy storage keys are gone from the new bundle ----
+  const dumpA = await A.cmd('storageDump')
+  log('T7: no legacy keys in persisted state', (dumpA.legacyLeftover || []).length === 0,
+    'leftover=' + JSON.stringify(dumpA.legacyLeftover))
 
   console.log('\n=== RESULT ===')
   console.log(`${results.filter(r => r.ok).length} passed, ${results.filter(r => !r.ok).length} failed`)

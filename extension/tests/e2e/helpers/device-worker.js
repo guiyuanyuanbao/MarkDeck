@@ -2,6 +2,11 @@
 // chrome.* sandbox. The orchestrator spawns one worker per device and talks
 // to them over stdin/stdout JSON lines. Devices communicate only through
 // the real MarkDeck server over HTTP — exactly like real browsers.
+//
+// 0.1.0 rewrite: the worker mirrors the new snapshot-reconciliation engine.
+// The bundle's persisted state is md_config/md_base/md_touch (the four
+// legacy keys are wiped by the bundle itself on install); commands expose
+// reconcile stats and base bindings instead of queue/id-map internals.
 'use strict'
 const fs = require('fs')
 const path = require('path')
@@ -29,9 +34,15 @@ class BookmarkStore {
     this.nodes = new Map()
     this.root = { id: '0', parentId: '', title: '', children: [] }
     this.nodes.set('0', this.root)
+    // NOTE: the sandbox has exactly TWO permanent roots (bar + other), the
+    // Chromium two-root invariant. The engine's resolveRoots reads by
+    // position: children[0]=bar, children[1]=other.
     const bar = { id: '1', parentId: '0', title: '书签栏', children: [], folderType: 'bookmarks' }
     this.nodes.set('1', bar)
     this.root.children.push(bar)
+    const other = { id: '2', parentId: '0', title: '其他书签', children: [], folderType: 'other' }
+    this.nodes.set('2', other)
+    this.root.children.push(other)
     this.events = new EventBus()
   }
   childrenOf(id) { return this.nodes.get(id)?.children || [] }
@@ -39,7 +50,6 @@ class BookmarkStore {
   async getChildren(id) { return this.childrenOf(id).map(c => ({ ...c })) }
   async create(args) {
     if (!args) throw new Error('create: args undefined')
-    console.error('[store.create] args=', JSON.stringify(args))
     const { parentId = '1', title = '', url, index } = args
     const parent = this.nodes.get(parentId)
     if (!parent) throw new Error('parent missing: ' + parentId)
@@ -51,9 +61,8 @@ class BookmarkStore {
     return { ...node }
   }
   async update(id, { title, url }) {
-    console.error('[store.update] called id=' + id)
     const n = this.nodes.get(id)
-    if (!n) { console.error('[store.update] no node', id); throw new Error('no node ' + id) }
+    if (!n) throw new Error('no node ' + id)
     if (title !== undefined) n.title = title
     if (url !== undefined) n.url = url
     await this.events.emit('onChanged', id, { title: n.title, url: n.url })
@@ -68,7 +77,7 @@ class BookmarkStore {
     const p = this.nodes.get(parentId)
     n.parentId = parentId
     n.index = index ?? p.children.length
-    p.children.splice(n.index, 0, n)
+    p.children.splice(Math.min(n.index, p.children.length), 0, n)
     await this.events.emit('onMoved', id, { parentId, oldParentId: oldParent, index: n.index })
     return { ...n }
   }
@@ -116,6 +125,9 @@ const device = (() => {
             return out
           },
           async set(obj) { for (const [k, v] of Object.entries(obj)) storage.set(k, v) },
+          async remove(keys) {
+            for (const k of Array.isArray(keys) ? keys : [keys]) storage.delete(k)
+          },
         },
       },
       bookmarks: {
@@ -159,13 +171,9 @@ globalThis.chrome = device.chrome
 const __origFetch = globalThis.fetch
 globalThis.fetch = (...args) => {
   const url = typeof args[0] === 'string' ? args[0] : args[0]?.url
-  if (url.includes('device-push') && args[1]?.body) console.error('[push-body]', args[1].body.slice(0, 300))
+  if (url.includes('sync/apply') && args[1]?.body) console.error('[apply-body]', args[1].body.slice(0, 300))
   return __origFetch(...args).then(r => { console.error('[fetch]', r.status, url); return r }, e => { console.error('[fetch-ERR]', url, e.message); throw e })
 }
-
-// block WS reconnect spam in the sandboxed bundle: the WS works in Node but
-// we drive sync explicitly via resync messages, so a failed WS just retries.
-// (Native WebSocket works fine; leaving as-is.)
 
 async function main() {
   // load the REAL bundle (ESM)
@@ -194,13 +202,13 @@ async function main() {
       try { cmd = JSON.parse(line) } catch { continue }
       if (process.env.MD_WORKER_DEBUG) console.error("[cmd]", device.name, cmd.type, cmd.id)
       try {
-        let resultOf = null;
+        let resultOf = null
         const result = await Promise.race([
           (async () => {
         switch (cmd.type) {
           case 'pair': {
             // exact options-page flow: the bundle's own 'pair' message handler
-            // does pairing + initial import + full sync + WS connect
+            // does pairing + full reconcile + WS connect
             resultOf = await new Promise((resolve, reject) => {
               device.runtimeEvents.emit('message', { type: 'pair', server: SERVER, code: cmd.payload?.code ?? cmd.code, name: device.name }, {}, (resp) => {
                 resp?.ok ? resolve(resp) : reject(new Error(resp?.error || 'pair failed'))
@@ -209,9 +217,9 @@ async function main() {
             break
           }
           case 'resync': {
-            await new Promise((resolve) => device.runtimeEvents.emit('message', { type: 'resync' }, {}, resolve))
+            const r = await new Promise((resolve) => device.runtimeEvents.emit('message', { type: 'resync' }, {}, resolve))
             const cfg = await device.chrome.storage.local.get('md_config')
-            resultOf = { ok: true, rev: cfg.md_config?.rev }
+            resultOf = { ok: r?.ok !== false, error: r?.error, rev: cfg.md_config?.rev }
             break
           }
           case 'create': {
@@ -249,9 +257,9 @@ async function main() {
             break
           }
           case 'localIdOf': {
-            // server id -> this device's local id (post-UUID-minting they differ)
-            const st = await device.chrome.storage.local.get('md_id_map')
-            resultOf = (st.md_id_map || {})[cmd.payload?.serverId ?? cmd.serverId] ?? null
+            // server id -> this device's local id via the base bindings
+            const st = await device.chrome.storage.local.get('md_base')
+            resultOf = (st.md_base?.entries || {})[cmd.payload?.serverId ?? cmd.serverId]?.localId ?? null
             break
           }
           case 'setServer': {
@@ -265,11 +273,13 @@ async function main() {
           }
           case 'storageDump': {
             const all = await device.chrome.storage.local.get(null)
+            const base = all.md_base || { entries: {} }
             resultOf = {
-              cacheKeys: Object.keys(all.md_local_nodes || {}),
-              mapRows: Object.entries(all.md_id_map || {}).map(([k, v]) => k.slice(0, 6) + '->' + v),
-              l2sRows: Object.entries(all.md_l2s || {}).map(([k, v]) => k + '->' + v.slice(0, 6)),
+              baseEntries: Object.keys(base.entries || {}),
+              boundRows: Object.values(base.entries || {}).filter(e => e.localId).length,
+              touchEntries: Object.keys(all.md_touch || {}),
               rev: all.md_config?.rev,
+              legacyLeftover: ['md_queue', 'md_local_nodes', 'md_id_map', 'md_l2s'].filter(k => all[k] !== undefined),
             }
             break
           }
@@ -278,26 +288,9 @@ async function main() {
             resultOf = r
             break
           }
-          case 'queueLength': {
-            const q = await device.chrome.storage.local.get('md_queue')
-            resultOf = (q.md_queue || []).length
-            break
-          }
-          case 'debugPull': {
-            const cfg = await device.chrome.storage.local.get('md_config')
-            const r = await fetch(SERVER + '/api/sync/device-pull?since=' + cfg.md_config.rev, {
-              headers: { Authorization: 'Bearer ' + cfg.md_config.token },
-            })
-            const data = await r.json()
-            const local = await device.chrome.storage.local.get('md_local_nodes')
-            resultOf = {
-              rev: cfg.md_config.rev,
-              head: data.head,
-              changes: data.changes?.map(c => ({ id: c.id, title: c.title, del: c.deletedAt, rev: c.revision, dev: c.deviceId.slice(0,8) })),
-              localHas: Object.keys(local.md_local_nodes || {}).length,
-              localIds: Object.keys(local.md_local_nodes || {}),
-              queue: (await device.chrome.storage.local.get('md_queue')).md_queue?.map(q => ({ kind: q.kind, id: q.id, at: q.at, title: q.title })) || [],
-            }
+          case 'pendingCount': {
+            const t = await device.chrome.storage.local.get('md_touch')
+            resultOf = Object.keys(t.md_touch || {}).length
             break
           }
           case 'debugTree': {
@@ -316,20 +309,56 @@ async function main() {
             resultOf = bar ? walk(bar) : null
             break
           }
+          case 'debugOther': {
+            const other = device.store.nodes.get('2')
+            const walk = (n) => {
+              const out = { title: n.title, url: n.url || undefined, children: [] }
+              for (const c of n.children || []) out.children.push(walk(c))
+              return out
+            }
+            resultOf = other ? walk(other) : null
+            break
+          }
           case 'config': {
             const st = await device.chrome.storage.local.get('md_config')
             resultOf = st.md_config || null
             break
           }
-          case 'deleteByIdRemote': {
-            // remove node on server by id (device-agnostic helper)
+          case 'serverApply': {
+            // drive server-side mutations through THIS device's token
+            // (create/update/delete rows with the given ids) — the test's
+            // way to simulate "another client wrote to the server"
             const st = await device.chrome.storage.local.get('md_config')
-            const r = await fetch(SERVER + '/api/sync/device-push', {
+            const ops = cmd.payload?.ops || cmd.ops || []
+            const r = await fetch(SERVER + '/api/sync/apply', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + st.md_config.token },
-              body: JSON.stringify([{ id: cmd.id, deletedAt: Math.floor(Date.now() / 1000), updatedAt: Math.floor(Date.now() / 1000), deviceId: 'admin' }]),
+              body: JSON.stringify(ops),
+            })
+            resultOf = { status: r.status, data: await r.json() }
+            break
+          }
+          case 'deleteByIdRemote': {
+            const st = await device.chrome.storage.local.get('md_config')
+            const r = await fetch(SERVER + '/api/sync/apply', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + st.md_config.token },
+              body: JSON.stringify([{ id: cmd.id, op: 'delete', updatedAt: Math.floor(Date.now() / 1000), deviceId: 'admin' }]),
             })
             resultOf = { status: r.status }
+            break
+          }
+          case 'serverTree': {
+            const st = await device.chrome.storage.local.get('md_config')
+            const r = await fetch(SERVER + '/api/sync/tree', {
+              headers: { Authorization: 'Bearer ' + st.md_config.token },
+            })
+            const data = await r.json()
+            resultOf = {
+              head: data.head,
+              othersId: data.othersId,
+              nodes: (data.nodes || []).map(n => ({ id: n.id, type: n.type, title: n.title, url: n.url, parentId: n.parentId, revision: n.revision, updatedAt: n.updatedAt })),
+            }
             break
           }
           default:
