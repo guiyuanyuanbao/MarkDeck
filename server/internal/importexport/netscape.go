@@ -18,6 +18,13 @@ type Node struct {
 	URL      string
 	AddDate  int64 // unix seconds
 	Children []*Node
+	// toolbarFolderAttr: the H3 carried PERSONAL_TOOLBAR_FOLDER="true" —
+	// Chromium's locale-independent marker for "this is my bookmarks bar".
+	// Title strings are localized and matchable only as a fallback.
+	toolbarFolderAttr bool
+	// isOtherHolder: synthetic folder from unwrapBrowserRoots carrying
+	// other-bookmarks content; Import routes it into the canonical holder.
+	isOtherHolder bool
 }
 
 // ParseNetscapeHTML parses a bookmark export file into a synthetic root.
@@ -28,6 +35,7 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 	stack := []*Node{root}
 	var pendingH3 string
 	var pendingAdd int64
+	var h3Toolbar bool
 
 	tk := html.NewTokenizer(strings.NewReader(string(data)))
 	depthDL := 0
@@ -45,11 +53,16 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 			case "h3":
 				pendingH3 = ""
 				pendingAdd = 0
+				pendingToolbar := false
 				for _, a := range t.Attr {
-					if a.Key == "add_date" {
+					switch a.Key {
+					case "add_date":
 						pendingAdd = parseTime(a.Val)
+					case "personal_toolbar_folder":
+						pendingToolbar = strings.EqualFold(a.Val, "true")
 					}
 				}
+				h3Toolbar = pendingToolbar
 			case "a":
 				var title, url string
 				var add int64
@@ -81,7 +94,8 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 			case "h3":
 				txt := pendingText(tk)
 				if len(stack) > 0 {
-					f := &Node{Title: firstNonEmpty(pendingH3, txt), AddDate: pendingAdd}
+					f := &Node{Title: firstNonEmpty(pendingH3, txt), AddDate: pendingAdd, toolbarFolderAttr: h3Toolbar}
+					h3Toolbar = false
 					// folder node: attach to current parent, push as new context
 					parent := stack[len(stack)-1]
 					parent.Children = append(parent.Children, f)
@@ -99,7 +113,86 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 	}
 	// close: any folders pushed but never popped still counted in root
 	_ = depthDL
+	unwrapBrowserRoots(root)
 	return root, nil
+}
+
+// ensureCanonicalHolder returns the id of the canonical 其他书签 folder,
+// creating it (top level, tail position) when absent. Mirrors the store's
+// migration row shape so the reconciler's structural binding picks it up.
+func ensureCanonicalHolder(s *store.Store, at int64) (string, error) {
+	if existing, err := s.Get(store.CanonicalOthersID()); err == nil {
+		return existing.ID, nil
+	}
+	created, err := s.Create(&store.Bookmark{
+		ID: store.CanonicalOthersID(), ParentID: "", Type: "folder",
+		Title: "其他书签", Position: 9999,
+		UpdatedAt: at, DeviceID: "import", CreatedAt: at,
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+	return created.ID, nil
+}
+
+// unwrapBrowserRoots removes the browser-root wrapper folders a Netscape
+// export always contains: Chrome/Edge emit "Bookmarks bar" (with
+// PERSONAL_TOOLBAR_FOLDER="true") and "Other bookmarks" as H3 folders
+// inside the single outer <DL>. Importing those wrappers verbatim created
+// a phantom extra "Bookmarks bar" layer in the server tree that then
+// mirrored to every browser. Their CHILDREN are the real content: bar
+// children lift to top level, other-bookmarks children move under the
+// canonical 其他书签 holder. Only unwraps when the wrapper is a folder with
+// a browser-root name (localized titles included) — a user folder that
+// happens to be named 书签栏 is only unwrapped when it carries the
+// PERSONAL_TOOLBAR_FOLDER attribute, never on title alone.
+func unwrapBrowserRoots(root *Node) {
+	var barKids, otherKids []*Node
+	kept := root.Children[:0]
+	for _, c := range root.Children {
+		switch {
+		case c.URL == "" && isBrowserBarWrapper(c):
+			barKids = append(barKids, c.Children...)
+		case c.URL == "" && isBrowserOtherWrapper(c):
+			otherKids = append(otherKids, c.Children...)
+		default:
+			kept = append(kept, c)
+		}
+	}
+	root.Children = append(kept, barKids...)
+	if len(otherKids) > 0 {
+		// other-bookmarks content is exported back as a synthetic folder
+		// node named exactly 其他书签; Import routes folders with this
+		// reserved name into the canonical holder instead of re-creating a
+		// same-named sibling (which the engine would then bind to the
+		// holder anyway — routing here keeps the import result honest).
+		root.Children = append(root.Children, &Node{Title: otherHolderReservedName, Children: otherKids, isOtherHolder: true})
+	}
+}
+
+// otherHolderReservedName marks the synthetic folder that carries
+// other-bookmarks content out of unwrapBrowserRoots.
+const otherHolderReservedName = "其他书签" 
+
+// browser-root wrapper names across locales (title match restricted to the
+// two known Chromium root names in the user's locales; attribute match is
+// locale-independent and always trusted)
+func isBrowserBarWrapper(n *Node) bool {
+	for _, a := range []string{n.Title} {
+		switch a {
+		case "Bookmarks bar", "书签栏", "Bookmarks Bar", "书签工具栏":
+			return true
+		}
+	}
+	return n.toolbarFolderAttr
+}
+
+func isBrowserOtherWrapper(n *Node) bool {
+	switch n.Title {
+	case "Other bookmarks", "其他书签", "Mobile bookmarks", "移动设备书签":
+		return true
+	}
+	return false
 }
 
 var h3Pending string
@@ -226,6 +319,39 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 		// Import each top-level child into root (dedup by URL across the batch).
 		for _, c := range root.Children {
 			if c.URL == "" {
+				// the synthetic other-bookmarks holder routes into the
+				// canonical md-others folder (create if absent) — never as
+				// a same-named sibling the engine would then have to adopt
+				if c.isOtherHolder {
+					holderID, err := ensureCanonicalHolder(s, at)
+					if err != nil {
+						res.Errors = append(res.Errors, err.Error())
+						continue
+					}
+					for _, k := range c.Children {
+						if k.URL == "" {
+							if _, err := importFolder(holderID, k, 0); err != nil {
+								res.Errors = append(res.Errors, err.Error())
+							}
+							continue
+						}
+						if existingURLs[normURL(k.URL)] {
+							res.Duplicates++
+							continue
+						}
+						existingURLs[normURL(k.URL)] = true
+						b := &store.Bookmark{
+							ParentID: holderID, Type: "url", Title: k.Title, URL: k.URL,
+							UpdatedAt: at, DeviceID: opts.DeviceID, CreatedAt: at,
+						}
+						if _, err := s.Create(b, nil); err != nil {
+							res.Errors = append(res.Errors, err.Error())
+						} else {
+							res.Created++
+						}
+					}
+					continue
+				}
 				if _, err := importFolder("", c, 0); err != nil {
 					res.Errors = append(res.Errors, err.Error())
 				}

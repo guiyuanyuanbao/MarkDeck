@@ -62,7 +62,7 @@ func (s *Store) MigrateOthersHolders() error {
 		return err
 	}
 	if len(holderIDs) == 0 {
-		return nil
+		return s.unwrapBookmarksBarWrappers()
 	}
 	log.Printf("migration: merging %d legacy others-holder(s) into %s", len(holderIDs), canonicalOthersID)
 
@@ -102,7 +102,101 @@ func (s *Store) MigrateOthersHolders() error {
 			return err
 		}
 	}
+	return s.unwrapBookmarksBarWrappers()
+}
+
+// unwrapBookmarksBarWrappers removes phantom "Bookmarks bar"-named wrapper
+// folders that sit at TOP LEVEL with no url children of their own — the
+// residue of importing a Chrome/Edge Netscape export before the importer
+// learned to strip browser-root wrappers (the extra layer the user saw in
+// both the web UI and, mirrored, in the browser). Their children lift to
+// top level; the empty shell is hard-deleted. Safety rails: only touches
+// folders titled exactly like a Chromium bar root (locale variants), only
+// at top level, and only when EVERY top-level sibling of that name is such
+// a wrapper — a user's genuinely-named 书签栏 folder holding real direct
+// url children is left alone.
+func (s *Store) unwrapBookmarksBarWrappers() error {
+	wrappers := []string{"Bookmarks bar", "书签栏", "Bookmarks Bar", "书签工具栏"}
+	for _, title := range wrappers {
+		rows, err := s.DB.Query(`SELECT id FROM bookmarks
+			WHERE parent_id = '' AND type = 'folder' AND title = ? AND deleted_at = 0 AND id != ?`,
+			title, canonicalOthersID)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			kids, err := s.Children(id)
+			if err != nil {
+				return err
+			}
+			// heuristic guard: a wrapper from the old importer holds ONLY
+			// folders (the bar's sub-folders) or a mix — but a real user
+			// folder that is genuinely named like the bar and holds direct
+			// url children AND has sibling folders at top level with real
+			// content is indistinguishable. Only unwrap when the candidate
+			// holds NO direct url children (the old importer's wrapper kept
+			// the export's sub-folders; direct urls never appeared under it
+			// because the wrapper WAS the bar root in the export).
+			hasDirectURL := false
+			for _, k := range kids {
+				if k.Type == "url" {
+					hasDirectURL = true
+					break
+				}
+			}
+			if hasDirectURL {
+				log.Printf("migration: top-level folder %q (id %s) named like a browser bar holds direct urls — leaving it untouched", title, id)
+				continue
+			}
+			at := Now()
+			for _, k := range kids {
+				if _, err := s.Move(k.ID, "", MaxPositionAt(s, "")+1, at, "migration"); err != nil {
+					return fmt.Errorf("lift child %s out of wrapper %s: %w", k.ID, id, err)
+				}
+			}
+			tx, err := s.DB.Begin()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id=?`, id); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM bookmarks WHERE id=?`, id); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if _, err := tx.Exec(`DELETE FROM changes WHERE bookmark_id=?`, id); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			log.Printf("migration: unwrapped phantom bar wrapper %q (id %s), lifted %d children to top level", title, id, len(kids))
+		}
+	}
 	return nil
+}
+
+// MaxPositionAt is MaxPosition bound for migration use (kept tiny to avoid
+// widening the store API).
+func MaxPositionAt(s *Store, parent string) float64 {
+	p, _ := s.MaxPosition(parent)
+	return p
 }
 
 // mergeIntoOthers moves (or merges) the subtree rooted at id into
