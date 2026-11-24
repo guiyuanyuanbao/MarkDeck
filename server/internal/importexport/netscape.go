@@ -278,7 +278,55 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 	}
 
 	var importFolder func(parentID string, n *Node, depth int) (string, error)
+	var findExistingFolder func(parentID, title string) (string, bool)
+	// findExistingFolder: same-title live folder under the same parent —
+	// re-running an import must MERGE into the existing tree, not grow
+	// empty same-named shells every run.
+	findExistingFolder = func(parentID, title string) (string, bool) {
+		kids, err := s.Children(parentID)
+		if err != nil {
+			return "", false
+		}
+		for _, k := range kids {
+			if k.Type == "folder" && k.Title == title {
+				return k.ID, true
+			}
+		}
+		return "", false
+	}
 	importFolder = func(parentID string, n *Node, depth int) (string, error) {
+		// merge mode reuses an existing same-named folder under the same
+		// parent (dedupe by URL still applies to its children); newfolder
+		// mode always creates the fresh wrapper folder
+		if opts.Mode == "merge" {
+			if existing, ok := findExistingFolder(parentID, firstNonEmpty(n.Title, "imported")); ok {
+				for _, c := range n.Children {
+					if c.URL == "" { // folder
+						if _, err := importFolder(existing, c, depth+1); err != nil {
+							res.Errors = append(res.Errors, err.Error())
+						}
+						continue
+					}
+					if existingURLs != nil {
+						if existingURLs[normURL(c.URL)] {
+							res.Duplicates++
+							continue
+						}
+						existingURLs[normURL(c.URL)] = true
+					}
+					b := &store.Bookmark{
+						ParentID: existing, Type: "url", Title: c.Title, URL: c.URL,
+						UpdatedAt: at, DeviceID: opts.DeviceID, CreatedAt: at,
+					}
+					if _, err := s.Create(b, nil); err != nil {
+						res.Errors = append(res.Errors, err.Error())
+					} else {
+						res.Created++
+					}
+				}
+				return existing, nil
+			}
+		}
 		f := &store.Bookmark{
 			ParentID: parentID, Type: "folder", Title: firstNonEmpty(n.Title, "imported"),
 			UpdatedAt: at, DeviceID: opts.DeviceID, CreatedAt: at,
