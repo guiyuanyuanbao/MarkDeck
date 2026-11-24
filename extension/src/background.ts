@@ -683,14 +683,39 @@ async function applyRemote(changes: NodeState[]) {
               }
             }
           }
-          // never touch chrome's permanent root folders
-          const rootNodeIds = new Set(['0', '1', '2'])
-          const resolvedRoots = await resolveRoots()
-          rootNodeIds.add(resolvedRoots.bar)
-          if (resolvedRoots.other) rootNodeIds.add(resolvedRoots.other)
-          if (localId && rootNodeIds.has(localId)) {
-            applyStats.failed++
-            applyStats.errors.push(`remove: refusing to delete root folder ${localId}`)
+          // never touch chrome's permanent root folders. Special case: the
+          // tombstoned row is the 其他书签 HOLDER (server-side folder that
+          // mirrors the browser's other-bookmarks root). Its children are
+          // live rows parented to it — deleting the browser root is
+          // impossible and letting the tombstone stand would orphan every
+          // child server-side. Correct action: RESURRECT the holder row
+          // (push deletedAt=0) so the server tree stays connected, and bind
+          // it to the browser root.
+          const resolvedRoots0 = await resolveRoots()
+          const permanentRoots = new Set(['0', '1', '2', resolvedRoots0.bar, resolvedRoots0.other].filter(Boolean) as string[])
+          if (localId && permanentRoots.has(localId)) {
+            const cfgNow = await getConfig()
+            if (cfgNow?.token) {
+              const now = Math.floor(Date.now() / 1000)
+              await apiFetch(cfgNow, '/api/sync/device-push', {
+                method: 'POST',
+                body: JSON.stringify([{
+                  id: act.serverId, updatedAt: now, deviceId: cfgNow.deviceId,
+                  type: 'folder', title: '其他书签', parentId: '', position: 9999,
+                  deletedAt: 0, purged: false, baseRevision: 0,
+                }]),
+              })
+              await recordIdMapping(act.serverId, localId)
+              applyStats.adopted++
+              // children of the holder likely failed to place earlier in this
+              // batch (holder unmapped at that point, rev cursor already at
+              // head so a re-pull returns nothing) — replay their creates
+              // NOW that the binding exists
+              const holderKids = changes.filter(c => c.parentId === act.serverId && !(c.deletedAt && c.deletedAt > 0))
+              for (const kid of holderKids) {
+                try { await applyCreate(kid) } catch { /* counted elsewhere */ }
+              }
+            }
             continue
           }
           if (localId) {

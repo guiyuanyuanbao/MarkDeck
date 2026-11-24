@@ -248,6 +248,67 @@ async function main() {
   log('G9: delete-vs-edit race reaches a consistent state',
     g9ok, 'srvAlive=' + srvStill + ' extGone=' + extGone + ' extRenamed=' + extRenamed)
 
+  // ---- G10: 其他书签 HOLDER tombstone — must resurrect, not error ----
+  // (user hit 'remove: refusing to delete root folder 125' because the
+  //  holder row was tombstoned in messy history; its live children then
+  //  had no placeable parent and 87 bookmarks failed)
+  let holderChild = null
+  const holder = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'folder', title: '其他书签', position: 9999 }, H)).body)
+  holderChild = JSON.parse((await api('POST', '/api/bookmarks',
+    { type: 'url', title: 'holder墓碑子书签', url: 'https://holder-tomb.test/x', parentId: holder.id }, H)).body)
+  await api('DELETE', `/api/bookmarks/${holder.id}`, undefined, H)
+  // child stays live but its parent row is now a tombstone (server-side orphan)
+  // API delete cascades to the child; the user's polluted history instead
+  // left children LIVE under a tombstoned holder — re-create that state:
+  await api('POST', '/api/sync/device-push',
+    [{ id: holderChild.id, updatedAt: Math.floor(Date.now() / 1000), deviceId: 'web',
+       title: 'holder墓碑子书签', type: 'url', parentId: holder.id, url: 'https://holder-tomb.test/x',
+       position: 1, deletedAt: 0, purged: false }],
+    { Authorization: 'Bearer ' + (await sw.evaluate(async () =>
+        (await chrome.storage.local.get('md_config')).md_config?.token || '')) })
+  log('G10 setup: holder tombstoned with LIVE child (raw push)', true)
+  await resync(sw)
+  await new Promise(r => setTimeout(r, 2000))
+  {
+    const cfgA = await sw.evaluate(async () =>
+      (await chrome.storage.local.get('md_config')).md_config)
+    const r = await fetch(SERVER + '/api/sync/device-pull?since=0', {
+      headers: { Authorization: 'Bearer ' + cfgA.token } })
+    const data = await r.json()
+    const interesting = (data.changes || []).filter(c =>
+      c.title === '其他书签' || c.title === 'holder墓碑子书签' || c.parentId === holder.id)
+    console.log('[G10dbg-rows]', JSON.stringify(interesting.map(x => ({
+      id: x.id.slice(0, 6), t: x.title, del: x.deletedAt, parent: (x.parentId || '').slice(0, 6), rev: x.revision, dev: x.deviceId
+    }))))
+    const st = await sw.evaluate(async () => {
+      const all = await chrome.storage.local.get(null)
+      return { cacheKeys: Object.keys(all.md_local_nodes || {}), rev: all.md_config?.rev }
+    })
+    console.log('[G10dbg-storage]', JSON.stringify(st))
+  }
+  const fr10 = await forceResync(sw)
+  const rootErrs = (fr10?.applied?.errors || []).filter(e => e.includes('root folder'))
+  log('G10a: no root-folder errors during holder-tombstone rebuild',
+    rootErrs.length === 0, 'errors=' + JSON.stringify(fr10?.applied?.errors || []))
+  console.log('[G10dbg] fr10:', JSON.stringify(fr10))
+  const dbgNode = await browserNodeByTitle(sw, 'holder墓碑子书签')
+  const dbgBar = await sw.evaluate(async () => {
+    const tree = await chrome.bookmarks.getTree()
+    const bar = tree[0].children[0]
+    return { barKids: (bar.children || []).map(c => c.title).slice(0, 10) }
+  })
+  console.log('[G10dbg] child in browser:', JSON.stringify(dbgNode), 'bar:', JSON.stringify(dbgBar))
+  let childThere = false
+  for (let i = 0; i < 15; i++) {
+    if (await browserNodeByTitle(sw, 'holder墓碑子书签')) { childThere = true; break }
+    await new Promise(r => setTimeout(r, 500))
+  }
+  log('G10b: holder-tombstone child lands in browser', childThere)
+  await new Promise(r => setTimeout(r, 1500))
+  const holderAlive = (await serverNodes()).some(n => n.id === holder.id && !(n.deletedAt > 0))
+  log('G10c: holder row resurrected (server tree stays connected)', holderAlive)
+
   await context.close()
   console.log('\n=== GRAVEYARD-BIND E2E RESULT ===')
   console.log(`${results.filter(r => r.ok).length} passed, ${results.filter(r => !r.ok).length} failed`)
