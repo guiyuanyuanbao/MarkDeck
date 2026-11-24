@@ -149,13 +149,19 @@ function toServerNodes(rows: any[]): ServerNode[] {
 // ---- chrome op execution ----
 
 // resolve a server parent id to a local chrome id: bindings from the plan,
-// structural roots for '' (bar) and the canonical others id, else null.
-function makeParentResolver(plan: SyncPlan, roots: ResolvedRoots, othersId: string): (sid: string) => string | null {
+// STRUCTURAL roots for '' and the canonical others id, and — critically —
+// bindings created EARLIER IN THIS BATCH (createdBindings): a folder this
+// reconcile just created is its children's parent, and its chrome id exists
+// only from the moment its create op executed. Topo order guarantees the
+// parent create precedes the child create, so the lookup succeeds.
+function makeParentResolver(plan: SyncPlan, roots: ResolvedRoots, othersId: string, createdBindings: Map<string, string>): (sid: string) => string | null {
   const planned = new Map<string, string | null>()
   for (const [sid, e] of Object.entries(plan.newBaseEntries)) planned.set(sid, e.localId)
   return (sid: string): string | null => {
     if (sid === '') return roots.barId
     if (sid === othersId) return roots.otherId
+    const created = createdBindings.get(sid)
+    if (created) return created
     const plannedLid = planned.get(sid)
     if (plannedLid) return plannedLid
     return null // unknown parent → caller decides the fallback
@@ -306,7 +312,7 @@ async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: str
     // collect the chrome ids of nodes this run CREATED — they become base
     // bindings, without which the next reconcile would re-create every row
     const createdBindings = new Map<string, string>()
-    const resolveParent = makeParentResolver(plan, roots, othersId)
+    const resolveParent = makeParentResolver(plan, roots, othersId, createdBindings)
     await applyChromeOps(plan.chromeOps, resolveParent, stats, createdBindings)
     for (const [sid, lid] of createdBindings) {
       const e = plan.newBaseEntries[sid]
@@ -502,6 +508,10 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         // identical mechanics to a re-pair — no special initialImport
         const r = await reconcileOnce('pair')
         if (!r.ok && r.error !== 'unauthorized') throw new Error(r.error || 'reconcile failed')
+        // the SW booted before pairing (no token → no WS); the realtime
+        // channel must come up HERE, not on some later service-worker restart
+        const cfgNow = await getConfig()
+        if (cfgNow) await connectWS(cfgNow)
         await setSyncStatus('online')
         sendResponse({ ok: true })
       } catch (e: any) {

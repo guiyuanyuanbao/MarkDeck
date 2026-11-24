@@ -47,7 +47,7 @@ const browserTitles = (sw) => sw.evaluate(async () => {
 const getStatus = (sw) => sw.evaluate(async () =>
   (await chrome.storage.local.get('md_status')).md_status)
 const getQueueLen = (sw) => sw.evaluate(async () =>
-  ((await chrome.storage.local.get('md_queue')).md_queue || []).length)
+  Object.keys((await chrome.storage.local.get('md_touch')).md_touch || {}).length)
 const resync = (sw) => sw.evaluate(() => globalThis.__markdeckResync())
 
 async function waitB(sw, pred, timeoutMs = 12000, label = '') {
@@ -84,6 +84,25 @@ async function pairViaUI(context, sw, cookie, csrf) {
   }
   await page.close()
   return msg
+}
+
+
+// root ids resolved at runtime — newer Chromium profiles use GUID permanent
+// node ids, never assume legacy '1'/'2' (v0.0.16 root-cause)
+let barRootId = null, otherRootId = null
+async function resolveBarRoot() {
+  if (!barRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    barRootId = tree[0].children[0].id
+  }
+  return barRootId
+}
+async function resolveOtherRoot() {
+  if (!otherRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    otherRootId = tree[0].children[1].id
+  }
+  return otherRootId
 }
 
 async function main() {
@@ -162,9 +181,9 @@ async function main() {
     await chrome.storage.local.set({ md_config: { ...cfg, server: 'http://127.0.0.1:1' } })
   })
   await sw.evaluate(async () =>
-    await chrome.bookmarks.create({ parentId: '1', title: '断联期书签1', url: 'https://off.sm/1' }))
+    await chrome.bookmarks.create({ parentId: JSON.parse(JSON.stringify(await (async () => { const t = await chrome.bookmarks.getTree(); return t[0].children[0].id })())), title: '断联期书签1', url: 'https://off.sm/1' }))
   await sw.evaluate(async () =>
-    await chrome.bookmarks.create({ parentId: '1', title: '断联期书签2', url: 'https://off.sm/2' }))
+    await chrome.bookmarks.create({ parentId: JSON.parse(JSON.stringify(await (async () => { const t = await chrome.bookmarks.getTree(); return t[0].children[0].id })())), title: '断联期书签2', url: 'https://off.sm/2' }))
   await new Promise(r => setTimeout(r, 2500))
   const stDisc = await getStatus(sw)
   const qDisc = await getQueueLen(sw)
@@ -198,7 +217,7 @@ async function main() {
   log('S5: revoked -> unauthorized', rev.status === 200 && stUn, 'status=' + await getStatus(sw))
   // edits while unauthorized: must queue, must NOT trigger endless 401 pushes
   await sw.evaluate(async () =>
-    await chrome.bookmarks.create({ parentId: '1', title: '未授权期书签', url: 'https://unauth.sm/x' }))
+    await chrome.bookmarks.create({ parentId: JSON.parse(JSON.stringify(await (async () => { const t = await chrome.bookmarks.getTree(); return t[0].children[0].id })())), title: '未授权期书签', url: 'https://unauth.sm/x' }))
   await new Promise(r => setTimeout(r, 3000))
   const qUn = await getQueueLen(sw)
   const stUn2 = await getStatus(sw)
@@ -231,7 +250,7 @@ async function main() {
 
   // ---- S8: full cycle sanity — one more edit round-trips cleanly ----
   await sw.evaluate(async () =>
-    await chrome.bookmarks.create({ parentId: '1', title: '终态书签', url: 'https://final.sm/x' }))
+    await chrome.bookmarks.create({ parentId: JSON.parse(JSON.stringify(await (async () => { const t = await chrome.bookmarks.getTree(); return t[0].children[0].id })())), title: '终态书签', url: 'https://final.sm/x' }))
   const fin = await waitB(sw, (bt, sn) => sn.some(n => n.title === '终态书签'), 10000)
   log('S8: steady-state edit round-trips after the whole cycle', fin)
 

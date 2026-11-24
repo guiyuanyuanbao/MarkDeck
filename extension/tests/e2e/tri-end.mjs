@@ -61,6 +61,25 @@ async function waitB(sw, pred, timeoutMs = 12000, label = '') {
   return false
 }
 
+
+// root ids resolved at runtime — newer Chromium profiles use GUID permanent
+// node ids, never assume legacy '1'/'2' (v0.0.16 root-cause)
+let barRootId = null, otherRootId = null
+async function resolveBarRoot() {
+  if (!barRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    barRootId = tree[0].children[0].id
+  }
+  return barRootId
+}
+async function resolveOtherRoot() {
+  if (!otherRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    otherRootId = tree[0].children[1].id
+  }
+  return otherRootId
+}
+
 async function main() {
   console.log('== MarkDeck tri-end E2E (web UI + extension in one chromium) ==')
   execSync(`node "${path.resolve(__dirname, '..', 'helpers', 'patch-manifest-e2e.js')}"`, { stdio: 'ignore' })
@@ -127,7 +146,7 @@ async function main() {
   await new Promise(r => setTimeout(r, 2000))
   log('X0b: server preset reached browser',
     (await browserTitles(sw)).includes('服务端预置'))
-  // device token for later device-push calls (read from the SW's storage)
+  // device token for later sync/apply calls (read from the SW's storage)
   const pairToken = await sw.evaluate(async () =>
     (await chrome.storage.local.get('md_config')).md_config?.token || '')
 
@@ -169,7 +188,7 @@ async function main() {
   const diag = await sw.evaluate(() => globalThis.__markdeckWsDiag)
   console.log('[WSdiag]', JSON.stringify(diag))
   const gotFrame = await waitB(sw, (bt) => bt.includes('WS探测书签'), 8000, 'WS-triggered pull')
-  log('X2b: server device-push broadcast drives extension pull (WS realtime)',
+  log('X2b: server apply broadcast drives extension reconcile (WS realtime)',
     gotFrame, 'wsState=' + diag.state)
 
   // ---- X3: rename in web UI -> extension updates in place ----
@@ -192,11 +211,11 @@ async function main() {
     // diagnosis: did the WS ping even fire a pull, and what did it apply?
     const dbg = await sw.evaluate(async (server) => {
       const cfg = (await chrome.storage.local.get('md_config')).md_config
-      const r = await fetch(server + '/api/sync/device-pull?since=' + Math.max(0, cfg.rev - 5), {
+      const r = await fetch(server.replace(/\/+$/, '') + '/api/sync/tree', {
         headers: { Authorization: 'Bearer ' + cfg.token } })
       const data = await r.json()
-      const row = (data.changes || []).find(c => c.title && c.title.includes('改名'))
-      return { rev: cfg.rev, head: data.head, rowFound: !!row, rowTitle: row?.title }
+      const row = (data.nodes || []).find(c => c.title && c.title.includes('改名'))
+      return { head: data.head, rowFound: !!row, rowTitle: row?.title }
     }, SERVER)
     console.log('[X3dbg]', JSON.stringify(dbg))
     await resync(sw)
@@ -251,7 +270,7 @@ async function main() {
   }
   let pushedOk = true
   for (let i = 0; i < ops.length; i += 500) {
-    const r = await api('POST', '/api/sync/device-push', ops.slice(i, i + 500),
+    const r = await api('POST', '/api/sync/apply', ops.slice(i, i + 500).map(o => ({ ...o, op: 'create' })),
       { Authorization: 'Bearer ' + pairToken })
     if (r.status !== 200) pushedOk = false
   }

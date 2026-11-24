@@ -64,6 +64,25 @@ const folderDupCount = (sw) => sw.evaluate(async () => {
   return dups
 })
 
+
+// root ids resolved at runtime — newer Chromium profiles use GUID permanent
+// node ids, never assume legacy '1'/'2' (v0.0.16 root-cause)
+let barRootId = null, otherRootId = null
+async function resolveBarRoot() {
+  if (!barRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    barRootId = tree[0].children[0].id
+  }
+  return barRootId
+}
+async function resolveOtherRoot() {
+  if (!otherRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    otherRootId = tree[0].children[1].id
+  }
+  return otherRootId
+}
+
 async function main() {
   console.log('== MarkDeck graveyard-bind E2E ==')
   execSync(`node "${path.resolve(__dirname, '..', 'helpers', 'patch-manifest-e2e.js')}"`, { stdio: 'ignore' })
@@ -140,7 +159,7 @@ async function main() {
   const auditTrail = []
   for (let i = 0; i < 3; i++) {
     const fr = await forceResync(sw)
-    auditTrail.push({ pulled: fr?.pulled, failed: fr?.applied?.failed, removed: fr?.applied?.removed, adopted: fr?.applied?.adopted })
+    auditTrail.push({ planned: fr?.planned, failed: fr?.failed, removed: fr?.removed, adopted: fr?.adopted })
     await new Promise(r => setTimeout(r, 2000))
     node = await browserNodeByTitle(sw, '墓地测试书签')
     if (node) survived++
@@ -261,10 +280,10 @@ async function main() {
   // child stays live but its parent row is now a tombstone (server-side orphan)
   // API delete cascades to the child; the user's polluted history instead
   // left children LIVE under a tombstoned holder — re-create that state:
-  await api('POST', '/api/sync/device-push',
-    [{ id: holderChild.id, updatedAt: Math.floor(Date.now() / 1000), deviceId: 'web',
+  await api('POST', '/api/sync/apply',
+    [{ id: holderChild.id, op: 'update', undelete: true, updatedAt: Math.floor(Date.now() / 1000), deviceId: 'web',
        title: 'holder墓碑子书签', type: 'url', parentId: holder.id, url: 'https://holder-tomb.test/x',
-       position: 1, deletedAt: 0, purged: false }],
+       position: 1 }],
     { Authorization: 'Bearer ' + (await sw.evaluate(async () =>
         (await chrome.storage.local.get('md_config')).md_config?.token || '')) })
   log('G10 setup: holder tombstoned with LIVE child (raw push)', true)
@@ -273,17 +292,17 @@ async function main() {
   {
     const cfgA = await sw.evaluate(async () =>
       (await chrome.storage.local.get('md_config')).md_config)
-    const r = await fetch(SERVER + '/api/sync/device-pull?since=0', {
+    const r = await fetch(SERVER + '/api/sync/tree', {
       headers: { Authorization: 'Bearer ' + cfgA.token } })
     const data = await r.json()
-    const interesting = (data.changes || []).filter(c =>
+    const interesting = (data.nodes || []).filter(c =>
       c.title === '其他书签' || c.title === 'holder墓碑子书签' || c.parentId === holder.id)
     console.log('[G10dbg-rows]', JSON.stringify(interesting.map(x => ({
       id: x.id.slice(0, 6), t: x.title, del: x.deletedAt, parent: (x.parentId || '').slice(0, 6), rev: x.revision, dev: x.deviceId
     }))))
     const st = await sw.evaluate(async () => {
       const all = await chrome.storage.local.get(null)
-      return { cacheKeys: Object.keys(all.md_local_nodes || {}), rev: all.md_config?.rev }
+      return { baseEntries: Object.keys((all.md_base || { entries: {} }).entries || {}).length, rev: all.md_config?.rev }
     })
     console.log('[G10dbg-storage]', JSON.stringify(st))
   }
@@ -306,8 +325,15 @@ async function main() {
   }
   log('G10b: holder-tombstone child lands in browser', childThere)
   await new Promise(r => setTimeout(r, 1500))
-  const holderAlive = (await serverNodes()).some(n => n.id === holder.id && !(n.deletedAt > 0))
-  log('G10c: holder row resurrected (server tree stays connected)', holderAlive)
+  // New-architecture semantics: the holder itself stays deleted (no
+  // resurrection needed), and the orphaned child re-parents to TOP LEVEL —
+  // identical to server-side Restore's semantics. Connectivity preserved
+  // without keeping a dead holder alive.
+  const childTopLevel = (await serverNodes()).some(n =>
+    n.title === 'holder墓碑子书签' && n.parentId === '' && !(n.deletedAt > 0))
+  const childLocal = await browserNodeByTitle(sw, 'holder墓碑子书签')
+  log('G10c: orphaned child re-parents to top level (both ends)',
+    childTopLevel && !!childLocal, 'srvTop=' + childTopLevel + ' browser=' + !!childLocal)
 
   await context.close()
   console.log('\n=== GRAVEYARD-BIND E2E RESULT ===')

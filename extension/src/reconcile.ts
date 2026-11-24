@@ -77,7 +77,7 @@ export type ChromeOp =
 
 export type ServerOp =
   | { op: 'create'; id: string; parentId: string; type: 'folder' | 'url'; title: string; url?: string; position: number; updatedAt: number; deviceId: string }
-  | { op: 'update'; id: string; title: string; url?: string; parentId?: string; tags?: string[]; updatedAt: number; deviceId: string; observedRevision: number }
+  | { op: 'update'; id: string; title: string; url?: string; parentId?: string; tags?: string[]; undelete?: boolean; updatedAt: number; deviceId: string; observedRevision: number }
   | { op: 'delete'; id: string; updatedAt: number; deviceId: string }
 
 export interface SyncPlan {
@@ -208,7 +208,19 @@ export function planSync(input: PlanInput): SyncPlan {
   }
 
   // ---- Pass 1: server-side rows ----
-  for (const sn of server) {
+  // Orphan normalization FIRST: a row whose parent id is not itself in the
+  // server tree (parent deleted while the child survived — messy-history
+  // artifact) re-parents to top level, matching server-side Restore's
+  // semantics. Creating it under a dead parent id would fail parent lookup.
+  const orphanIds = new Set<string>()
+  const normalizedServer = server.map((sn) => {
+    if (sn.parentId !== '' && !serverById.has(sn.parentId)) {
+      orphanIds.add(sn.id)
+      return { ...sn, parentId: '' }
+    }
+    return sn
+  })
+  for (const sn of normalizedServer) {
     const bEntry = base?.entries[sn.id]
     const localId = binding.get(sn.id) ?? null
     const ln = localId ? localById.get(localId) ?? undefined : undefined
@@ -270,12 +282,16 @@ export function planSync(input: PlanInput): SyncPlan {
 
     if (!ln) {
       // the chrome node is gone. Distinguish WHY:
-      //  - touch says the user deleted it locally → push the delete
+      //  - touch says the user deleted it locally AND the deletion is newer
+      //    than the server row (local delete beats a stale server row) →
+      //    push the delete. A server RESTORE bumps updatedAt past the local
+      //    deletion, so a restored subtree re-creates locally (B2c) instead
+      //    of being re-deleted by the stale journal — deletes are LWW too.
       //  - binding was null (never placed) → nothing local to lose
       //  - otherwise the node vanished un-journaled (profile reset?) →
       //    recreate from the server row (the server still holds it)
       const tRemoved = localId ? touch[localId]?.removed : undefined
-      if (localId && tRemoved) {
+      if (localId && tRemoved && touch[localId].at > sn.updatedAt) {
         serverOps.push({
           op: 'delete', id: sn.id,
           updatedAt: touch[localId].at,
@@ -312,6 +328,22 @@ export function planSync(input: PlanInput): SyncPlan {
     }
 
     // both sides present
+    // ORPHAN REPAIR FIRST: a row whose server parent died must converge on
+    // the browser's healthy placement (push the parent fix) regardless of
+    // what the content compare says — the normalized parent ('') differs
+    // from base's dead-parent record, which would otherwise trigger a
+    // browser move to an unresolvable parent instead of a server repair.
+    if (orphanIds.has(sn.id) && ln) {
+      const localParentSid = reverse.get(ln.parentId) ?? ''
+      serverOps.push({
+        op: 'update', id: sn.id, title: ln.title,
+        parentId: localParentSid === input.othersId ? input.othersId : '',
+        updatedAt: Math.max(touchAt(touch, localId as string), input.now),
+        deviceId, observedRevision: sn.revision,
+      })
+      stats.pushed++
+      continue
+    }
     if (serverChanged && localChanged) {
       // both moved since base: LWW by timestamps (touch time vs server time)
       const t = touchAt(touch, localId ?? undefined)
@@ -357,6 +389,7 @@ export function planSync(input: PlanInput): SyncPlan {
           id: sid,
           title: ln.title,
           url: ln.type === 'url' ? (ln.url || '') : undefined,
+          undelete: true,
           updatedAt: t,
           deviceId,
           observedRevision: entry.server.revision,

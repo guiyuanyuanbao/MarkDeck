@@ -40,6 +40,25 @@ const browserTitles = (sw) => sw.evaluate(async () => {
 })
 const resync = (sw) => sw.evaluate(() => globalThis.__markdeckResync())
 
+
+// root ids resolved at runtime — newer Chromium profiles use GUID permanent
+// node ids, never assume legacy '1'/'2' (v0.0.16 root-cause)
+let barRootId = null, otherRootId = null
+async function resolveBarRoot() {
+  if (!barRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    barRootId = tree[0].children[0].id
+  }
+  return barRootId
+}
+async function resolveOtherRoot() {
+  if (!otherRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    otherRootId = tree[0].children[1].id
+  }
+  return otherRootId
+}
+
 async function main() {
   const t0 = Date.now()
   console.log('== MarkDeck stress E2E ==')
@@ -123,7 +142,7 @@ async function main() {
     (await chrome.storage.local.get('md_config')).md_config?.token || '')
   let pushedOk = true
   for (let i = 0; i < ops.length; i += 500) {
-    const r = await api('POST', '/api/sync/device-push', ops.slice(i, i + 500),
+    const r = await api('POST', '/api/sync/apply', ops.slice(i, i + 500).map(o => ({ ...o, op: 'create' })),
       { Authorization: 'Bearer ' + pairToken })
     if (r.status !== 200) pushedOk = false
   }
@@ -163,13 +182,13 @@ async function main() {
     const cfg = (await chrome.storage.local.get('md_config')).md_config
     await chrome.storage.local.set({ md_config: { ...cfg, server: 'http://127.0.0.1:1' } })
     for (let i = 0; i < 50; i++) {
-      await chrome.bookmarks.create({ parentId: '1', title: '离线压测' + i, url: 'https://off-stress.test/' + i })
+      await chrome.bookmarks.create({ parentId: JSON.parse(JSON.stringify(await (async () => { const t = await chrome.bookmarks.getTree(); return t[0].children[0].id })())), title: '离线压测' + i, url: 'https://off-stress.test/' + i })
     }
     await new Promise(r => setTimeout(r, 2000))
     await chrome.storage.local.set({ md_config: cfg })
   })
   const qLen = await sw.evaluate(async () =>
-    ((await chrome.storage.local.get('md_queue')).md_queue || []).length)
+    Object.keys((await chrome.storage.local.get('md_touch')).md_touch || {}).length)
   log('S4 setup: 50 offline creates queued', qLen >= 50, 'queue=' + qLen)
   await resync(sw)
   let replayed = 0
@@ -181,7 +200,7 @@ async function main() {
   }
   log('S4: all 50 offline ops replayed to server', replayed === 50, `replayed=${replayed}/50`)
   const qAfter = await sw.evaluate(async () =>
-    ((await chrome.storage.local.get('md_queue')).md_queue || []).length)
+    Object.keys((await chrome.storage.local.get('md_touch')).md_touch || {}).length)
   log('S4b: queue drained after replay', qAfter === 0, 'queue=' + qAfter)
 
   // ---- S5: delete 200 server rows → browser converges ----

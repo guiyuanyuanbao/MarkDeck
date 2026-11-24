@@ -69,6 +69,25 @@ async function waitB(sw, pred, timeoutMs = 12000, label = '') {
   return false
 }
 
+
+// root ids resolved at runtime — newer Chromium profiles use GUID permanent
+// node ids, never assume legacy '1'/'2' (v0.0.16 root-cause)
+let barRootId = null, otherRootId = null
+async function resolveBarRoot() {
+  if (!barRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    barRootId = tree[0].children[0].id
+  }
+  return barRootId
+}
+async function resolveOtherRoot() {
+  if (!otherRootId) {
+    const tree = await chrome.bookmarks.getTree()
+    otherRootId = tree[0].children[1].id
+  }
+  return otherRootId
+}
+
 async function main() {
   console.log('== MarkDeck business-state E2E ==')
   execSync(`node "${path.resolve(__dirname, '..', 'helpers', 'patch-manifest-e2e.js')}"`, { stdio: 'ignore' })
@@ -163,6 +182,8 @@ async function main() {
     'child.parent=' + childSrv?.parentId + ' folder=' + folderSrv?.id)
 
   await resync(sw)
+  const b2dbg = await sw.evaluate(() => globalThis.__markdeckReconcileStats())
+  console.log('[B2dbg] stats after resync:', JSON.stringify(b2dbg))
   const browserBack = await waitB(sw, (bt) => bt.includes('子书签A') && bt.includes('孙书签'), 12000)
   const bGrand = await browserNodeByTitle(sw, '孙书签')
   const bSub = await browserNodeByTitle(sw, '子文件夹')
@@ -214,7 +235,7 @@ async function main() {
   })
   await resync(sw)
   const renameArrived = await waitB(sw, (bt, sn) => sn.some(n => n.title === '元数据书签-改名'), 10000)
-  const qLen = await sw.evaluate(async () => ((await chrome.storage.local.get('md_queue')).md_queue || []).length)
+  const qLen = await sw.evaluate(async () => Object.keys((await chrome.storage.local.get('md_touch')).md_touch || {}).length)
   const metaAll = (await serverNodes()).filter(n => (n.title || '').includes('元数据'))
   console.log('[B5dbg] renameArrived=' + renameArrived + ' queue=' + qLen
     + ' serverMetaRows=' + JSON.stringify(metaAll.map(n => ({ id: n.id.slice(0, 8), title: n.title }))))
@@ -254,18 +275,18 @@ async function main() {
     await resync(sw)
     const extState = await sw.evaluate(async () => {
       const cfg = (await chrome.storage.local.get('md_config')).md_config
-      const q = (await chrome.storage.local.get('md_queue')).md_queue || []
+      const q = (await chrome.storage.local.get('md_touch')).md_touch || {}
       return { rev: cfg?.rev, status: (await chrome.storage.local.get('md_status')).md_status, queue: q.length }
     })
     console.log('[B7dbg-ext]', JSON.stringify(extState))
     // manual re-pull from 0 to force the extension to see the restored rows
     const manual = await sw.evaluate(async (server) => {
       const cfg = (await chrome.storage.local.get('md_config')).md_config
-      const r = await fetch(server + '/api/sync/device-pull?since=0', {
+      const r = await fetch(server.replace(/\/+$/, '') + '/api/sync/tree', {
         headers: { Authorization: 'Bearer ' + cfg.token } })
       const data = await r.json()
-      const rows = (data.changes || []).filter(c => (c.title || '').includes('元数据'))
-      return { n: (data.changes || []).length, rows: rows.map(x => ({ rev: x.revision, del: x.deletedAt, t: x.title })) }
+      const rows = (data.nodes || []).filter(c => (c.title || '').includes('元数据'))
+      return { n: (data.nodes || []).length, rows: rows.map(x => ({ rev: x.revision, del: x.deletedAt, t: x.title })) }
     }, SERVER)
     console.log('[B7dbg-pull]', JSON.stringify(manual))
     const backExt = await waitB(sw, (bt) => bt.includes('元数据书签-改名'), 12000)

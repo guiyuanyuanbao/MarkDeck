@@ -30,6 +30,11 @@ type BatchOp struct {
 	Archived         *bool    `json:"archived,omitempty"`
 	Position         *float64 `json:"position,omitempty"`
 	Tags             []string `json:"tags,omitempty"`
+	// Undelete revives a tombstoned row (the reconciler's "local edit wins
+	// against a server delete" path — the edit is newer, the row must come
+	// back). Without it a batch update keeps cur's tombstone and the row
+	// stays invisible in every tree.
+	Undelete         bool     `json:"undelete,omitempty"`
 	UpdatedAt        int64    `json:"updatedAt"`
 	DeviceID         string   `json:"deviceId"`
 	ObservedRevision int64    `json:"observedRevision,omitempty"`
@@ -212,8 +217,16 @@ func (s *Store) batchUpdate(tx *sql.Tx, cur *Bookmark, op *BatchOp, device strin
 	}
 	merged.UpdatedAt = updated
 	merged.DeviceID = device
-	// deletion state stays as-is: deletes go through the "delete" branch
-	// (which tombstones the whole subtree), updates never flip it
+	if op.Undelete && merged.DeletedAt > 0 {
+		// explicit revive: clear the tombstone (purged rows stay terminal —
+		// content is gone and nothing can bring it back)
+		if !merged.Purged {
+			merged.DeletedAt = 0
+			merged.Purged = false
+		}
+	}
+	// otherwise deletion state stays as-is: deletes go through the "delete"
+	// branch (which tombstones the whole subtree), updates never flip it
 
 	if err := updateBookmarkTx(tx, &merged); err != nil {
 		return BatchResult{ID: op.ID, Error: err.Error()}
