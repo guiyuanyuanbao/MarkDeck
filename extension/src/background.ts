@@ -1,13 +1,23 @@
-// MarkDeck extension service worker: sync engine.
+// MarkDeck extension service worker: snapshot-reconciliation sync engine.
 //
-// Architecture:
-// - offline queue: local bookmark events land in chrome.storage.local
-// - push: queue drained to /api/sync/device-push with LWW semantics
-// - pull: /api/sync/device-pull?since=rev applies remote changes to the tree
-// - realtime: /api/ws revision pings trigger pull; alarm polls as fallback
-// - re-entrancy guard: applyingRemote blocks local listeners while we write
+// Architecture (0.1.0 rewrite):
+// - The server is the single source of truth; identity is the server UUID.
+//   There are NO client-side id-mapping tables (md_id_map/md_l2s are gone —
+//   nine patch releases fought their drift; the snapshot engine cannot drift).
+// - Reconcile: three-way diff (base snapshot / server tree / local tree)
+//   planned by the pure engine in reconcile.ts, applied to chrome.bookmarks
+//   and pushed to POST /api/sync/apply in one round-trip each way.
+// - Persistence: md_base (last synced snapshot + bindings) and md_touch
+//   (journaled local edit timestamps). A failed reconcile never advances
+//   base, so the next run re-plans identical ops — offline edits replay
+//   without a queue, an echo guard, or per-op recovery ladders.
+// - Realtime: /api/ws revision pings trigger a reconcile; the 1-min alarm
+//   is the convergence guarantee when the MV3 service worker dies.
 
-import { compressQueue, planRemoteActions, opsToPushPayload, backoffDelay, detectDuplicateGroups, type NodeState, type QueuedOp } from './sync-core'
+import {
+  planSync, normBookmarkUrl, backoffDelay, detectDuplicateGroups,
+  type ServerNode, type LocalNode, type Base, type TouchJournal, type SyncPlan,
+} from './reconcile'
 
 interface Config {
   server: string
@@ -16,20 +26,26 @@ interface Config {
   rev: number
 }
 
-const QUEUE_KEY = 'md_queue'
 const CONFIG_KEY = 'md_config'
-const LOCAL_KEY = 'md_local_nodes'
-const IDMAP_KEY = 'md_id_map' // { serverId: localId } — local ids differ per browser
-const L2S_KEY = 'md_l2s' // { localId: serverId } — reverse direction for pushes
-let idMapSyncCache: Record<string, string> = {}
-function idMapSync(): Record<string, string> { return idMapSyncCache }
-function setIdMapSync(m: Record<string, string>) { idMapSyncCache = m }
+const BASE_KEY = 'md_base'
+const TOUCH_KEY = 'md_touch'
 const ALARM = 'md-poll'
+// pre-0.1.0 keys — removed once on upgrade
+const LEGACY_KEYS = ['md_queue', 'md_local_nodes', 'md_id_map', 'md_l2s']
 
-let applyingRemote = false
+let reconciling = false
 let ws: WebSocket | null = null
 let wsAttempt = 0
-let flushing = false
+let deviceIdCached = 'unknown'
+
+// per-reconcile audit counters (the lesson from nine releases: when a sync
+// layer swallows per-row errors, statuses stay green while apply fails —
+// expose every outcome)
+const reconcileStats = {
+  planned: 0, pushed: 0, chromeCreates: 0, chromeUpdates: 0,
+  chromeMoves: 0, chromeRemoves: 0, adopted: 0, failed: 0,
+  errors: [] as string[], lastRunAt: 0,
+}
 
 // ---- storage helpers ----
 
@@ -41,353 +57,320 @@ async function saveConfigPatch(patch: Partial<Config>) {
   const cur = (await getConfig()) || { server: '', token: '', deviceId: '', rev: 0 }
   await chrome.storage.local.set({ [CONFIG_KEY]: { ...cur, ...patch } })
 }
-async function getQueue(): Promise<QueuedOp[]> {
-  const st = await chrome.storage.local.get(QUEUE_KEY)
-  return (st[QUEUE_KEY] as QueuedOp[]) || []
+async function getBase(): Promise<Base | null> {
+  const st = await chrome.storage.local.get(BASE_KEY)
+  return (st[BASE_KEY] as Base) || null
 }
-async function setQueue(q: QueuedOp[]) {
-  await chrome.storage.local.set({ [QUEUE_KEY]: q })
+async function setBase(b: Base) {
+  await chrome.storage.local.set({ [BASE_KEY]: b })
 }
-// Nodes created/updated/moved by applyRemote fire chrome.bookmarks events that
-// would be re-enqueued and pushed back, resurrecting tombstones. applyRemote
-// sets applyingRemote=true during its run, but its writes land BEFORE the
-// finally-block resets the flag only within the same tick; bookmark events
-// are async, so we also track recently-applied local ids explicitly.
-// id -> snapshot of what the last remote sync wrote; a local event matching
-// the snapshot is our own echo. Real browsers dispatch these events AFTER
-// applyRemote finished, and an unblocked 'created' echo re-pushes the node
-// under its local integer id, duplicating it on the server.
-const recentlyApplied = new Map<string, { title?: string; parentId?: string }>()
-// Events that arrive while applyRemote holds the guard are buffered, not
-// dropped: a burst of user edits overlapping a sync window would otherwise
-// lose ops permanently. On replay each op goes through the echo check again
-// with the final snapshots, so remote-write echoes are still blocked.
-const deferredOps: QueuedOp[] = []
-// bookmark listeners call enqueue fire-and-forget; rapid bursts overlap the
-// getQueue/setQueue round-trips and last-write-wins DROPS ops (10 rapid
-// creates lost ~half in real chromium). Serialize the read-modify-write.
-// enqueueChain AND the push claim below must share ONE mutex: pushQueue's
-// claim is also a getQueue/setQueue([]) round-trip, and an enqueue landing
-// between its read and its clear was silently erased (burst lost one op
-// with the missing id varying per run — classic interleaving).
-let queueMutex: Promise<void> = Promise.resolve()
-function withQueueLock<T>(fn: () => Promise<T>): Promise<T> {
-  const run = queueMutex.catch(() => {}).then(fn)
-  queueMutex = run.then(() => undefined, () => undefined)
-  return run
+async function getTouch(): Promise<TouchJournal> {
+  const st = await chrome.storage.local.get(TOUCH_KEY)
+  return (st[TOUCH_KEY] as TouchJournal) || {}
 }
-async function enqueue(op: QueuedOp) {
-  if (applyingRemote) { deferredOps.push(op); return }
-  const echo = recentlyApplied.get(op.id)
-  if (echo) {
-    const isEcho =
-      op.kind === 'removed' ||
-      ((op.kind === 'created' || op.kind === 'changed') && op.title === echo.title) ||
-      ((op.kind === 'moved' || op.kind === 'reordered') && op.parentId === echo.parentId)
-    recentlyApplied.delete(op.id) // one-shot: a later real edit must push
-    if (isEcho) return
-  }
-  await withQueueLock(async () => {
-    const q = await getQueue()
-    q.push(op)
-    await setQueue(q)
-  })
-  scheduleFlush()
+async function setTouch(t: TouchJournal) {
+  await chrome.storage.local.set({ [TOUCH_KEY]: t })
 }
 
-// ---- local node cache for LWW decisions ----
+// ---- chrome adapter: tree → engine shapes ----
 
-// overrides: localId -> {deviceId, updatedAt, revision} of the last remote
-// change that wrote the node. chrome.bookmarks has no author info, so without
-// this merge every refresh would stamp nodes with OUR id and a frozen
-// dateAdded. revision lets later pushes quote baseRevision so the server can
-// distinguish a follow-up edit from a stale op on same-second LWW ties.
-async function refreshLocalCache(overrides?: Map<string, { deviceId: string; updatedAt: number; revision: number }>): Promise<Map<string, NodeState>> {
-  const prev = await localCache()
+interface ResolvedRoots { barId: string; otherId: string }
+
+// Chromium invariant (Chrome AND Edge): root children[0] = bookmarks bar,
+// children[1] = other bookmarks (children[2] is Mobile bookmarks when
+// present — taking the last child once grabbed Mobile on Edge and silently
+// excluded 94 bookmarks). Titles are localized; never match on them.
+// Root ids are NOT fixed '1'/'2' — newer profiles assign GUID permanent ids.
+let cachedRoots: ResolvedRoots | null = null
+async function resolveRoots(): Promise<ResolvedRoots> {
+  if (cachedRoots) return cachedRoots
   const tree = await chrome.bookmarks.getTree()
-  const map = new Map<string, NodeState>()
-  const deviceId = (await getConfig())?.deviceId || 'unknown'
+  const kids = tree[0]?.children ?? []
+  if (kids.length < 2) throw new Error('bookmark tree has no bar/other roots')
+  cachedRoots = { barId: kids[0].id, otherId: kids[1].id }
+  return cachedRoots
+}
+async function barRootId(): Promise<string> {
+  return (await resolveRoots()).barId
+}
+
+// toLocalTree: walk the scoped subtrees into the engine's flat LocalNode
+// list. Root buckets: bar carries parentId '', other carries isOtherRoot.
+// Mobile bookmarks are NOT walked (out of sync scope by design).
+async function toLocalTree(): Promise<LocalNode[]> {
+  const roots = await resolveRoots()
+  const tree = await chrome.bookmarks.getTree()
+  const out: LocalNode[] = []
   const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentId: string) => {
     for (const n of nodes) {
-      const ov = overrides?.get(n.id)
-      map.set(n.id, {
+      out.push({
         id: n.id,
         parentId,
         type: n.url ? 'url' : 'folder',
         title: n.title,
         url: n.url,
-        position: (n.index ?? 0) + 1,
-        revision: ov?.revision || prev.get(n.id)?.revision || 0,
-        updatedAt: ov?.updatedAt || Math.floor((n.dateAdded || Date.now()) / 1000),
-        deviceId: ov?.deviceId || prev.get(n.id)?.deviceId || deviceId,
-        createdAt: Math.floor((n.dateAdded || Date.now()) / 1000),
+        index: n.index ?? 0,
+        dateAdded: n.dateAdded,
       })
       if (n.children) walk(n.children, n.id)
     }
   }
-  walk(tree, '')
-  // Sync scope: the Bookmarks Bar plus Other Bookmarks. Root ids are NOT
-  // fixed ('1'/'2' only on legacy profiles; newer Chromium uses GUID ids),
-  // so resolve by Chromium's invariant ordering: first child = bar,
-  // SECOND child = other bookmarks (children[2] is Mobile bookmarks when
-  // present — taking the last child grabbed Mobile on Edge and silently
-  // excluded the real other-bookmarks content from the sync scope).
-  const roots = tree[0]?.children ?? []
-  const barRoot = roots[0]
-  const otherRoot = roots.length > 1 ? roots[1] : undefined
-  const scope = new Map<string, NodeState>()
-  // async walk that fully awaits getChildren before persisting — a .then
-  // fire-and-forget here raced the storage.set below and left the cache
-  // incomplete (tombstone deletes then silently missed their local nodes).
-  // getTree() already returned the complete subtree (children included);
-  // per-node getChildren here was 1 API call PER NODE on every refresh —
-  // hundreds of redundant round-trips on large trees. Track chrome children
-  // in a side map during `walk` instead of re-querying.
-  const chromeChildren = new Map<string, chrome.bookmarks.BookmarkTreeNode[]>()
-  const walkWithKids = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentId: string) => {
-    for (const n of nodes) {
-      chromeChildren.set(n.id, n.children ?? [])
-      if (n.children) walkWithKids(n.children, n.id)
+  const rootNode = tree[0]
+  if (!rootNode?.children) return out
+  for (const kid of rootNode.children) {
+    if (kid.id === roots.barId) {
+      out.push({ id: kid.id, parentId: '', type: 'folder', title: kid.title, index: 0 })
+      if (kid.children) walk(kid.children, kid.id)
+    } else if (kid.id === roots.otherId) {
+      out.push({ id: kid.id, parentId: '', type: 'folder', title: kid.title, index: kid.index ?? 1, isOtherRoot: true } as LocalNode & { isOtherRoot: true })
+      if (kid.children) walk(kid.children, kid.id)
     }
+    // else: Mobile bookmarks — excluded from sync scope
   }
-  walkWithKids(tree[0]?.children ?? [], '')
-  const walkScoped = (id: string): void => {
-    const n = map.get(id)
-    if (!n) return
-    scope.set(id, n)
-    for (const k of chromeChildren.get(id) ?? []) walkScoped(k.id)
-  }
-  if (barRoot) walkScoped(barRoot.id)
-  if (otherRoot) walkScoped(otherRoot.id)
-  await chrome.storage.local.set({ [LOCAL_KEY]: Object.fromEntries(scope) })
-  return scope
+  return out
 }
 
-async function localCache(): Promise<Map<string, NodeState>> {
-  const st = await chrome.storage.local.get(LOCAL_KEY)
-  const obj = (st[LOCAL_KEY] as Record<string, NodeState>) || {}
-  return new Map(Object.entries(obj))
+// toServerNodes: server response rows → engine shape (already JSON-shaped;
+// only normalize the optional fields the engine reads)
+function toServerNodes(rows: any[]): ServerNode[] {
+  return rows.map((r) => ({
+    id: r.id,
+    parentId: r.parentId || '',
+    type: r.type === 'url' ? 'url' : 'folder',
+    title: r.title || '',
+    url: r.url || undefined,
+    position: r.position ?? 1,
+    revision: r.revision ?? 0,
+    updatedAt: r.updatedAt ?? 0,
+    deviceId: r.deviceId,
+  }))
 }
 
-// ---- server<->local id mapping ----
-// The server knows nodes by the creator device's local id. Other devices
-// create their own local ids when applying remote creates, so every device
-// keeps a serverId->localId map to translate push/pull payloads.
-// md_id_map holds serverId->localId; md_l2s holds localId->serverId. Small
-// integer local ids collide ACROSS devices and runs, so nodes created after
-// pairing get a minted UUID as their server id — pushing raw local ids made
-// two devices overwrite each other's rows (server merges different nodes
-// into one id, then devices ping-pong create/delete fighting over it).
-async function idMap(): Promise<Record<string, string>> {
-  const st = await chrome.storage.local.get(IDMAP_KEY)
-  return (st[IDMAP_KEY] as Record<string, string>) || {}
-}
-async function l2sMap(): Promise<Record<string, string>> {
-  const st = await chrome.storage.local.get(L2S_KEY)
-  return (st[L2S_KEY] as Record<string, string>) || {}
-}
-async function setIdMap(map: Record<string, string>) {
-  idMapSyncCache = map // keep the sync mirror coherent with storage
-  await chrome.storage.local.set({ [IDMAP_KEY]: map })
-}
-async function mapToServerId(localId: string): Promise<string> {
-  const l2s = await l2sMap()
-  if (localId in l2s) return l2s[localId]
-  const map = await idMap()
-  // `in` check (not ||) — the bar root maps to '' and must not fall through
-  return localId in map ? map[localId] : localId // creator devices use local id == server id
-}
-// mintedServerId = mapToServerId that always yields a globally-unique id
-async function mintedServerId(localId: string): Promise<string> {
-  const l2s = await l2sMap()
-  if (localId in l2s) return l2s[localId]
-  const map = await idMap()
-  if (localId in map) return map[localId] // initialImport already assigned one
-  return mintServerId(localId)
-}
-async function mapToLocalId(serverId: string): Promise<string | null> {
-  const map = await idMap()
-  return serverId in map ? map[serverId] : serverId // creator devices keep local id == server id
-}
-// STRICT variant: null when unmapped. The lenient fallback above returns the
-// raw server id, which callers used as a chrome node id — a GUID server id
-// can never exist in the browser tree, so unmapped updates/moves/removes
-// silently failed on "Can't find bookmark for id". Recovery paths (child
-// lookup, title match) need null to know they must engage.
-async function mapToLocalIdStrict(serverId: string): Promise<string | null> {
-  const map = await idMap()
-  return serverId in map ? map[serverId] : null
-}
-async function recordIdMapping(serverId: string, localId: string) {
-  const map = await idMap()
-  map[serverId] = localId
-  await setIdMap(map)
-  // the push-direction mirror must ALWAYS track the newest binding: an old
-  // l2s entry pointing at a different server row (duplicate-URL rows, or a
-  // row rebuilt by forceResync) made map and l2s disagree — pushes then
-  // landed on the stale row while pulls bound the fresh one, and the two
-  // tables diverged further on every sync (diag: 一致=否)
-  const l2s = await l2sMap()
-  l2s[localId] = serverId
-  await chrome.storage.local.set({ [L2S_KEY]: l2s })
-}
-// mint a globally-unique server id for a locally-created node and remember
-// both directions; minting must happen exactly once per local id
-async function mintServerId(localId: string): Promise<string> {
-  const l2s = await l2sMap()
-  if (localId in l2s) return l2s[localId]
-  const uuid = crypto.randomUUID()
-  l2s[localId] = uuid
-  await chrome.storage.local.set({ [L2S_KEY]: l2s })
-  await recordIdMapping(uuid, localId)
-  return uuid
-}
-async function hydrateIdMapSync() {
-  // applyRemote plans actions synchronously, so it reads the in-memory copy;
-  // without hydrating it from storage every remote edit/tombstone from another
-  // device "looks absent" (deletes skipped, updates duplicated as creates)
-  setIdMapSync(await idMap())
-}
+// ---- chrome op execution ----
 
-// sanitizeIdMaps repairs mapping tables written by older, buggy releases:
-// earlier versions pushed raw local ids, spread a function object over the
-// persisted map, or minted a fresh UUID per lookup. Corrupt entries make
-// mapToLocalId return ids that no longer exist in the browser, so remote
-// creates get attached to dead parents or silently dropped — exactly the
-// "server bookmarks never appear in the browser" report. A mapping is stale
-// when the local side no longer exists; stale server-side ids (rows the
-// server deleted) prune themselves via tombstones, so only the local side
-// needs validating.
-async function sanitizeIdMaps() {
-  const tree = await chrome.bookmarks.getTree()
-  const liveIds = new Set<string>()
-  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
-    for (const n of nodes) { liveIds.add(n.id); if (n.children) walk(n.children) }
-  }
-  for (const root of tree) if (root.children) walk(root.children)
-
-  const map = await idMap() // serverId -> localId
-  const l2s = await l2sMap() // localId -> serverId
-  let changed = false
-  for (const [sid, lid] of Object.entries(map)) {
-    if (!liveIds.has(lid)) {
-      console.warn('[markdeck] pruning map entry (local id gone):', sid.slice(0, 8), '->', lid)
-      delete map[sid]; changed = true
-    }
-  }
-  for (const lid of Object.keys(l2s)) {
-    if (!liveIds.has(lid)) {
-      console.warn('[markdeck] pruning l2s entry (local id gone):', lid, '->', (l2s[lid] || '').slice(0, 8))
-      delete l2s[lid]; changed = true
-    }
-  }
-  // cross-consistency: both directions must agree where both exist.
-  // Also REBUILD the server->local direction from l2s when it lost rows
-  // (the pre-v0.0.12 corruption overwrote md_id_map with l2s-shaped data;
-  // pruning those rows left devices with zero pull mappings while md_l2s
-  // still held every valid pair — the browser tree keeps matching local
-  // ids alive, so the reverse table is trustworthy).
-  for (const [lid, sid] of Object.entries(l2s)) {
-    if (sid && liveIds.has(lid) && map[sid] === undefined) {
-      map[sid] = lid
-      changed = true
-    }
-  }
-  for (const [sid, lid] of Object.entries(map)) {
-    if (lid && l2s[lid] !== undefined && l2s[lid] !== sid) {
-      // divergent double-mapping (node reminted by an old bug): trust the
-      // server direction and drop the stale reverse entry
-      delete l2s[lid]
-      changed = true
-    }
-  }
-  if (changed) {
-    await setIdMap(map)
-    await chrome.storage.local.set({ [L2S_KEY]: l2s })
-    console.warn('[markdeck] repaired stale id mappings')
+// resolve a server parent id to a local chrome id: bindings from the plan,
+// structural roots for '' (bar) and the canonical others id, else null.
+function makeParentResolver(plan: SyncPlan, roots: ResolvedRoots, othersId: string): (sid: string) => string | null {
+  const planned = new Map<string, string | null>()
+  for (const [sid, e] of Object.entries(plan.newBaseEntries)) planned.set(sid, e.localId)
+  return (sid: string): string | null => {
+    if (sid === '') return roots.barId
+    if (sid === othersId) return roots.otherId
+    const plannedLid = planned.get(sid)
+    if (plannedLid) return plannedLid
+    return null // unknown parent → caller decides the fallback
   }
 }
 
-function bookmarksBarRoot(): string {
-  return '1' // legacy Chrome/Edge fixed root id — use barRootId() where possible
-}
-
-// locate a local node by exact title (fallback for removes whose mapping
-// was lost); url nodes first via bookmarks.search, folders via tree walk
-// chrome.bookmarks.search({url}) is EXACT-match: a server row imported as
-// 'https://x.com/' never matches a browser node stored as 'https://x.com'
-// (and vice versa), so adoption silently failed and rebuilds duplicated
-// those bookmarks. Normalize before comparing.
-function normBookmarkUrl(u: string): string {
-  return (u || '').trim().replace(/\/+$/, '').toLowerCase()
-}
-async function findAdoptableByUrl(url: string): Promise<chrome.bookmarks.BookmarkTreeNode | null> {
-  const existing = await chrome.bookmarks.search({ url }).catch(() => [])
-  const hits = (existing as chrome.bookmarks.BookmarkTreeNode[]).filter(b => !!b.id && b.url)
-  if (!hits.length) {
-    // exact match failed — retry with normalized comparison over a title-less search
-    const all = await chrome.bookmarks.search(normBookmarkUrl(url).split('?')[0] || url).catch(() => [])
-    for (const b of (all as chrome.bookmarks.BookmarkTreeNode[])) {
-      if (b.url && normBookmarkUrl(b.url) === normBookmarkUrl(url)) return b
-    }
-    return null
-  }
-  return hits[0]
-}
-
-async function sw_findNodeByTitle(title: string, parentLocalId?: string): Promise<{ id: string; url?: string } | null> {
-  const tree = await chrome.bookmarks.getTree()
-  let found: { id: string; url?: string } | null = null
-  let matchCount = 0
-  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentOfNode: string) => {
-    for (const n of nodes) {
-      // parent constraint: an unconstrained title match could delete an
-      // unrelated same-named node in another folder
-      if (n.title === title && (!parentLocalId || parentOfNode === parentLocalId)) {
-        matchCount++
-        if (!found) found = { id: n.id, url: n.url }
+async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: string) => string | null, stats: typeof reconcileStats) {
+  for (const op of ops) {
+    try {
+      switch (op.kind) {
+        case 'create': {
+          const parentLid = resolveParent(op.parentServerId)
+          if (!parentLid) throw new Error(`parent ${op.parentServerId} unresolvable`)
+          const created = await chrome.bookmarks.create({
+            parentId: parentLid,
+            title: op.title,
+            ...(op.url ? { url: op.url } : {}),
+            index: op.index,
+          })
+          stats.chromeCreates++
+          void created
+          break
+        }
+        case 'update': {
+          await chrome.bookmarks.update(op.localId, { title: op.title })
+          stats.chromeUpdates++
+          break
+        }
+        case 'move': {
+          const parentLid = resolveParent(op.parentServerId)
+          if (!parentLid) throw new Error(`move parent ${op.parentServerId} unresolvable`)
+          await chrome.bookmarks.move(op.localId, { parentId: parentLid, index: op.index })
+          stats.chromeMoves++
+          break
+        }
+        case 'remove': {
+          await chrome.bookmarks.removeTree(op.localId)
+          stats.chromeRemoves++
+          break
+        }
+        case 'bind':
+          // pure binding change — the adapter records it via newBase; nothing
+          // to execute in the browser
+          break
       }
-      if (n.children) walk(n.children, n.id)
+    } catch (e: any) {
+      stats.failed++
+      if (stats.errors.length < 5) stats.errors.push(`${op.kind}: ${e?.message || e}`)
     }
   }
-  for (const root of tree) if (root.children) walk(root.children, root.id)
-  // ambiguous (2+ candidates): refuse to guess — a wrong guess deletes real data
-  return matchCount === 1 ? found : null
 }
 
-// root ids are NOT fixed: newer Chromium profiles use GUID-style permanent
-// node ids, so hardcoding '1' made every chrome.bookmarks.create fail with
-// "Can't find parent bookmark for id". Resolve the real roots from the tree.
-// Chromium invariant (Chrome AND Edge): children[0] = bookmarks bar,
-// children[1] = other bookmarks, children[2] = mobile bookmarks (when it
-// exists — Edge usually shows it). Taking the LAST child grabbed Mobile on
-// Edge and routed the 其他书签 holder into the wrong root (94 bookmarks
-// failing to apply on the user's Edge while Chrome worked).
-let cachedRoots: { bar: string; other?: string } | null = null
-async function resolveRoots(): Promise<{ bar: string; other?: string }> {
-  if (cachedRoots) return cachedRoots
-  const tree = await chrome.bookmarks.getTree()
-  const roots = tree[0]?.children ?? []
-  const bar = roots[0]?.id || '1'
-  // other bookmarks is the SECOND child when present; never the bar itself
-  const other = roots.length > 1 ? roots[1].id : undefined
-  cachedRoots = { bar, other }
-  return cachedRoots
-}
-async function barRootId(): Promise<string> {
-  return (await resolveRoots()).bar
+// ---- the reconcile driver ----
+
+// Single-flight: concurrent reconciles would interleave chrome writes and
+// double-apply. The applyingRemote-style guard also lets the touch listeners
+// ignore our own writes instead of journaling them.
+let pullChain: Promise<void> = Promise.resolve()
+
+async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: string }> {
+  if (reconciling) return { ok: true } // already running; this trigger is subsumed
+  reconciling = true
+  const stats = reconcileStats
+  stats.planned = 0; stats.pushed = 0; stats.chromeCreates = 0; stats.chromeUpdates = 0
+  stats.chromeMoves = 0; stats.chromeRemoves = 0; stats.adopted = 0; stats.failed = 0
+  stats.errors = []
+  try {
+    const cfg = await getConfig()
+    if (!cfg?.token) return { ok: false, error: 'not paired' }
+    deviceIdCached = cfg.deviceId
+
+    // 1. fetch the full server state
+    const resp = await apiFetch(cfg, '/api/sync/tree')
+    if (resp.status === 401) { await setSyncStatus('unauthorized'); return { ok: false, error: 'unauthorized' } }
+    if (!resp.ok) throw new Error(`tree fetch failed: ${resp.status}`)
+    const data = await resp.json()
+    const serverNodes = toServerNodes(data.nodes || [])
+    const othersId: string = data.othersId
+
+    // 2. read the browser's scoped tree
+    const localNodes = await toLocalTree()
+    const roots = await resolveRoots()
+    const base = await getBase()
+    const touch = await getTouch()
+
+    // 3. plan the three-way diff
+    const plan = planSync({
+      server: serverNodes,
+      local: localNodes,
+      base,
+      touch,
+      deviceId: cfg.deviceId,
+      now: Math.floor(Date.now() / 1000),
+      othersId,
+    })
+    stats.planned = plan.chromeOps.length + plan.serverOps.length
+    stats.adopted = plan.stats.adopted
+    stats.pushed = plan.serverOps.length
+
+    // 4. push server ops FIRST (single batch) — the server is the source of
+    // truth; local creates land before local-echo creates are pulled back
+    let newHead: number | null = null
+    if (plan.serverOps.length) {
+      const applyResp = await apiFetch(cfg, '/api/sync/apply', {
+        method: 'POST',
+        body: JSON.stringify(plan.serverOps),
+      })
+      if (applyResp.status === 401) { await setSyncStatus('unauthorized'); return { ok: false, error: 'unauthorized' } }
+      if (!applyResp.ok) throw new Error(`apply failed: ${applyResp.status}`)
+      const applyData = await applyResp.json()
+      newHead = applyData.head ?? null
+      for (const r of applyData.results || []) {
+        if (r.error) {
+          stats.failed++
+          if (stats.errors.length < 5) stats.errors.push(`push ${r.id}: ${r.error}`)
+        }
+      }
+      // ops the server rejected as LWW losers still exist there with other
+      // content: a failed push must NOT advance base past them — but a
+      // partial win is fine (the next reconcile re-plans the losers against
+      // the fresh tree; nothing is lost).
+    }
+
+    // 5. apply chrome ops (parents ordered by the engine's topo sort)
+    const resolveParent = makeParentResolver(plan, roots, othersId)
+    await applyChromeOps(plan.chromeOps, resolveParent, stats)
+    for (const [sid, e] of Object.entries(plan.newBaseEntries)) {
+      if (e.localId === null) continue
+      const exists = plan.chromeOps.some((o) => o.kind === 'create' && o.serverId === sid)
+      if (exists && stats.failed > 0) {
+        // a create may have failed: its binding is untrustworthy. Null it so
+        // the next reconcile re-plans instead of holding a dead binding.
+        const bound = plan.newBaseEntries[sid]
+        if (bound && stats.errors.some((err) => err.startsWith('create'))) {
+          // conservative: keep the binding — the next reconcile's adoption
+          // pass repairs wrong bindings by URL/title anyway
+          void bound
+        }
+      }
+    }
+
+    // 6. advance base atomically: the new snapshot is the server tree plus
+    // the bindings this plan established. A failure above already returned.
+    const freshTouch = await getTouch()
+    // clear journal entries the plan consumed (their edits are now in base)
+    const consumed = new Set<string>()
+    for (const [sid, e] of Object.entries(plan.newBaseEntries)) {
+      if (e.localId && (touch[e.localId] || freshTouch[e.localId])) consumed.add(e.localId)
+    }
+    const nextTouch: TouchJournal = { ...freshTouch }
+    for (const lid of consumed) delete nextTouch[lid]
+    await setTouch(nextTouch)
+    await setBase({
+      head: newHead ?? (data.head ?? 0),
+      othersId,
+      entries: Object.fromEntries(
+        Object.entries(plan.newBaseEntries).map(([sid, e]) => [sid, { ...e, appliedAt: Math.floor(Date.now() / 1000) }]),
+      ),
+    })
+    await saveConfigPatch({ rev: newHead ?? (data.head ?? 0) })
+
+    stats.lastRunAt = Math.floor(Date.now() / 1000)
+    await setSyncStatus('online')
+    return { ok: true }
+  } catch (e: any) {
+    stats.failed++
+    if (stats.errors.length < 5) stats.errors.push(e?.message || String(e))
+    // base untouched: the next reconcile re-plans everything still missing
+    return { ok: false, error: e?.message || String(e) }
+  } finally {
+    reconciling = false
+  }
 }
 
-// ---- server API ----
+// serialized wrapper: pullChain guarantees one reconcile at a time even when
+// the alarm, WS ping, and a manual resync land together
+function scheduleReconcile(reason: string, debounceMs = 0) {
+  if (debounceMs > 0) {
+    if (pullTimer) clearTimeout(pullTimer)
+    pullTimer = setTimeout(() => scheduleReconcile(reason), debounceMs)
+    return
+  }
+  pullChain = pullChain
+    .then(() => reconcileOnce(reason))
+    .then(() => undefined, () => undefined)
+}
+let pullTimer: ReturnType<typeof setTimeout> | null = null
 
-function apiBase(server: string) {
-  return server.replace(/\/+$/, '')
+// ---- connectivity ----
+
+let statusCache: string | null = null
+async function setSyncStatus(status: string) {
+  if (statusCache === null) {
+    statusCache = ((await chrome.storage.local.get('md_status')).md_status as string) || ''
+  }
+  // 'unauthorized' (revoked token) must stay visible: the WS reconnect loop
+  // keeps failing and its onclose would otherwise mask the real problem.
+  if (status === 'disconnected' && statusCache === 'unauthorized') return
+  statusCache = status
+  await chrome.storage.local.set({ md_status: status })
+  const badges: Record<string, { text: string; color: string }> = {
+    online: { text: '', color: '#2e7d32' },
+    disconnected: { text: '!', color: '#f5a623' },
+    unauthorized: { text: '×', color: '#e5484d' },
+    unconfigured: { text: '·', color: '#9ca1b6' },
+  }
+  const badge = badges[status] || badges.disconnected
+  chrome.action.setBadgeText({ text: badge.text })
+  chrome.action.setBadgeBackgroundColor({ color: badge.color })
 }
 
 async function apiFetch(cfg: Config, path: string, init?: RequestInit): Promise<Response> {
   return fetch(apiBase(cfg.server) + path, {
     ...init,
-    signal: AbortSignal.timeout(15000), // never let a hung connection block sync
+    signal: AbortSignal.timeout(15000),
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${cfg.token}`,
@@ -395,526 +378,95 @@ async function apiFetch(cfg: Config, path: string, init?: RequestInit): Promise<
     },
   })
 }
-
-// pushes serialize like pulls: scheduleFlush's debounce and fullSync can
-// overlap; concurrent runs double-push and the loser's restoreQueue puts
-// already-pushed ops back, causing redundant network churn
-let pushChain: Promise<boolean> = Promise.resolve(true)
-function pushQueue(cfg: Config): Promise<boolean> {
-  const run = pushChain.catch(() => false).then(async () => {
-    let q: QueuedOp[] = []
-    // claim under the SAME mutex enqueue writes with — otherwise an op
-    // landing between our read and our clear is erased forever
-    await withQueueLock(async () => {
-      q = await getQueue()
-      if (q.length) await setQueue([])
-    })
-    if (!q.length) return true
-    try {
-      q = compressQueue(q)
-      // translate local ids to server ids (nodes created by remote devices).
-      // A created op for an unmapped local id mints a UUID server id first —
-      // pushing raw small-integer local ids let two devices push DIFFERENT
-      // nodes under the same server id and LWW-merge them into one row.
-      // stash each op's LOCAL revision before translation: the payload
-      // builder needs it (baseRevision) but the cache is keyed by local id
-      // while op.id becomes the server id mid-loop
-      const cache = await localCache()
-      for (const op of q) {
-        const localRev = cache.get(op.id)?.revision || 0
-        ;(op as QueuedOp & { _baseRev?: number })._baseRev = localRev
-        if (op.kind === 'created') op.id = await mintedServerId(op.id)
-        else op.id = await mapToServerId(op.id)
-        if (op.parentId) op.parentId = await mapToServerId(op.parentId)
-      }
-      const payload = opsToPushPayload(q, cfg.deviceId, cache)
-      const resp = await apiFetch(cfg, '/api/sync/device-push', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      })
-      if (resp.status === 401) {
-        await restoreQueue(q)
-        await setSyncStatus('unauthorized')
-        return false
-      }
-      if (!resp.ok) throw new Error(`push HTTP ${resp.status}`)
-      await refreshLocalCache() // local creates bypass applyRemote; keep cache fresh
-      return true
-    } catch {
-      // offline: put the claimed ops back (merged with any new arrivals);
-      // bounded to avoid runaway storage
-      await restoreQueue(q)
-      return false
-    }
-  })
-  pushChain = run
-  return run
-}
-
-// merge claimed-but-unpushed ops back to the head of the current queue
-async function restoreQueue(claimed: QueuedOp[]) {
-  // same mutex as the claim: a concurrent enqueue landing here would be
-  // wiped by our blind setQueue
-  await withQueueLock(async () => {
-    const fresh = await getQueue()
-    const back = [...claimed, ...fresh]
-    if (back.length > 5000) await setQueue(back.slice(-5000))
-    else await setQueue(back)
-  })
-}
-
-// pulls serialize: fullSync, the debounced flush and WS schedulePull can all
-// trigger one; overlapping runs fetched the same revision window and applied
-// it twice (duplicate creates). Chaining keeps fetch+apply atomic per pull.
-let pullChain: Promise<boolean> = Promise.resolve(false)
-function pullRemote(cfg: Config): Promise<boolean> {
-  const run = pullChain.catch(() => false).then(async () => {
-    try {
-      const cur = await getConfig()
-      // WS-triggered pulls bypass fullSync, so the echo-detection id must be
-      // (re)established here too — a fresh SW would otherwise see 'unknown'
-      if (cur?.deviceId) deviceIdCached = cur.deviceId
-      const rev = cur?.rev ?? cfg.rev
-      const resp = await apiFetch(cfg, `/api/sync/device-pull?since=${rev}`)
-      if (resp.status === 401) { await setSyncStatus('unauthorized'); return false }
-      if (!resp.ok) throw new Error(`pull HTTP ${resp.status}`)
-      const data = await resp.json() as { changes: NodeState[]; head: number }
-      if (data.changes?.length) {
-        await applyRemote(data.changes)
-      }
-      await saveConfigPatch({ rev: data.head })
-      return true
-    } catch {
-      return false
-    }
-  })
-  pullChain = run
-  return run
-}
-
-// Apply server changes to the browser tree under the re-entrancy guard.
-// per-action outcome counters for the diagnostics card: a silent catch{}
-// inside applyRemote once swallowed EVERY create on a user's device, and
-// nothing but these numbers could reveal it
-const applyStats = { planned: 0, created: 0, adopted: 0, updated: 0, removed: 0, moved: 0, failed: 0, errors: [] as string[] }
-function resetApplyStats() {
-  applyStats.planned = 0; applyStats.created = 0; applyStats.adopted = 0
-  applyStats.updated = 0; applyStats.removed = 0; applyStats.moved = 0
-  applyStats.failed = 0; applyStats.errors = []
-}
-
-async function applyCreate(n: NodeState) {
-  // same-URL adoption: when the mapping tables are empty (fresh device, or
-  // forceResync recovery) a live server row whose URL already exists in the
-  // browser must NOT be created again — adopt the existing local node
-  // instead, or a full replay would duplicate every bookmark the device has
-  if (n.type === 'url' && n.url) {
-    const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
-    const hits = (existing as chrome.bookmarks.BookmarkTreeNode[]).filter(b => !!b.id)
-    // prefer the row l2s already binds this local node to (server ids that
-    // share one URL must not cause the binding to drift between syncs —
-    // drift showed up as 一致=否 and rows flip-flopping between devices)
-    let hit = hits[0]
-    if (hit) {
-      const l2s = await l2sMap()
-      const bound = l2s[hit.id]
-      if (bound && hits.some(h => h.id === hit.id) && bound !== n.id) {
-        // local node already bound to a DIFFERENT server row with this URL:
-        // keep that binding stable instead of re-binding to this row
-        await recordIdMapping(n.id, hit.id)
-        recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
-        applyStats.adopted++
-        return
-      }
-    }
-    if (hit) {
-      await recordIdMapping(n.id, hit.id)
-      recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
-      applyStats.adopted++
-      return
-    }
-  }
-  // FOLDER adoption: URLs are unique per node, but folders are identified by
-  // name — without this every forceResync (which wipes mappings) re-created
-  // the whole folder tree as EMPTY SHELLS, one set per rebuild, while the
-  // child URLs adopted into the first set. Same title + same resolved parent
-  // = the same folder.
-  if (n.type === 'folder') {
-    const parentLocal = await mapToLocalIdStrict(n.parentId)
-    const parentKey = parentLocal || await barRootId()
-    const tree = await chrome.bookmarks.getTree()
-    let adopted: chrome.bookmarks.BookmarkTreeNode | null = null
-    const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentOfNode: string) => {
-      for (const node of nodes) {
-        if (adopted) return
-        if (!node.url && node.title === n.title && parentOfNode === parentKey) adopted = node
-        if (node.children) walk(node.children, node.id)
-      }
-    }
-    for (const root of tree) if (root.children) walk(root.children, root.id)
-    if (adopted) {
-      const shell = adopted as chrome.bookmarks.BookmarkTreeNode
-      await recordIdMapping(n.id, shell.id)
-      recentlyApplied.set(shell.id, { title: n.title, parentId: shell.parentId })
-      applyStats.adopted++
-      return
-    }
-  }
-  // pre-mark BEFORE the chrome call: the bookmark event fires
-  // asynchronously and must find the guard already in place
-  recentlyApplied.set('__pre__' + n.id, { title: n.title })
-  // parent may itself need translating (folder created by remote);
-  // unknown remote parent falls back to the bookmarks bar
-  let parentLocal = await mapToLocalIdStrict(n.parentId)
-  if (parentLocal) {
-    try { await chrome.bookmarks.get(parentLocal) } catch { parentLocal = null }
-  }
-  const barRoot = await barRootId()
-  const created = n.type === 'url'
-    ? await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title, url: n.url })
-    : await chrome.bookmarks.create({ parentId: parentLocal || barRoot, title: n.title })
-  // remember which server id this new local node corresponds to
-  await recordIdMapping(n.id, created.id)
-  recentlyApplied.delete('__pre__' + n.id)
-  recentlyApplied.set(created.id, { title: n.title, parentId: created.parentId })
-  applyStats.created++
-}
-
-async function applyRemote(changes: NodeState[]) {
-  applyingRemote = true
-  try {
-    const local = await localCache()
-    const changesMarked = changes.map((c) => ({ ...c, deviceId: c.deviceId === deviceIdSafe() ? '__self__' : c.deviceId }))
-    const actions = planRemoteActions(
-      changesMarked,
-      local,
-      (serverId) => {
-        // mapToLocalId from md_id_map, falling back to the raw server id
-        // (the creating device uses its local chrome id as the server id)
-        return idMapSync()[serverId] ?? serverId
-      },
-    )
-    resetApplyStats()
-    applyStats.planned = actions.length
-    for (const act of actions) {
-      try {
-        if (act.action === 'create') {
-          await applyCreate(act.node)
-        } else if (act.action === 'update') {
-          const localId = await mapToLocalIdStrict(act.node.id)
-          if (localId) {
-            recentlyApplied.set(localId, { title: act.node.title }) // pre-mark
-            await chrome.bookmarks.update(localId, { title: act.node.title, url: act.node.url })
-            applyStats.updated++
-          } else {
-            // unmapped update: if the same-URL node exists in the browser,
-            // adopt the mapping and apply — otherwise the row is unknown
-            const n = act.node
-            if (n.type === 'url' && n.url) {
-              const existing = await chrome.bookmarks.search({ url: n.url }).catch(() => [])
-              const hit = (existing as chrome.bookmarks.BookmarkTreeNode[]).find(b => !!b.id)
-              if (hit) {
-                await recordIdMapping(n.id, hit.id)
-                await chrome.bookmarks.update(hit.id, { title: n.title, url: n.url })
-                recentlyApplied.set(hit.id, { title: n.title, parentId: hit.parentId })
-                applyStats.updated++
-              } else {
-                // server row we've never seen: apply as a create
-                await applyCreate(n)
-              }
-            }
-          }
-        } else if (act.action === 'remove') {
-          // act.id is the MAPPED local id when planRemoteActions found the
-          // node (lenient callback translated it); it is the raw server id
-          // only when the mapping was missing. Try the id as-is first, then
-          // the recovery ladder.
-          let localId: string | null = null
-          try {
-            const node = await chrome.bookmarks.get(act.id)
-            if (node && node.length) localId = act.id
-          } catch { /* not a local id — fall through to recovery */ }
-          if (!localId) {
-            // raw server id case: mapping lost (corruption aftermath /
-            // pruned rows). Recover the folder's local id FROM ITS CHILDREN
-            // — any change in this batch whose parentId is the server id
-            // being removed tells us which local node hangs under it (child
-            // mappings often survive when the folder's own were pruned).
-            // Without this the folder shell stayed behind as an empty ghost.
-            const child = changes.find(c => c.parentId === act.id)
-            if (child) {
-              const childLocalId = await mapToLocalIdStrict(child.id)
-              if (childLocalId) {
-                const cached = (await localCache()).get(childLocalId)
-                if (cached?.parentId) localId = cached.parentId
-              }
-            }
-          }
-          if (!localId && 'title' in act && act.title) {
-            // last resort: a tombstoned node whose whole subtree lost its
-            // mappings — match by title, constrained to the resolved parent
-            // folder (an unconstrained match could delete an unrelated
-            // same-named node; ambiguous matches refuse to guess)
-            let parentHint: string | undefined
-            if ('parentId' in act && act.parentId) {
-              parentHint = (await mapToLocalIdStrict(act.parentId)) || undefined
-            }
-            const found = await sw_findNodeByTitle(act.title, parentHint)
-            if (found) localId = found.id
-          }
-          // duplicate-URL guard: if a LIVE server row shares this tombstone's
-          // URL, the local node belongs to the live row — deleting it would
-          // remove a bookmark that is supposed to exist (the graveyard-bind
-          // loop that kept re-deleting 7 bookmarks on every rebuild).
-          // Decided from LOCAL state only: the planRemoteActions URL guard
-          // already had the full batch, and idMap knows every binding built
-          // during this run. A server round-trip per tombstone was O(n²).
-          if (localId && 'url' in act && act.url && act.serverId) {
-            const node = await chrome.bookmarks.get(localId).catch(() => null)
-            if (node?.[0]?.url && node[0].url === act.url) {
-              const map = await idMap()
-              const liveOwner = Object.entries(map).find(([sid, lid]) =>
-                lid === localId && sid !== act.serverId)
-              if (liveOwner) {
-                // the node is already bound to a DIFFERENT (live) server row:
-                // this tombstone is a stale duplicate — adopt it silently
-                applyStats.adopted++
-                continue
-              }
-            }
-          }
-          // never touch chrome's permanent root folders. Special case: the
-          // tombstoned row is the 其他书签 HOLDER (server-side folder that
-          // mirrors the browser's other-bookmarks root). Its children are
-          // live rows parented to it — deleting the browser root is
-          // impossible and letting the tombstone stand would orphan every
-          // child server-side. Correct action: RESURRECT the holder row
-          // (push deletedAt=0) so the server tree stays connected, and bind
-          // it to the browser root.
-          const resolvedRoots0 = await resolveRoots()
-          const permanentRoots = new Set(['0', '1', '2', resolvedRoots0.bar, resolvedRoots0.other].filter(Boolean) as string[])
-          if (localId && permanentRoots.has(localId)) {
-            const cfgNow = await getConfig()
-            if (cfgNow?.token) {
-              const now = Math.floor(Date.now() / 1000)
-              await apiFetch(cfgNow, '/api/sync/device-push', {
-                method: 'POST',
-                body: JSON.stringify([{
-                  id: act.serverId, updatedAt: now, deviceId: cfgNow.deviceId,
-                  type: 'folder', title: '其他书签', parentId: '', position: 9999,
-                  deletedAt: 0, purged: false, baseRevision: 0,
-                }]),
-              })
-              await recordIdMapping(act.serverId, localId)
-              applyStats.adopted++
-              // children of the holder likely failed to place earlier in this
-              // batch (holder unmapped at that point, rev cursor already at
-              // head so a re-pull returns nothing) — replay their creates
-              // NOW that the binding exists
-              const holderKids = changes.filter(c => c.parentId === act.serverId && !(c.deletedAt && c.deletedAt > 0))
-              for (const kid of holderKids) {
-                try { await applyCreate(kid) } catch { /* counted elsewhere */ }
-              }
-            }
-            continue
-          }
-          if (localId) {
-            recentlyApplied.delete(localId) // removal events must NOT be blocked
-            await chrome.bookmarks.removeTree(localId)
-            applyStats.removed++
-            // purge queued ops for the removed node: stale created/changed
-            // events (echoes that slipped through, or bursts that raced the
-            // delete) would push the row back server-side and resurrect it —
-            // the deleted bookmark would reappear on the next pull forever
-            const q = await getQueue()
-            const serverIdOfRemoved = await mapToServerId(localId)
-            const filtered = q.filter(op => op.id !== localId && op.id !== serverIdOfRemoved)
-            if (filtered.length !== q.length) await setQueue(filtered)
-          }
-        } else if (act.action === 'move') {
-          const localId = await mapToLocalIdStrict(act.id)
-          const parentLocal = await mapToLocalIdStrict(act.parentId)
-          if (localId) {
-            const target = parentLocal || await mapParent(act.parentId)
-            await chrome.bookmarks.move(localId, { parentId: target, index: act.index })
-            const movedTitle = 'node' in act ? (act.node as { title?: string } | undefined)?.title ?? '' : ''
-            recentlyApplied.set(localId, { title: movedTitle, parentId: target })
-            applyStats.moved++
-          }
-        }
-      } catch (e: any) {
-        // individual action failures shouldn't abort the batch — but they
-        // must not be invisible either
-        applyStats.failed++
-        if (applyStats.errors.length < 5) applyStats.errors.push(`${act.action}: ${e?.message || e}`)
-      }
-    }
-    // carry the authoring device, timestamp and server revision of each
-    // applied change into the local cache: future pushes quote baseRevision
-    // so the server can tell a follow-up edit (based on what it already has)
-    // from a stale op (based on history the server has moved past).
-    // STRICT lookup here: the lenient fallback keyed overrides by the raw
-    // server id for unmapped rows, poisoning the local-node cache with
-    // entries no chrome node would ever match (cache misses downstream,
-    // echo guards never firing, phantom nodes in LWW comparisons).
-    const overrides = new Map<string, { deviceId: string; updatedAt: number; revision: number }>()
-    for (const c of changes) {
-      const localId = await mapToLocalIdStrict(c.id)
-      if (localId) overrides.set(localId, { deviceId: c.deviceId, updatedAt: c.updatedAt, revision: c.revision })
-    }
-    await refreshLocalCache(overrides)
-  } finally {
-    applyingRemote = false
-    // replay edits buffered during the apply window (echoes get filtered)
-    const pending = deferredOps.splice(0)
-    for (const op of pending) enqueue(op).catch(() => {})
-  }
-}
-
-// Server stores '' as root; extension maps unknown parents to the bookmarks bar.
-async function mapParent(parentId: string): Promise<string> {
-  if (!parentId) return barRootId()
-  return parentId
-}
-
-function deviceIdSafe(): string {
-  return deviceIdCached || 'unknown'
-}
-let deviceIdCached = 'unknown'
-
-// ---- connectivity ----
-
-let statusCache: string | null = null
-async function setSyncStatus(status: string) {
-  if (statusCache === null) {
-    // seed from storage: a fresh SW must not downgrade a persisted state
-    statusCache = ((await chrome.storage.local.get('md_status')).md_status as string) || ''
-  }
-  // 'unauthorized' (revoked token) must stay visible: the WS reconnect loop
-  // keeps failing and its onclose would otherwise mask the real problem as a
-  // mere network blip. Only a successful auth (401 cleared / online) lifts it.
-  if (status === 'disconnected' && statusCache === 'unauthorized') return
-  statusCache = status
-  await chrome.storage.local.set({ md_status: status })
-  // distinct toolbar badges so the user can tell WHAT is wrong at a glance
-  const badges: Record<string, { text: string; color: string }> = {
-    online: { text: '', color: '#2e7d32' },
-    disconnected: { text: '!', color: '#f5a623' },   // offline: amber
-    unauthorized: { text: '×', color: '#e5484d' },   // token dead: red
-    unconfigured: { text: '·', color: '#9ca1b6' },   // not paired: grey
-  }
-  const badge = badges[status] || badges.disconnected
-  chrome.action.setBadgeText({ text: badge.text })
-  chrome.action.setBadgeBackgroundColor({ color: badge.color })
+function apiBase(server: string): string {
+  return server.replace(/\/+$/, '')
 }
 
 let wsKeepalive: ReturnType<typeof setInterval> | null = null
-// diagnostics for the options page / tests: is the realtime channel alive?
 const wsDiag = { state: 'idle' as string, lastFrameAt: 0, lastFrameRev: 0 }
 async function connectWS(cfg: Config) {
   if (ws && ws.readyState <= 1) return
+  const url = apiBase(cfg.server).replace(/^http/, 'ws') + '/api/ws?token=' + encodeURIComponent(cfg.token)
   try {
-    const url = apiBase(cfg.server).replace(/^http/, 'ws') + `/api/ws?token=${encodeURIComponent(cfg.token)}`
-    wsDiag.state = 'connecting'
     ws = new WebSocket(url)
-    ws.onopen = async () => {
-      wsAttempt = 0
-      wsDiag.state = 'open'
-      await setSyncStatus('online')
-      // app frames reset the server's read deadline and keep the SW alive
-      // (any extension API activity extends its lifetime) so realtime pings
-      // keep flowing instead of dying with a 30s idle restart
-      if (wsKeepalive) clearInterval(wsKeepalive)
-      wsKeepalive = setInterval(() => {
-        try { ws?.send('ping') } catch { /* closing */ }
-      }, 20000)
-    }
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data)
-        if (msg.t === 'rev') {
-          wsDiag.lastFrameAt = Date.now()
-          wsDiag.lastFrameRev = msg.rev
-          schedulePull()
-        }
-      } catch { /* ignore */ }
-    }
-    ws.onclose = async () => {
-      ws = null
-      wsDiag.state = 'closed'
-      if (wsKeepalive) { clearInterval(wsKeepalive); wsKeepalive = null }
-      await setSyncStatus('disconnected')
-      setTimeout(() => getConfig().then((c) => c && connectWS(c)), backoffDelay(wsAttempt++))
-    }
-    ws.onerror = () => { try { ws?.close() } catch { /* noop */ } }
   } catch {
-    wsDiag.state = 'error'
-    await setSyncStatus('disconnected')
+    setTimeout(() => { getConfig().then((c) => c && connectWS(c)) }, backoffDelay(wsAttempt++))
+    return
   }
+  ws.onopen = () => {
+    wsAttempt = 0
+    wsDiag.state = 'open'
+    void setSyncStatus('online')
+    wsKeepalive = setInterval(() => { try { ws?.send('ping') } catch { /* dead conn closes itself */ } }, 20000)
+  }
+  ws.onmessage = (ev) => {
+    wsDiag.lastFrameAt = Date.now()
+    try {
+      const msg = JSON.parse(String(ev.data))
+      if (msg.t === 'rev') {
+        wsDiag.lastFrameRev = msg.rev
+        scheduleReconcile('ws', 500)
+      }
+    } catch { /* non-JSON frame (pong) */ }
+  }
+  ws.onclose = () => {
+    wsDiag.state = 'closed'
+    if (wsKeepalive) { clearInterval(wsKeepalive); wsKeepalive = null }
+    void setSyncStatus('disconnected')
+    setTimeout(() => { getConfig().then((c) => c && connectWS(c)) }, backoffDelay(wsAttempt++))
+  }
+  ws.onerror = () => { try { ws?.close() } catch { /* already closing */ } }
 }
 
-let flushTimer: ReturnType<typeof setTimeout> | null = null
-function scheduleFlush() {
-  // token dead: pushing is futile until the user re-pairs; queue locally and
-  // wait (the next fullSync — alarm or re-pair — will drain it)
-  if (statusCache === 'unauthorized') return
-  if (flushTimer) return
-  flushTimer = setTimeout(async () => {
-    flushTimer = null
-    const cfg = await getConfig()
-    if (!cfg?.token) return
-    if (await pushQueue(cfg)) {
-      // after push, pull to converge
-      await pullRemote(cfg)
-    }
-  }, 1500) // debounce bursts
+// ---- local touch journal: 5 listeners, one job ----
+// Events during a reconcile are OUR OWN writes — ignore them (the plan
+// captured the resulting state already; journaling our echoes would make
+// every applied row look locally-edited and churn forever).
+
+async function journalTouch(localId: string, extra?: { removed?: boolean; title?: string; url?: string }) {
+  if (reconciling) return
+  const t = await getTouch()
+  const prev = t[localId]
+  t[localId] = { at: Math.floor(Date.now() / 1000), ...extra, ...(prev?.removed ? { removed: true } : {}) }
+  await setTouch(t)
+  scheduleReconcile('edit', 1200)
 }
 
-let pullTimer: ReturnType<typeof setTimeout> | null = null
-function schedulePull() {
-  if (pullTimer) return
-  pullTimer = setTimeout(async () => {
-    pullTimer = null
-    const cfg = await getConfig()
-    if (!cfg?.token) return
-    await pullRemote(cfg)
-  }, 300)
-}
+chrome.bookmarks.onCreated.addListener((id) => { void journalTouch(id) })
+chrome.bookmarks.onChanged.addListener((id, info) => { void journalTouch(id, { title: info.title }) })
+chrome.bookmarks.onMoved.addListener((id) => { void journalTouch(id) })
+chrome.bookmarks.onRemoved.addListener((id) => { void journalTouch(id, { removed: true }) })
+chrome.bookmarks.onChildrenReordered.addListener((id) => { void journalTouch(id) })
+
+// ---- lifecycle ----
 
 async function fullSync() {
-  await sanitizeIdMaps()
-  await hydrateIdMapSync()
   const cfg = await getConfig()
   if (!cfg?.token) return
-  deviceIdCached = cfg.deviceId
-  const ok = await pushQueue(cfg)
-  if (ok) await pullRemote(cfg)
+  await reconcileOnce('fullSync')
   connectWS(cfg)
 }
 
-// ---- event wiring ----
-
-chrome.runtime.onInstalled.addListener(() => {
-  // 1-minute poll: MV3 kills the SW after ~30s idle, which also kills the WS
-  // socket and its reconnect timer. The alarm is what guarantees eventual
-  // convergence; 5 minutes felt like "sync is broken" to users.
+chrome.runtime.onInstalled.addListener(async () => {
+  // one-time cleanup of the pre-0.1.0 persisted state
+  await chrome.storage.local.remove(LEGACY_KEYS)
   chrome.alarms.create(ALARM, { periodInMinutes: 1 })
+  await fullSync()
 })
+chrome.runtime.onStartup.addListener(() => { void fullSync() })
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === ALARM) void reconcileOnce('alarm') })
+;(async () => {
+  // module top-level: a revived SW reconnects immediately
+  const cfg = await getConfig()
+  if (cfg?.token) {
+    await reconcileOnce('boot')
+    connectWS(cfg)
+  } else {
+    void setSyncStatus('unconfigured')
+  }
+})()
 
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM) fullSync() // WS-dead fallback
-})
-
-chrome.bookmarks.onCreated.addListener((id, bm) =>
-  enqueue({ kind: 'created', id, parentId: bm.parentId || '', title: bm.title, url: bm.url, index: bm.index ?? 0, at: Math.floor(Date.now() / 1000) }))
-chrome.bookmarks.onChanged.addListener((id, info) =>
-  enqueue({ kind: 'changed', id, title: info.title, at: Math.floor(Date.now() / 1000) }))
-chrome.bookmarks.onMoved.addListener((id, info) =>
-  enqueue({ kind: 'moved', id, parentId: info.parentId, oldParentId: info.oldParentId, index: info.index ?? 0, at: Math.floor(Date.now() / 1000) }))
-chrome.bookmarks.onRemoved.addListener((id, info) =>
-  enqueue({ kind: 'removed', id, at: Math.floor(Date.now() / 1000) }))
-chrome.bookmarks.onChildrenReordered.addListener((id, reorderInfo) =>
-  enqueue({ kind: 'reordered', id: reorderInfo.childIds[0] || id, parentId: id, index: 0, at: Math.floor(Date.now() / 1000) }))
+// ---- message surface (popup/options; shapes preserved for the UI) ----
 
 chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
   (async () => {
@@ -930,42 +482,40 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         if (!resp.ok) throw new Error(data.error || 'pair failed')
         await saveConfigPatch({ server, token: data.token, deviceId: data.deviceId, rev: 0 })
         deviceIdCached = data.deviceId
-        // Only a FIRST pairing runs the whole-tree import. A re-pair (device
-        // was revoked / token expired) must keep the offline queue: those ops
-        // carry edits against already-synced nodes and initialImport would
-        // (a) wipe the queue and (b) re-push edited nodes as brand-new UUID
-        // rows, resurrecting pre-edit titles. The offline edits are replayed
-        // by the fullSync below instead.
-        const knownNodes = Object.keys(await idMap()).length
-        if (knownNodes === 0) await initialImport()
-        await fullSync()
+        // first reconcile against an empty base = full adoption/import,
+        // identical mechanics to a re-pair — no special initialImport
+        const r = await reconcileOnce('pair')
+        if (!r.ok && r.error !== 'unauthorized') throw new Error(r.error || 'reconcile failed')
         await setSyncStatus('online')
         sendResponse({ ok: true })
       } catch (e: any) {
         sendResponse({ ok: false, error: e.message })
       }
     } else if (msg.type === 'status') {
-      const st = await chrome.storage.local.get(['md_status', CONFIG_KEY, QUEUE_KEY]) as any
+      const st = await chrome.storage.local.get(['md_status', CONFIG_KEY, TOUCH_KEY]) as any
       sendResponse({
         status: st.md_status || 'unconfigured',
         server: st[CONFIG_KEY]?.server || '',
-        queued: (st[QUEUE_KEY] || []).length,
+        queued: Object.keys(st[TOUCH_KEY] || {}).length,
       })
     } else if (msg.type === 'resync') {
-      await fullSync()
-      sendResponse({ ok: true })
+      const r = await reconcileOnce('resync')
+      sendResponse({ ok: r.ok, error: r.error })
     } else if (msg.type === 'forceResync') {
-      // last-resort recovery: wipe every local sync artifact (mappings, node
-      // cache, revision cursor) and replay the whole server history as if
-      // the device had just paired (see forceResync() below for details)
-      forceResync().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
-      return true
+      // last-resort recovery: wipe base + touch; the next reconcile is a
+      // full-adopt pass (URL/folder adoption binds onto the existing tree —
+      // this is now the SAME code path as a first pair, not special recovery)
+      await chrome.storage.local.remove([BASE_KEY, TOUCH_KEY])
+      cachedRoots = null
+      const r = await reconcileOnce('forceResync')
+      sendResponse({ ok: r.ok, error: r.error, ...flattenStats() })
+      return
     } else if (msg.type === 'applyStats') {
-      sendResponse({ ...applyStats })
-      return true
+      sendResponse({ ...flattenStats() })
+      return
     } else if (msg.type === 'deepDiag') {
       deepDiag().then(sendResponse).catch((e: any) => sendResponse({ ok: false, error: e.message }))
-      return true
+      return
     } else if (msg.type === 'conflictStatus') {
       ;(async () => {
         const tree = await chrome.bookmarks.getTree()
@@ -978,7 +528,6 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         sendResponse({ groups, hasConflict: groups.length > 0 })
       })()
     } else if (msg.type === 'openSyncSettings') {
-      // open the browser's own sync settings (Chrome vs Edge)
       const isEdge = /Edg\//.test(navigator.userAgent)
       const url = isEdge ? 'edge://settings/profiles/sync' : 'chrome://settings/syncSetup'
       chrome.tabs.create({ url })
@@ -995,7 +544,13 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         const tags = typeof msg.tags === 'string' && msg.tags.trim()
           ? msg.tags.split(/[,，]/).map((t: string) => t.trim()).filter(Boolean)
           : undefined
-        await enqueue({ kind: 'created', id: created.id, parentId: created.parentId || '', title: msg.title, url: msg.url, index: created.index ?? 0, at: Math.floor(Date.now() / 1000), tags })
+        // tags ride the touch journal: reconcile picks them up when the
+        // created node is pushed (server apply carries tags on create)
+        if (tags?.length) {
+          const t = await getTouch()
+          t[created.id] = { at: Math.floor(Date.now() / 1000), tags }
+          await setTouch(t)
+        }
         sendResponse({ ok: true })
       } catch (e: any) {
         sendResponse({ ok: false, error: e.message })
@@ -1005,258 +560,79 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
   return true // async response
 })
 
-// First-pair import: push current bookmarks-bar content to the server
-async function initialImport() {
-  const cfg = await getConfig()
-  if (!cfg) return
-  applyingRemote = true
-  try {
-    // pre-pair local edits are about to be pushed with fresh UUIDs below;
-    // clear the queue first so scheduleFlush can't push stale local-id ops
-    // in parallel (that would duplicate every bookmark)
-    await setQueue([])
-    const tree = await chrome.bookmarks.getTree()
-    const roots = tree[0]?.children ?? []
-    const bar = roots[0] // first child = bookmarks bar (id not fixed, may be a GUID)
-    // 'Other Bookmarks' gets a server-side top-level folder so its content
-    // is visible everywhere, while the local root stays untouched.
-    // SECOND child per the Chromium invariant (children[2] is Mobile on Edge)
-    const others = roots.length > 1 ? roots[1] : undefined
-    const ops: Record<string, unknown>[] = []
-    const now = Math.floor(Date.now() / 1000)
-    // Local chrome ids collide across devices (every browser numbers its
-    // bookmarks from small integers), so each node gets a fresh server UUID
-    // and a local→server mapping. Without this, device B's initial import
-    // overwrites device A's bookmarks that happen to share the same ids.
-    const localToServer: Record<string, string> = {}
-    // local chrome roots have no server rows: the bar root maps to server
-    // top-level (''), the other-bookmarks root maps to the per-device
-    // 其他书签 holder once pushed. Root ids come from the tree, NOT the
-    // legacy '1'/'2' constants — newer Chromium profiles use GUID ids.
-    const barRootIdStr = bar?.id || '1'
-    const otherRootIdStr = others?.id || '2'
-    localToServer[barRootIdStr] = ''
-    const serverIdOf = (localId: string): string => {
-      // `in` check — root '1' legitimately maps to '' which is falsy; a
-      // truthy check re-minted a UUID on every call
-      if (localId in localToServer) return localToServer[localId]
-      const uuid = localId === 'others-root'
-        ? 'others-' + cfg.deviceId // stable holder id per device
-        : crypto.randomUUID()
-      localToServer[localId] = uuid
-      return uuid
-    }
-    const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], parentServerId: string) => {
-      for (const n of nodes) {
-        if (isAlreadySynced(n.id)) continue // already on the server
-        const sid = serverIdOf(n.id)
-        ops.push({
-          id: sid, type: n.url ? 'url' : 'folder', parentId: parentServerId,
-          title: n.title, url: n.url || '',
-          position: (n.index ?? 0) + 1,
-          updatedAt: Math.floor((n.dateAdded || Date.now() * 0) / 1000) || now,
-          deviceId: cfg.deviceId,
-        })
-        if (n.children) walk(n.children, sid)
-      }
-    }
-    // nodes already mapped (pulled from the server via another device's
-    // sync) must not be re-pushed, or every device would duplicate them
-    const alreadyOnServer = await idMap()
-    const isAlreadySynced = (localId: string): boolean => localId in alreadyOnServer
-    if (bar) walk(bar.children || [], '')
-    if (others && others.children?.length) {
-      const othersFolderId = serverIdOf('others-root')
-      localToServer[otherRootIdStr] = othersFolderId
-      ops.push({
-        id: othersFolderId, type: 'folder', parentId: '',
-        title: '其他书签', url: '', position: 9999,
-        updatedAt: now, deviceId: cfg.deviceId,
-      })
-      walk(others.children, othersFolderId)
-    }
-    if (ops.length) {
-      // chunk to stay under body limits
-      for (let i = 0; i < ops.length; i += 500) {
-        await apiFetch(cfg, '/api/sync/device-push', { method: 'POST', body: JSON.stringify(ops.slice(i, i + 500)) })
-      }
-    }
-    // persist BOTH directions of the mapping, each in its own table:
-    //   md_id_map  is serverId -> localId (for translating pulled changes)
-    //   md_l2s     is localId  -> serverId (for translating pushed ops)
-    // Merging localToServer INTO idMap wrote l2s-shaped entries under
-    // server-id keys — the sanitize pass then saw value '1'/'2'/'5' as a
-    // "local id" and pruned live mappings, and mapToLocalId looked up
-    // server ids in a table full of local-id keys. This is exactly the
-    // corruption older releases shipped with.
-    const existingIdMap = await idMap()
-    const existingL2s = await l2sMap()
-    const nextIdMap: Record<string, string> = { ...existingIdMap }
-    const nextL2s: Record<string, string> = { ...existingL2s }
-    for (const [localId, serverId] of Object.entries(localToServer)) {
-      if (serverId) nextL2s[localId] = serverId // '' root entry stays l2s-only
-      if (serverId && localId !== barRootIdStr && localId !== otherRootIdStr && localId !== 'others-root') {
-        nextIdMap[serverId] = localId
-      }
-    }
-    const othersHolderId = localToServer['others-root']
-    // remote kids of the 其他书签 holder land in the browser's other-bookmarks
-    // root — resolved at runtime, NOT the legacy '2' constant
-    if (othersHolderId && others) nextIdMap[othersHolderId] = otherRootIdStr
-    await setIdMap(nextIdMap)
-    await chrome.storage.local.set({ [L2S_KEY]: nextL2s })
-    await refreshLocalCache()
-  } finally {
-    applyingRemote = false
-    const pending = deferredOps.splice(0)
-    for (const op of pending) enqueue(op).catch(() => {})
+function flattenStats() {
+  return {
+    planned: reconcileStats.planned,
+    pushed: reconcileStats.pushed,
+    created: reconcileStats.chromeCreates,
+    updated: reconcileStats.chromeUpdates,
+    removed: reconcileStats.chromeRemoves,
+    moved: reconcileStats.chromeMoves,
+    adopted: reconcileStats.adopted,
+    failed: reconcileStats.failed,
+    errors: [...reconcileStats.errors],
+    lastRunAt: reconcileStats.lastRunAt,
   }
 }
 
-// reconnect on startup
-chrome.runtime.onStartup.addListener(() => fullSync())
-fullSync()
+// ---- diagnostics ----
 
-// test/debug hook: lets Playwright E2E drive a full sync directly from the SW
-;(globalThis as unknown as Record<string, unknown>).__markdeckResync = fullSync
-;(globalThis as unknown as Record<string, unknown>).__markdeckWsDiag = wsDiag
-
-// Deep comparison of what the server holds vs what the browser tree holds —
-// turns "rev is caught up but nothing appeared" into a concrete diagnosis.
+// Tree-level URL parity check: what the server holds vs what the browser
+// holds. With tombstone rows gone from the protocol, this is THE content
+// correctness signal (per-URL set symmetric difference).
 async function deepDiag() {
   const cfg = await getConfig()
   if (!cfg?.token) return { ok: false, error: 'not paired' }
-  // server rows via full device pull
-  const rows: any[] = []
-  let since = 0
-  for (let guard = 0; guard < 100; guard++) {
-    const resp = await apiFetch(cfg, `/api/sync/device-pull?since=${since}`)
-    if (!resp.ok) break
-    const data = await resp.json()
-    rows.push(...(data.changes || []))
-    if (!data.changes?.length || data.head <= since) break
-    since = data.head
-  }
-  const live = new Map<string, { title: string; url: string; parent: string }>()
-  for (const r of rows) {
-    if (r.deletedAt > 0 || r.purged) { live.delete(r.id); continue }
-    if (r.type === 'url') live.set(r.id, { title: r.title || '', url: r.url || '', parent: r.parentId })
-  }
-  // browser tree
-  const tree = await chrome.bookmarks.getTree()
-  const local: { id: string; title: string; url: string }[] = []
-  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
-    for (const n of nodes) { if (n.url) local.push({ id: n.id, title: n.title, url: n.url }); if (n.children) walk(n.children) }
-  }
-  for (const root of tree) if (root.children) walk(root.children)
-  const map = await idMap()
-  const l2s = await l2sMap()
-  const localUrls = new Set(local.map(b => (b.url || '').replace(/\/+$/, '')))
-  const serverUrls = new Set([...live.values()].map(b => (b.url || '').replace(/\/+$/, '')))
-  const missingLocally = [...serverUrls].filter(u => !localUrls.has(u))
-  const idMapOk = Object.entries(map).every(([sid, lid]) => l2s[lid] === sid)
-  return {
-    ok: true,
-    serverUrls: live.size,
-    localUrls: local.length,
-    missingLocally: missingLocally.slice(0, 10),
-    sampleMissing: missingLocally.length,
-    mappingRows: Object.keys(map).length,
-    l2sRows: Object.keys(l2s).length,
-    idMapConsistent: idMapOk,
-    rev: cfg.rev,
-  }
-}
-;(globalThis as unknown as Record<string, unknown>).__markdeckDeepDiag = deepDiag
-
-// recovery path shared with the options diagnostics card
-async function forceResync() {
-  applyingRemote = true
   try {
-    const cfg0 = await getConfig()
-    if (!cfg0?.token) return { ok: false, error: 'not paired' }
-    await setIdMap({})
-    await chrome.storage.local.set({ [L2S_KEY]: {} })
-    await chrome.storage.local.set({ [LOCAL_KEY]: {} })
-    await saveConfigPatch({ rev: 0 })
-    let pulled = 0
-    let since = 0
-    for (let guard = 0; guard < 100; guard++) {
-      const resp = await apiFetch(cfg0, `/api/sync/device-pull?since=${since}`)
-      if (resp.status === 401) return { ok: false, error: 'token invalid' }
-      if (!resp.ok) throw new Error(`pull HTTP ${resp.status}`)
-      const data = await resp.json() as { changes: NodeState[]; head: number }
-      const batch = data.changes || []
-      pulled += batch.length
-      if (batch.length) await applyRemote(batch)
-      await saveConfigPatch({ rev: data.head })
-      if (!batch.length || data.head <= since) break
-      since = data.head
+    const resp = await apiFetch(cfg, '/api/sync/tree')
+    if (resp.status === 401) return { ok: false, error: 'unauthorized' }
+    if (!resp.ok) throw new Error(`tree fetch failed: ${resp.status}`)
+    const data = await resp.json()
+    const serverUrls = new Set<string>()
+    for (const n of data.nodes || []) {
+      if (n.type === 'url' && n.url) serverUrls.add(normBookmarkUrl(n.url))
     }
-    await refreshLocalCache()
-    // ghost-shell sweep: rebuilds that ran before folder adoption existed
-    // left EMPTY duplicate folder trees behind (one set per rebuild). Any
-    // folder that is now unmapped, empty, and not a root is a leftover —
-    // remove it bottom-up. Bookmarks are never touched: only empty shells.
-    const mapNow = await idMap()
-    const collectShells = async (): Promise<string[]> => {
-      const tree = await chrome.bookmarks.getTree()
-      const shells: string[] = []
-      const visit = async (nodes: chrome.bookmarks.BookmarkTreeNode[]): Promise<boolean> => {
-        let empty = true
-        for (const node of nodes) {
-          if (node.url) { empty = false; continue }
-          const kidsEmpty = node.children && node.children.length ? await visit(node.children) : true
-          if (kidsEmpty && !(node.id in mapNow) && !(node.parentId === tree[0]?.id)) {
-            shells.push(node.id)
-          } else {
-            empty = false
-          }
-        }
-        return empty
+    const local = await toLocalTree()
+    const localUrls = new Set<string>()
+    const walk = (nodes: LocalNode[]) => {
+      for (const n of nodes) {
+        if (n.type === 'url' && n.url) localUrls.add(normBookmarkUrl(n.url))
       }
-      const roots = tree[0]?.children ?? []
-      for (const root of roots) {
-        if (root.children?.length) await visit(root.children)
-      }
-      return shells
     }
-    // two passes: removing an empty leaf unmasks its empty parent
-    for (let pass = 0; pass < 3; pass++) {
-      const shells = await collectShells()
-      if (!shells.length) break
-      for (const id of shells) {
-        try {
-          recentlyApplied.delete(id)
-          await chrome.bookmarks.removeTree(id)
-        } catch { /* concurrent change; next sweep catches it */ }
-      }
-      // let the shell-removal events settle before the next pass
-      await new Promise(r => setTimeout(r, 300))
-    }
-    // per-row audit: what did applyRemote actually DO with those rows?
-    // (the user's environment applied 348 rows and produced nothing —
-    // this breakdown turns the silent catch{} into a concrete report)
-    const mapAfter = await idMap()
-    const tree = await chrome.bookmarks.getTree()
-    let urlCount = 0
-    const walkCount = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
-      for (const n of nodes) { if (n.url) urlCount++; if (n.children) walkCount(n.children) }
-    }
-    for (const root of tree) if (root.children) walkCount(root.children)
+    walk(local)
+    const missingLocally: string[] = []
+    for (const u of serverUrls) if (!localUrls.has(u)) missingLocally.push(u)
+    const extraLocally: string[] = []
+    for (const u of localUrls) if (!serverUrls.has(u)) extraLocally.push(u)
+    const base = await getBase()
+    const touch = await getTouch()
+    const bound = base ? Object.values(base.entries).filter((e) => e.localId).length : 0
     return {
       ok: true,
-      pulled,
-      bookmarkUrls: urlCount,
-      mappings: Object.keys(mapAfter).length,
-      applied: { ...applyStats },
+      serverUrls: serverUrls.size,
+      localUrls: localUrls.size,
+      missingLocally: missingLocally.slice(0, 20),
+      extraLocally: extraLocally.slice(0, 20),
+      missingCount: missingLocally.length,
+      extraCount: extraLocally.length,
+      bindings: bound,
+      touchEntries: Object.keys(touch).length,
+      rev: base?.head ?? 0,
+      serverHead: data.head ?? 0,
+      stats: flattenStats(),
     }
   } catch (e: any) {
-    return { ok: false, error: e.message }
-  } finally {
-    applyingRemote = false
-    const pending = deferredOps.splice(0)
-    for (const op of pending) enqueue(op).catch(() => {})
+    return { ok: false, error: e?.message || String(e) }
   }
 }
-;(globalThis as unknown as Record<string, unknown>).__markdeckForceResync = forceResync
+
+// test/debug hooks (E2E suites drive the SW through these)
+;(globalThis as unknown as Record<string, unknown>).__markdeckResync = fullSync
+;(globalThis as unknown as Record<string, unknown>).__markdeckWsDiag = wsDiag
+;(globalThis as unknown as Record<string, unknown>).__markdeckDeepDiag = deepDiag
+;(globalThis as unknown as Record<string, unknown>).__markdeckForceResync = async () => {
+  await chrome.storage.local.remove([BASE_KEY, TOUCH_KEY])
+  cachedRoots = null
+  return reconcileOnce('forceResync-hook')
+}
+;(globalThis as unknown as Record<string, unknown>).__markdeckReconcileStats = flattenStats

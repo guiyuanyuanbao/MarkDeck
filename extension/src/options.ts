@@ -186,11 +186,11 @@ async function runDiagnostics() {
       }
     }
 
-    // 5. offline queue
-    const qRaw = (await chrome.storage.local.get('md_queue')).md_queue
-    const q = Array.isArray(qRaw) ? qRaw.length : 0
-    if (q === 0) row(true, '离线队列', '空')
-    else row(null, '离线队列', `${q} 条待推送`)
+    // 5. pending local edits (touch journal replaces the old offline queue)
+    const tRaw = (await chrome.storage.local.get('md_touch')).md_touch || {}
+    const q = Object.keys(tRaw).length
+    if (q === 0) row(true, '待同步改动', '无')
+    else row(null, '待同步改动', `${q} 条待对账`)
 
     // 6. WS realtime channel
     const st = (await chrome.storage.local.get('md_status')).md_status
@@ -214,10 +214,10 @@ async function runDiagnostics() {
       row(false, '内容对比', deep?.error || '查询失败（service worker 未响应）')
     } else {
       row(null, '内容对比', `服务端 ${deep.serverUrls} 条 URL / 浏览器 ${deep.localUrls} 条`)
-      if (deep.sampleMissing === 0) {
+      if ((deep.missingCount ?? 0) === 0) {
         row(true, '书签一致性', '浏览器已包含服务端全部 URL')
       } else {
-        row(false, '书签一致性', `服务端有 ${deep.sampleMissing} 条 URL 浏览器没有（示例: ${deep.missingLocally.slice(0, 3).join(', ')}）`)
+        row(false, '书签一致性', `服务端有 ${deep.missingCount} 条 URL 浏览器没有（示例: ${(deep.missingLocally || []).slice(0, 3).join(', ')}）`)
         fail('拉取已完成但应用环节没有写入浏览器 — 点下方「强制重建同步」')
         // expose the rebuild action next to the failed row
         const card = document.getElementById('diagCard')!
@@ -226,20 +226,18 @@ async function runDiagnostics() {
           const btn = document.createElement('button')
           btn.id = 'rebuildBtn'
           btn.className = 'btn-primary'
-          btn.textContent = '⚡ 强制重建同步（清空映射并重新全量拉取）'
+          btn.textContent = '⚡ 强制重建同步（清空快照并重新全量对账）'
           btn.onclick = async () => {
             btn.disabled = true
             btn.textContent = '重建中…'
             try {
               const resp = await chrome.runtime.sendMessage({ type: 'forceResync' })
               if (resp?.ok) {
-                const a = resp.applied || {}
                 summary.textContent =
-                  `重建完成 — 拉取 ${resp.pulled} 行 | 计划 ${a.planned ?? '?'} | 新建 ${a.created ?? '?'} | ` +
-                  `采纳 ${a.adopted ?? '?'} | 更新 ${a.updated ?? '?'} | 失败 ${a.failed ?? '?'} | ` +
-                  `浏览器现有 ${resp.bookmarkUrls} 条 URL、映射 ${resp.mappings} 条。点「重新检测」确认`
-                if ((a.errors || []).length) {
-                  summary.textContent += ' | 失败样例: ' + a.errors.slice(0, 2).join(' / ')
+                  `重建完成 — 计划 ${resp.planned ?? '?'} | 新建 ${resp.created ?? '?'} | ` +
+                  `采纳 ${resp.adopted ?? '?'} | 更新 ${resp.updated ?? '?'} | 失败 ${resp.failed ?? '?'}。点「重新检测」确认`
+                if ((resp.errors || []).length) {
+                  summary.textContent += ' | 失败样例: ' + resp.errors.slice(0, 2).join(' / ')
                 }
               } else {
                 summary.textContent = '重建失败: ' + (resp?.error || '未知错误')
@@ -252,7 +250,7 @@ async function runDiagnostics() {
           actions.appendChild(btn)
         }
       }
-      row(null, '映射表健康', `server→local ${deep.mappingRows} 条 / local→server ${deep.l2sRows} 条，一致=${deep.idMapConsistent ? '是' : '否'}`)
+      row(null, '绑定健康', `已绑定 ${deep.bindings ?? '?'} 条 / 服务端 ${deep.serverUrls ?? '?'} 条 URL；浏览器缺 ${deep.missingCount ?? '?'} 条、多 ${deep.extraCount ?? '?'} 条`)
     }
   }
 
