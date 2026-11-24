@@ -197,6 +197,26 @@ async function onDropToFolder(folderId: string, ev: DragEvent) {
 
 const folderName = computed(() => currentFolder.value === '' ? '根目录' : flat.value.get(currentFolder.value)?.title || '')
 
+// breadcrumb: root → ... → current folder, every crumb clickable
+const breadcrumbs = computed(() => {
+  const crumbs: { id: string; title: string }[] = [{ id: '', title: '根目录' }]
+  let p = currentFolder.value
+  const chain: { id: string; title: string }[] = []
+  let guard = 0
+  while (p && guard++ < 100) {
+    const n = flat.value.get(p)
+    if (!n) break
+    chain.unshift({ id: n.id, title: n.title })
+    p = n.parentId
+  }
+  return [...crumbs, ...chain]
+})
+
+function goUp() {
+  if (!currentFolder.value) return
+  currentFolder.value = flat.value.get(currentFolder.value)?.parentId || ''
+}
+
 function openUrl(url?: string) {
   if (url) window.open(url, '_blank', 'noopener')
 }
@@ -242,6 +262,18 @@ function fmtDate(ts: number) {
       <div class="content-head">
         <div class="head-top">
           <div>
+            <nav class="crumbs" aria-label="文件夹路径">
+              <template v-for="(c, i) in breadcrumbs" :key="c.id || '__root__'">
+                <span v-if="i > 0" class="crumb-sep">/</span>
+                <button
+                  class="crumb"
+                  :class="{ active: i === breadcrumbs.length - 1 }"
+                  :disabled="i === breadcrumbs.length - 1"
+                  @click="currentFolder = c.id"
+                >{{ c.title }}</button>
+              </template>
+              <button v-if="currentFolder" class="icon-btn up-btn" title="返回上一级" @click="goUp">↑</button>
+            </nav>
             <h1 class="page-title">{{ folderName }}</h1>
             <div class="page-sub">{{ list.length }} 项</div>
           </div>
