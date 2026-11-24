@@ -339,6 +339,13 @@ async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: str
     })
     await saveConfigPatch({ rev: newHead ?? (data.head ?? 0) })
 
+    // 7. favicon sync (best-effort, never fails the reconcile): hosts seen
+    // in this pass get their browser-resolved icon pushed to the server.
+    // The MV3 "favicon" permission serves chrome's own cached icon (with
+    // its Google fallback) via the _favicon/ endpoint — more accurate than
+    // the server fetching favicon.ico itself, and shared to every client.
+    void syncFavicons(serverNodes, cfg)
+
     stats.lastRunAt = Math.floor(Date.now() / 1000)
     await setSyncStatus('online')
     return { ok: true }
@@ -365,6 +372,58 @@ function scheduleReconcile(reason: string, debounceMs = 0) {
     .then(() => undefined, () => undefined)
 }
 let pullTimer: ReturnType<typeof setTimeout> | null = null
+
+// ---- favicon sync (best-effort) ----
+// Pushes browser-resolved site icons to the server so the web UI (and any
+// client) shows the exact icon chrome shows. MV3 serves them from the
+// _favicon/ endpoint (needs the "favicon" permission); each host is fetched
+// once per run and uploaded only when the server doesn't already have a
+// fresh copy — the server 404s unknown hosts, 200s known ones.
+let favFailCount = 0 // consecutive-run error dampener: skip after 3 bad runs
+async function syncFavicons(nodes: ServerNode[], cfg: Config) {
+  if (typeof chrome.runtime.getURL !== 'function') return
+  try {
+    const hosts = new Set<string>()
+    for (const n of nodes) {
+      if (n.type !== 'url' || !n.url) continue
+      try { hosts.add(new URL(n.url).hostname) } catch { /* malformed */ }
+    }
+    if (!hosts.size) return
+    let pushed = 0
+    for (const host of hosts) {
+      try {
+        // server-side probe first: 200 = fresh copy exists, skip
+        const probe = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host), {
+          signal: AbortSignal.timeout(5000),
+        })
+        if (probe.ok) continue
+        // resolve the icon from the browser cache
+        const iconUrl = chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://' + host)}&size=32`)
+        const iconResp = await fetch(iconUrl, { signal: AbortSignal.timeout(5000) })
+        if (!iconResp.ok) continue
+        const buf = await iconResp.arrayBuffer()
+        if (!buf.byteLength || buf.byteLength > 200 * 1024) continue
+        const ctype = iconResp.headers.get('content-type') || 'image/png'
+        const up = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host), {
+          method: 'PUT',
+          headers: { 'Content-Type': ctype, Authorization: `Bearer ${cfg.token}` },
+          body: buf,
+          signal: AbortSignal.timeout(8000),
+        })
+        if (up.ok) pushed++
+      } catch { /* per-host best effort */ }
+    }
+    if (pushed) console.log(`[favicons] pushed ${pushed}/${hosts.size}`)
+    favFailCount = 0
+  } catch {
+    if (++favFailCount >= 3) {
+      // repeated failures (old server without the PUT route): back off hard
+      // until the server is upgraded — retry only on full resyncs
+      favFailCount = 0
+      console.log('[favicons] server rejected pushes repeatedly; backing off')
+    }
+  }
+}
 
 // ---- connectivity ----
 
