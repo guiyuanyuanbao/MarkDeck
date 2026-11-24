@@ -26,6 +26,9 @@ import (
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/webapp"
 )
 
+// extensionVersion is stamped at build time from the repo VERSION file.
+var extensionVersion = ""
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 
@@ -42,6 +45,10 @@ func main() {
 	secure := strings.HasPrefix(strings.ToLower(cfg.BaseURL), "https://")
 	am := auth.NewManager(st, cfg.SessionTTLHours, secure)
 	hub := sync.NewHub()
+	// injected via -ldflags "-X main.extensionVersion=$(cat VERSION)"
+	if cfg.ExtensionVersion == "" && extensionVersion != "" {
+		cfg.ExtensionVersion = extensionVersion
+	}
 	chain := tools.NewChain(st, cfg.SnapshotDir, func(rev int64) {
 		// tools historically broadcast literal 0, which the hub's monotonic
 		// filter always dropped — snapshot restores/dead-link scans never
@@ -63,6 +70,26 @@ func main() {
 	a.RegisterToolsRoutes(mux, chain)
 	mux.HandleFunc("GET /api/favicon/{host}", func(w http.ResponseWriter, r *http.Request) {
 		fetcher.ServeHTTP(w, r, r.PathValue("host"))
+	})
+	// serves the extension zip shipped next to the binary (release layout)
+	// so the extension's options page can offer a one-click upgrade
+	mux.HandleFunc("GET /api/extension/download", func(w http.ResponseWriter, r *http.Request) {
+		if a.Auth.DeviceFromRequest(r) == nil && a.Auth.SessionFromRequest(r) == nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		data, err := os.ReadFile("markdeck-extension.zip")
+		if err != nil {
+			// fallback: the versioned release file name
+			data, err = os.ReadFile("markdeck-extension-" + extensionVersion + ".zip")
+		}
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="markdeck-extension-`+extensionVersion+`.zip"`)
+		w.Write(data)
 	})
 	// devices push browser-resolved favicons (MV3 _favicon/ endpoint yields
 	// the same icon chrome shows, including its Google fallback) so every

@@ -133,9 +133,10 @@ jobs:
       - name: Build server binaries
         working-directory: server
         run: |
-          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../markdeck-linux-amd64   ./cmd/markdeck
-          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o ../markdeck-linux-arm64   ./cmd/markdeck
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../markdeck-windows-amd64.exe ./cmd/markdeck
+          LDFLAGS="-s -w -X main.extensionVersion=${{ needs.version.outputs.version }}"
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o ../markdeck-linux-amd64   ./cmd/markdeck
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o ../markdeck-linux-arm64   ./cmd/markdeck
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$LDFLAGS" -o ../markdeck-windows-amd64.exe ./cmd/markdeck
 
       - name: Release
         uses: softprops/action-gh-release@v2

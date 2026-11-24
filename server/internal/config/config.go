@@ -25,6 +25,9 @@ type Config struct {
 	SnapshotDir string
 	// SessionTTL is how long a login session cookie stays valid.
 	SessionTTLHours int
+	// ExtensionVersion is the extension version this server release ships
+	// (injected via -ldflags at build time; empty = unknown).
+	ExtensionVersion string
 }
 
 // Load builds a Config from MARKDECK_* environment variables, applying

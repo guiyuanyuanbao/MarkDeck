@@ -161,8 +161,14 @@ type Device struct {
 
 // PairDevice exchanges a valid pairing code for a long-lived device token.
 func (m *Manager) PairDevice(code, name string) (deviceID, token string, err error) {
-	if !m.Store.ConsumePairCode(code) {
+	// consume returns the admin's pre-bound name; it wins over whatever the
+	// client sent (the stored value is wiped by the consume itself)
+	bound, ok := m.Store.ConsumePairCode(code)
+	if !ok {
 		return "", "", ErrBadPairCode
+	}
+	if bound != "" {
+		name = bound
 	}
 	token, err = RandomToken(32)
 	if err != nil {
@@ -218,33 +224,33 @@ func (m *Manager) RevokeDevice(id string) error { return m.Store.DeleteDevice(id
 var pairMu sync.Mutex
 
 // NewPairCode creates a fresh 6-digit code valid for 5 minutes.
-func (m *Manager) NewPairCode() (string, error) {
+// deviceName is optional; when set, the pair exchange names the device with
+// it (admin pre-decides, the client's own name field is ignored).
+func (m *Manager) NewPairCode(deviceName string) (string, error) {
 	pairMu.Lock()
 	defer pairMu.Unlock()
 	code, err := randomDigits(6)
 	if err != nil {
 		return "", err
 	}
-	if err := m.Store.SavePairCode(code, time.Now().Add(5*time.Minute).Unix()); err != nil {
+	if err := m.Store.SavePairCode(code, time.Now().Add(5*time.Minute).Unix(), deviceName); err != nil {
 		return "", err
 	}
 	return code, nil
 }
 
 func randomDigits(n int) (string, error) {
-	b, err := RandomToken(16) // reuse base64url entropy
+	b, err := RandomToken(n * 2)
 	if err != nil {
 		return "", err
 	}
-	var digits []byte
-	for i := 0; i < len(b) && len(digits) < n; i++ {
-		if b[i] >= '0' && b[i] <= '9' {
-			digits = append(digits, b[i])
-		}
-	}
-	for len(digits) < n {
-		// Extremely unlikely; pad deterministically.
-		digits = append(digits, '0'+byte(len(digits)))
+	// Rejection-free uniform mapping: raw entropy bytes mod 10. The old
+	// implementation FILTERED base64 bytes for ASCII digits — 16 bytes of
+	// base64 rarely contain 6 of them, so it fell into the "pad
+	// deterministically" branch which produced the same 012345 every time.
+	digits := make([]byte, n)
+	for i := range digits {
+		digits[i] = '0' + b[i]%10
 	}
 	return string(digits), nil
 }

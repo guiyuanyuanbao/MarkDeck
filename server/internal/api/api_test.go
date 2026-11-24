@@ -47,7 +47,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	env.sess.Cookie = cookieValue(w)
 
 	// mint a device token the same way pairing does
-	code, err := am.NewPairCode()
+	code, err := am.NewPairCode("")
 	if err != nil {
 		t.Fatal(err)
 	}

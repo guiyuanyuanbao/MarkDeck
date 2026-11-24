@@ -393,7 +393,10 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
     for (const host of hosts) {
       try {
         // server-side probe first: 200 = fresh copy exists, skip
-        const probe = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host), {
+        // probe=1: cache-only check — a plain GET would make the server
+        // fetch its own (possibly worse) icon and 200 the probe, blocking
+        // our push forever
+        const probe = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host) + '?probe=1', {
           signal: AbortSignal.timeout(5000),
         })
         if (probe.ok) continue

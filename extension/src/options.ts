@@ -52,6 +52,37 @@ $('resyncBtn').onclick = async () => {
   msg.className = 'msg ok'; msg.textContent = '✓ 已触发全量同步'
 }
 
+// version check: server publishes the extension version it ships; when it
+// differs from this build, surface a one-click upgrade banner (unpacked
+// installs can't self-update — this is the practical substitute)
+;(async () => {
+  const st: any = await chrome.storage.local.get('md_config')
+  const server = st.md_config?.server
+  if (!server) return
+  const mine = chrome.runtime.getManifest().version
+  try {
+    const r = await fetch(server.replace(/\/+$/, '') + '/api/extension/update', { signal: AbortSignal.timeout(8000) })
+    if (!r.ok) return
+    const d = await r.json()
+    if (!d.version || d.version === mine) return
+    const card = document.getElementById('connCard')!
+    const up = document.createElement('div')
+    up.style.cssText = 'margin-top:10px;padding:9px 12px;background:#eef0fe;border-radius:9px;display:flex;align-items:center;gap:10px'
+    up.innerHTML = '<span style="font-size:12.5px;color:#1a1c28">有新版本 <b>v' + d.version + '</b>（当前 v' + mine + '）</span>'
+    const btn = document.createElement('button')
+    btn.className = 'btn-primary'
+    btn.textContent = '下载升级包'
+    btn.onclick = () => {
+      const a = document.createElement('a')
+      a.href = d.url
+      a.download = ''
+      a.click()
+    }
+    up.appendChild(btn)
+    card.appendChild(up)
+  } catch { /* server older than this feature: silence */ }
+})()
+
 // live connection status card (always visible)
 async function refreshConnStatus() {
   try {

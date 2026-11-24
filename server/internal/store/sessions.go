@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strings"
 )
 
 // SessionRow is a stored session (token already hashed).
@@ -109,38 +110,72 @@ func (s *Store) DeleteDevice(id string) error {
 // ---- pairing codes ----
 
 // SavePairCode stores a pairing code with expiry (single-active at a time).
-func (s *Store) SavePairCode(code string, expiresAt int64) error {
+// deviceName is optional: when set, the pair exchange names the device with
+// it regardless of what the client sends (admin pre-decides the name).
+func (s *Store) SavePairCode(code string, expiresAt int64, deviceName string) error {
+	v := encodePairCode(code, expiresAt)
+	if deviceName != "" {
+		v += ":" + deviceName
+	}
 	_, err := s.DB.Exec(`INSERT INTO settings(key, value) VALUES('pair_code', ?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, encodePairCode(code, expiresAt))
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, v)
 	return err
 }
 
-// ConsumePairCode validates and removes a matching unexpired code.
-func (s *Store) ConsumePairCode(code string) bool {
+// PairCodeDevice returns the device name bound to the stored code ("" if none).
+func (s *Store) PairCodeDevice() string {
 	v, err := s.SettingsGet("pair_code")
 	if err != nil || v == "" {
-		return false
+		return ""
+	}
+	// format: code:expiry[:name] — name is everything after the second colon
+	parts := strings.SplitN(v, ":", 3)
+	if len(parts) == 3 {
+		return parts[2]
+	}
+	return ""
+}
+
+// ConsumePairCode validates and removes a matching unexpired code.
+// Returns the bound device name ("" when the code carries none) — the
+// caller needs it AFTER consumption, and the stored value is wiped here.
+func (s *Store) ConsumePairCode(code string) (string, bool) {
+	v, err := s.SettingsGet("pair_code")
+	if err != nil || v == "" {
+		return "", false
 	}
 	gotCode, exp := decodePairCode(v)
 	if gotCode != code || Now() > exp {
-		return false
+		return "", false
 	}
 	_ = s.SettingsSet("pair_code", "")
-	return true
+	parts := strings.SplitN(v, ":", 3)
+	bound := ""
+	if len(parts) == 3 {
+		bound = parts[2]
+	}
+	return bound, true
 }
 
 func encodePairCode(code string, exp int64) string {
 	return code + ":" + i64s(exp)
 }
 
+// decodePairCode parses "code:expiry[:deviceName]". The name is an opaque
+// suffix after the SECOND colon — splitting at the LAST colon broke expiry
+// parsing whenever the name contained non-digits (every Chinese name did),
+// making every bound code look expired instantly.
 func decodePairCode(v string) (string, int64) {
-	// split at last colon; code is digits only
-	for i := len(v) - 1; i >= 0; i-- {
-		if v[i] == ':' {
-			return v[:i], s2i(v[i+1:])
-		}
+	first := strings.Index(v, ":")
+	if first < 0 {
+		return v, 0
 	}
-	return v, 0
+	rest := v[first+1:]
+	second := strings.Index(rest, ":")
+	if second < 0 {
+		return v[:first], s2i(rest)
+	}
+	return v[:first], s2i(rest[:second])
 }
 
 func i64s(v int64) string {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
@@ -31,6 +32,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/totp-disable", a.requireSession(a.handleTOTPDisable))
 
 	mux.HandleFunc("POST /api/pair-code", a.requireSession(a.handleNewPairCode))
+	mux.HandleFunc("GET /api/extension/update", a.handleExtensionUpdate)
 	mux.HandleFunc("GET /api/devices", a.requireSession(a.handleListDevices))
 	mux.HandleFunc("DELETE /api/devices/{id}", a.requireSession(a.handleRevokeDevice))
 
@@ -214,8 +216,32 @@ func (a *API) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 
 // ---- pair / devices ----
 
+// handleExtensionUpdate tells the extension which version is current so its
+// options page can surface "new version available" with a direct download
+// link (unpacked MV3 installs can't self-update; a version banner is the
+// practical substitute for the store update flow).
+func (a *API) handleExtensionUpdate(w http.ResponseWriter, r *http.Request) {
+	v := strings.TrimSpace(a.Config.ExtensionVersion)
+	if v == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"version": ""})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"version": v,
+		"url":     strings.TrimSuffix(a.Config.BaseURL, "/") + "/api/extension/download",
+	})
+}
+
 func (a *API) handleNewPairCode(w http.ResponseWriter, r *http.Request) {
-	code, err := a.Auth.NewPairCode()
+	var body struct {
+		DeviceName string `json:"deviceName"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	name := strings.TrimSpace(body.DeviceName)
+	if len(name) > 60 {
+		name = name[:60]
+	}
+	code, err := a.Auth.NewPairCode(name)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return

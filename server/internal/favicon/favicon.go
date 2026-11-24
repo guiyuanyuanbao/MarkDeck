@@ -54,8 +54,24 @@ func NewFetcher(st *store.Store) *Fetcher {
 	return &Fetcher{Store: st, inFly: map[string]*sync.WaitGroup{}}
 }
 
-// ServeHTTP answers GET /api/favicon/{host}.
+// ServeHTTP answers GET /api/favicon/{host}. With ?probe=1 it answers
+// strictly from the cache — 200 only when a real icon is stored, 404
+// otherwise — and never triggers a server-side fetch (the extension's
+// favicon push relies on this to decide whether to upload).
 func (f *Fetcher) ServeHTTP(w http.ResponseWriter, r *http.Request, host string) {
+	if r.URL.Query().Get("probe") == "1" {
+		host = sanitizeHost(host)
+		row, err := f.Store.FaviconGet(host)
+		if err != nil || len(row.Data) == 0 || row.FailedAt > 0 {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", row.ContentType)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(row.Data)
+		return
+	}
 	data, ctype, ok := f.resolve(r.Context(), host)
 	if !ok {
 		// deterministic transparent placeholder so <img> shows alt cleanly

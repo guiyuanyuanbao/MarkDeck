@@ -17,6 +17,7 @@ const newPw2 = ref('')
 
 const devices = ref<Device[]>([])
 const pairCode = ref('')
+const pairDeviceName = ref('')
 const pairExpiry = ref(0)
 const snapshots = ref<Snapshot[]>([])
 
@@ -110,11 +111,21 @@ async function disableTotp() {
 
 async function newPairCode() {
   try {
-    const r = await authApi.newPairCode()
+    const name = pairDeviceName.value.trim() || undefined
+    const r = await authApi.newPairCode(name)
     pairCode.value = r.code
     pairExpiry.value = Date.now() + 300_000
   } catch (e: any) {
     ElMessage.error('生成配对码失败: ' + e.message)
+  }
+}
+async function copyPairCode() {
+  if (!pairCode.value) return
+  try {
+    await navigator.clipboard.writeText(pairCode.value)
+    ElMessage.success('配对码已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动选择')
   }
 }
 
@@ -194,12 +205,14 @@ async function restoreSnap(s: Snapshot) {
       <el-tab-pane label="设备同步" name="devices">
         <el-alert type="info" :closable="false" style="margin-bottom: 12px"
           title="浏览器插件通过一次性配对码接入。生成配对码后，在插件设置页填入服务器地址与配对码。" />
-        <div style="margin-bottom: 16px">
+        <div style="margin-bottom: 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+          <el-input v-model="pairDeviceName" placeholder="设备名称（可选，如：公司电脑）" clearable style="width: 220px" />
           <el-button type="primary" @click="newPairCode">生成配对码</el-button>
-          <span v-if="pairCode" style="margin-left: 12px; font-size: 20px; font-family: monospace; letter-spacing: 4px">
+          <span v-if="pairCode" style="font-size: 20px; font-family: monospace; letter-spacing: 4px">
             {{ pairCode }}
           </span>
-          <span v-if="pairCode" style="color: #909399; font-size: 12px; margin-left: 8px">5 分钟内有效</span>
+          <el-button v-if="pairCode" size="small" plain @click="copyPairCode">复制</el-button>
+          <span v-if="pairCode" style="color: #909399; font-size: 12px">5 分钟内有效 · 使用一次后立即失效</span>
         </div>
         <el-table :data="devices">
           <el-table-column prop="name" label="设备" min-width="180" />

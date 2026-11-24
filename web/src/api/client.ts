@@ -123,7 +123,7 @@ export const authApi = {
   totpSetup: () => api.get<{ secret: string; otpauth: string }>('/api/auth/totp-setup'),
   totpEnable: (code: string) => api.post('/api/auth/totp-enable', { code }),
   totpDisable: () => api.post('/api/auth/totp-disable'),
-  newPairCode: () => api.post<{ code: string }>('/api/pair-code'),
+  newPairCode: (deviceName?: string) => api.post<{ code: string }>('/api/pair-code', deviceName ? { deviceName } : {}),
   devices: () => api.get<{ devices: Device[] }>('/api/devices'),
   revokeDevice: (id: string) => api.del(`/api/devices/${id}`),
 }
