@@ -53,6 +53,14 @@ const browserNodeByTitle = (sw, title) => sw.evaluate(async (t) => {
 // resync = drive one full sync cycle through the test hook
 const resync = (sw) => sw.evaluate(() => globalThis.__markdeckResync())
 
+// resolve the browser's real root ids by the Chromium positional invariant
+// (children[0] = bar, children[1] = other) — never assume '1'/'2'
+const rootIds = (sw) => sw.evaluate(async () => {
+  const tree = await chrome.bookmarks.getTree()
+  const kids = tree[0].children
+  return [kids[0].id, kids[1].id]
+})
+
 // poll until pred(browserTitles, serverNodes) holds; predicates may be async
 async function waitB(sw, pred, timeoutMs = 10000, label = '') {
   for (let i = 0; i < timeoutMs / 400; i++) {
@@ -121,15 +129,17 @@ async function main() {
   sw.on('console', msg => console.log('[SW]', msg.text()))
   log('extension service worker running', true)
 
-  // ---- pre-pair local content: initialImport must map these to fresh UUIDs,
-  //      including a folder with a child and an other-root ('2') bookmark ----
-  const prePair = await sw.evaluate(async () => {
-    const f = await chrome.bookmarks.create({ parentId: '1', title: '本机文件夹' })
+  // ---- pre-pair local content: the first reconcile adopts these into
+  //      fresh server rows, including a folder with a child and an
+  //      other-root bookmark. Root ids resolved by position, never '1'/'2'.
+  const [barRoot, otherRoot] = await rootIds(sw)
+  const prePair = await sw.evaluate(async ([barRoot, otherRoot]) => {
+    const f = await chrome.bookmarks.create({ parentId: barRoot, title: '本机文件夹' })
     await chrome.bookmarks.create({ parentId: f.id, title: '文件夹里的书签', url: 'https://local.test/child' })
-    await chrome.bookmarks.create({ parentId: '1', title: '本机已有书签A', url: 'https://local.test/a' })
-    await chrome.bookmarks.create({ parentId: '2', title: '本机其他书签', url: 'https://local.test/other' })
+    await chrome.bookmarks.create({ parentId: barRoot, title: '本机已有书签A', url: 'https://local.test/a' })
+    await chrome.bookmarks.create({ parentId: otherRoot, title: '本机其他书签', url: 'https://local.test/other' })
     return true
-  })
+  }, [barRoot, otherRoot])
   log('pre-pair browser bookmarks created (folder + child + other-root)', prePair === true)
 
   // ---- pair through the REAL options UI: exercises the pair message,
@@ -192,8 +202,8 @@ async function main() {
     'count=' + renamed.length)
 
   // ---- T4: browser bookmark creation syncs to server as top-level ----
-  const created = await sw.evaluate(async () =>
-    await chrome.bookmarks.create({ parentId: '1', title: '浏览器新建E2E', url: 'https://browser.test/x' }))
+  const created = await sw.evaluate(async (barRoot) =>
+    await chrome.bookmarks.create({ parentId: barRoot, title: '浏览器新建E2E', url: 'https://browser.test/x' }), barRoot)
   log('T4 setup: browser bookmark created', !!created.id)
   await resync(sw)
   await waitB(sw, (bt, sn) => sn.some(n => n.title === '浏览器新建E2E'), 8000)
@@ -213,18 +223,13 @@ async function main() {
   log('T5: server delete removed browser bookmark', !titles.includes('服务器预置书签'),
     'after titles: ' + JSON.stringify(titles))
   if (titles.includes('服务器预置书签')) {
-    const dbg = await sw.evaluate(async (server) => {
-      const cfg = (await chrome.storage.local.get('md_config')).md_config
+    const dbg = await sw.evaluate(async () => {
       const st = (await chrome.storage.local.get('md_status')).md_status
-      const r = await fetch(server + '/api/sync/device-pull?since=' + Math.max(0, cfg.rev - 5), {
-        headers: { Authorization: 'Bearer ' + cfg.token } })
-      const data = await r.json()
-      const rows = (data.changes || []).filter(c => c.title === '服务器预置书签' || (c.deletedAt || 0) > 0)
-      const map = (await chrome.storage.local.get('md_id_map')).md_id_map || {}
-      return { rev: cfg.rev, head: data.head, status: st,
-        rows: rows.map(x => ({ t: x.title, del: x.deletedAt })),
-        mapRows: Object.keys(map).length }
-    }, SERVER)
+      const base = (await chrome.storage.local.get('md_base')).md_base || { entries: {} }
+      const stats = globalThis.__markdeckReconcileStats ? globalThis.__markdeckReconcileStats() : null
+      return { status: st, boundRows: Object.values(base.entries || {}).filter(e => e.localId).length,
+        baseIds: Object.keys(base.entries || {}).length, stats }
+    })
     console.log('[T5dbg]', JSON.stringify(dbg))
   }
 
@@ -302,8 +307,8 @@ async function main() {
     `node.parent=${srvMoved?.parentId} folder=${srvFolder?.id}`)
 
   // ---- T11: other-bookmarks root syncs both ways ----
-  await sw.evaluate(async () =>
-    await chrome.bookmarks.create({ parentId: '2', title: '浏览器其他书签', url: 'https://other.test/x' }))
+  await sw.evaluate(async (otherRoot) =>
+    await chrome.bookmarks.create({ parentId: otherRoot, title: '浏览器其他书签', url: 'https://other.test/x' }), otherRoot)
   await resync(sw)
   await waitB(sw, async (bt, sn) => {
     const n2 = sn.find(n => n.title === '浏览器其他书签')
@@ -322,11 +327,11 @@ async function main() {
   await resync(sw)
   await waitB(sw, async () => {
     const n = await browserNodeByTitle(sw, '服务端其他书签')
-    return !!(n && n.parentId === '2')
+    return !!(n && n.parentId === otherRoot)
   }, 8000)
   const bOther = await browserNodeByTitle(sw, '服务端其他书签')
-  log('T11b: server other-root child lands in browser root "2"',
-    !!bOther && bOther.parentId === '2', 'parent=' + bOther?.parentId)
+  log('T11b: server other-root child lands in browser other-root',
+    !!bOther && bOther.parentId === otherRoot, 'parent=' + bOther?.parentId)
 
   // ---- T12: special characters survive round-trips ----
   const weirdTitle = '日文"引用"&<>🎉 中文长标题—测试'
@@ -339,8 +344,8 @@ async function main() {
   log('T12: special-char title survives server→browser',
     !!weirdB && weirdB.title === weirdTitle, 'title=' + JSON.stringify(weirdB?.title))
   const weirdBTitle = '浏览器端🎉特殊"标题"'
-  await sw.evaluate(async (t) =>
-    await chrome.bookmarks.create({ parentId: '1', title: t, url: 'https://weird-b.test/x' }), weirdBTitle)
+  await sw.evaluate(async ([t, barRoot]) =>
+    await chrome.bookmarks.create({ parentId: barRoot, title: t, url: 'https://weird-b.test/x' }), [weirdBTitle, barRoot])
   await resync(sw)
   await waitB(sw, async (bt, sn) =>
     sn.some(n => n.title === weirdBTitle && n.url === 'https://weird-b.test/x'), 8000)
@@ -348,22 +353,22 @@ async function main() {
     (await serverNodes()).some(n => n.title === weirdBTitle && n.url === 'https://weird-b.test/x'))
 
   // ---- T13: rapid burst of 10 creates all reach the server ----
-  await sw.evaluate(async () => {
+  await sw.evaluate(async (barRoot) => {
     for (let i = 0; i < 10; i++) {
-      await chrome.bookmarks.create({ parentId: '1', title: '连发书签' + i, url: 'https://burst.test/' + i })
+      await chrome.bookmarks.create({ parentId: barRoot, title: '连发书签' + i, url: 'https://burst.test/' + i })
     }
-  })
+  }, barRoot)
   await resync(sw)
   await waitB(sw, async (bt, sn) =>
     sn.filter(n => n.title.startsWith('连发书签')).length >= 10, 10000)
   const burstCount = (await serverNodes()).filter(n => n.title.startsWith('连发书签')).length
   if (burstCount !== 10) {
-    const q = await sw.evaluate(async () => (await chrome.storage.local.get('md_queue')).md_queue || [])
+    const q = await sw.evaluate(async () => (await chrome.storage.local.get('md_touch')).md_touch || {})
     const missing = []
     for (let i = 0; i < 10; i++) {
       if (!(await serverNodes()).some(n => n.title === '连发书签' + i)) missing.push(i)
     }
-    console.log('[T13dbg] queue=' + JSON.stringify(q.map(o => o.kind + ':' + o.title)) +
+    console.log('[T13dbg] pending=' + JSON.stringify(Object.keys(q)) +
       ' missing=' + JSON.stringify(missing))
     // one more push cycle before judging: the straggler may just be pending
     await resync(sw)

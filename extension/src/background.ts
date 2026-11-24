@@ -169,11 +169,16 @@ async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: s
         case 'create': {
           const parentLid = resolveParent(op.parentServerId)
           if (!parentLid) throw new Error(`parent ${op.parentServerId} unresolvable`)
+          // chrome.bookmarks.create rejects out-of-range indexes ("Index out
+          // of bounds"), and chrome.bookmarks.get() can return STALE children
+          // right after a write (observed in real chromium: a get() after
+          // create missed the new node, clamping to a wrong index and
+          // scrambling order every reconcile). Append at the tail instead —
+          // same-parent order converges through rank-based move ops.
           const created = await chrome.bookmarks.create({
             parentId: parentLid,
             title: op.title,
             ...(op.url ? { url: op.url } : {}),
-            index: op.index,
           })
           // the new node's chrome id is only known NOW: record it so base
           // advances with a real binding (a null binding here would make
@@ -190,7 +195,22 @@ async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: s
         case 'move': {
           const parentLid = resolveParent(op.parentServerId)
           if (!parentLid) throw new Error(`move parent ${op.parentServerId} unresolvable`)
-          await chrome.bookmarks.move(op.localId, { parentId: parentLid, index: op.index })
+          // out-of-range indexes throw: clamp by the LIVE tree (never get(),
+          // which is stale right after writes). Moving within the same
+          // parent: removal shifts later siblings left, so the max valid
+          // final index is len-1.
+          const tree = await chrome.bookmarks.getTree()
+          let liveLen = 0
+          const find = (ns: chrome.bookmarks.BookmarkTreeNode[]): boolean => {
+            for (const n of ns) {
+              if (n.id === parentLid) { liveLen = n.children?.length ?? 0; return true }
+              if (n.children && find(n.children)) return true
+            }
+            return false
+          }
+          find(tree)
+          const maxIdx = Math.max(0, liveLen - 1)
+          await chrome.bookmarks.move(op.localId, { parentId: parentLid, index: Math.min(op.index, maxIdx) })
           stats.chromeMoves++
           break
         }

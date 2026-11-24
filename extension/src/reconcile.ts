@@ -77,7 +77,7 @@ export type ChromeOp =
 
 export type ServerOp =
   | { op: 'create'; id: string; parentId: string; type: 'folder' | 'url'; title: string; url?: string; position: number; updatedAt: number; deviceId: string }
-  | { op: 'update'; id: string; title: string; url?: string; updatedAt: number; deviceId: string; observedRevision: number }
+  | { op: 'update'; id: string; title: string; url?: string; parentId?: string; tags?: string[]; updatedAt: number; deviceId: string; observedRevision: number }
   | { op: 'delete'; id: string; updatedAt: number; deviceId: string }
 
 export interface SyncPlan {
@@ -171,12 +171,29 @@ export function planSync(input: PlanInput): SyncPlan {
     localChildren.set(n.parentId, arr)
   }
 
-  // server children by parent (already position-ordered from Store.Tree())
+  // server children by parent — re-ranked 0..n-1 by position. Comparing the
+  // RANK instead of the raw position kills the move-churn class of bugs: raw
+  // positions are REAL numbers scattered across devices (a web-UI create
+  // lands at MaxPosition+1 = 10000 while the browser index is 0), so absolute
+  // equality never converges; rank does.
   const serverChildren = new Map<string, ServerNode[]>()
   for (const n of server) {
     const arr = serverChildren.get(n.parentId) || []
     arr.push(n)
     serverChildren.set(n.parentId, arr)
+  }
+  const serverRank = new Map<string, number>()
+  for (const [, arr] of serverChildren) {
+    arr.sort((a, b) => a.position - b.position)
+    // the canonical holder is structurally bound to the browser's OTHER ROOT
+    // bucket — it occupies no slot in any local parent's child list, so it
+    // must not consume a rank (otherwise every sibling after it is off by
+    // one forever and move-churn returns)
+    let rank = 0
+    for (const n of arr) {
+      if (n.id === input.othersId) continue
+      serverRank.set(n.id, rank++)
+    }
   }
 
   // ---- URL adoption index: unbound local url nodes by normalized url ----
@@ -300,21 +317,21 @@ export function planSync(input: PlanInput): SyncPlan {
       const t = touchAt(touch, localId ?? undefined)
       if (t > sn.updatedAt) {
         // local edit is newer: push local state
-        pushLocalState(sn, ln, localId as string, serverOps, deviceId, touch, stats)
+        pushLocalState(sn, ln, localId as string, serverOps, deviceId, touch, stats, binding, reverse)
       } else {
         // server is newer (or tie): apply server state to the browser
-        planServerToLocal(sn, ln, localId as string, chromeOps, stats)
+        planServerToLocal(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0)
       }
     } else if (serverChanged) {
-      planServerToLocal(sn, ln, localId as string, chromeOps, stats)
+      planServerToLocal(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0)
     } else if (localChanged) {
-      pushLocalState(sn, ln, localId as string, serverOps, deviceId, touch, stats)
+      pushLocalState(sn, ln, localId as string, serverOps, deviceId, touch, stats, binding, reverse)
     } else {
       // convergence check: positions may still drift (e.g. index churn on
       // one side). Structurally bound rows (other-bookmarks root) never
       // move — their browser position is the root bucket's own.
       if (sn.id !== input.othersId) {
-        planPositionOnly(sn, ln, localId as string, chromeOps, stats)
+        planPositionOnly(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0, 0)
       }
     }
   }
@@ -411,16 +428,19 @@ export function planSync(input: PlanInput): SyncPlan {
     binding.set(minted, n.id)
     reverse.set(n.id, minted)
     const parentSid = reverse.get(n.parentId) || '' // root bucket children → top level
+    const tags = touch[n.id]?.tags
     if (n.type === 'url') {
       serverOps.push({
         op: 'create', id: minted, parentId: parentSid, type: 'url',
         title: n.title, url: n.url || '', position: n.index + 1,
+        ...(tags?.length ? { tags } : {}),
         updatedAt: t, deviceId,
       })
     } else {
       serverOps.push({
         op: 'create', id: minted, parentId: parentSid, type: 'folder',
-        title: n.title, position: n.index + 1, updatedAt: t, deviceId,
+        title: n.title, position: n.index + 1, ...(tags?.length ? { tags } : {}),
+        updatedAt: t, deviceId,
       })
     }
     stats.pushed++
@@ -480,39 +500,47 @@ function localDiffers(ln: LocalNode, baseServer: ServerNode, touch: TouchJournal
 }
 
 // apply server state to the browser (update/move/remove-and-recreate)
-function planServerToLocal(sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats']) {
+function planServerToLocal(sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats'], rank: number) {
   if (ln.title !== sn.title || normBookmarkUrl(ln.url) !== normBookmarkUrl(sn.url)) {
     chromeOps.push({ kind: 'update', serverId: sn.id, localId, title: sn.title, url: sn.url })
     stats.chromeUpdates++
   }
-  planPositionOnly(sn, ln, localId, chromeOps, stats)
+  planPositionOnly(sn, ln, localId, chromeOps, stats, rank, 0)
 }
 
-// position-only drift: rebind parent/order without touching content
-function planPositionOnly(sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats']) {
-  // The parent compare needs the SERVER parent's bound local id; the engine
-  // can resolve it from bindings only if the parent row is processed first
-  // (topo order guarantees folder rows sort before children via the plan's
-  // own create ordering — for existing rows the adapter resolves parents).
-  // We emit a move when the SERVER parent id differs from what base says
-  // this node's parent binding was; the adapter translates server parent →
-  // local parent id at execution time.
-  if (Math.abs(ln.index + 1 - sn.position) >= 1) {
-    chromeOps.push({ kind: 'move', serverId: sn.id, localId, parentServerId: sn.parentId, index: Math.max(0, Math.round(sn.position) - 1) })
+// position-only drift: rebind parent/order without touching content.
+// Compares the server-side RANK (0-based position among bound siblings)
+// with the local index. Rank equality is achievable; raw positions are not
+// (a web-UI create lands at MaxPosition+1 while the browser index is 0 —
+// demanding raw equality produced endless move churn every reconcile).
+function planPositionOnly(sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats'], rank: number, boundSiblingCount: number) {
+  void localId
+  void boundSiblingCount
+  if (ln.index !== rank) {
+    chromeOps.push({ kind: 'move', serverId: sn.id, localId, parentServerId: sn.parentId, index: rank })
     stats.chromeMoves++
   }
 }
 
-  // push the local node's content to the server
+  // push the local node's content to the server. A local MOVE must carry
+  // the new parent's server id (the browser-only parentId → server id
+  // translation runs through the binding maps); quick-save TAGS ride the
+  // touch journal onto the op.
   function pushLocalState(
     sn: ServerNode, ln: LocalNode, localId: string,
     serverOps: ServerOp[], deviceId: string, touch: TouchJournal, stats: SyncPlan['stats'],
+    binding: Map<string, string | null>, reverse: Map<string, string>,
   ) {
     const t = touchAt(touch, localId) || Math.floor((ln.dateAdded || Date.now()) / 1000)
+    const localParentSid = reverse.get(ln.parentId)
+    const parentChanged = localParentSid !== undefined && localParentSid !== sn.parentId
+    const tags = touch[localId]?.tags
     serverOps.push({
       op: 'update', id: sn.id,
       title: ln.title,
       ...(ln.url !== undefined ? { url: ln.url } : {}),
+      ...(parentChanged ? { parentId: localParentSid } : {}),
+      ...(tags?.length ? { tags } : {}),
       updatedAt: t, deviceId,
       observedRevision: sn.revision,
     })
