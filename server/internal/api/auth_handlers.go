@@ -18,9 +18,9 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/state", a.handleAuthState) // first-run detection
 	mux.HandleFunc("POST /api/pair", a.handlePairExchange)   // pair-code -> device token
 
-	// ---- device-token (extension) ----
-	mux.HandleFunc("POST /api/sync/device-push", a.requireDevice(a.handleSyncPush))
-	mux.HandleFunc("GET /api/sync/device-pull", a.requireDevice(a.handleSyncPull))
+	// ---- device-token (extension, snapshot reconciliation) ----
+	mux.HandleFunc("GET /api/sync/tree", a.requireDevice(a.handleSyncTree))
+	mux.HandleFunc("POST /api/sync/apply", a.requireDevice(a.handleSyncApply))
 
 	// ---- session (admin UI) ----
 	mux.HandleFunc("POST /api/auth/logout", a.requireSession(a.handleLogout))
@@ -54,8 +54,6 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/trash", a.requireAny(a.handleTrash))
 
 	// sync (shared)
-	mux.HandleFunc("GET /api/sync/pull", a.requireAny(a.handleSyncPull))
-	mux.HandleFunc("POST /api/sync/push", a.requireAny(a.handleSyncPush))
 	mux.HandleFunc("GET /api/sync/status", a.requireAny(a.handleSyncStatus))
 
 	// websocket

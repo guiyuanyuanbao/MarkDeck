@@ -47,10 +47,11 @@ func TestSnapshotRestoreRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// verify structural integrity
+	// verify structural integrity (the canonical 其他书签 holder from
+	// migration 0003 is a permanent row and round-trips with everything else)
 	nodes, _ := s.Tree()
-	if len(nodes) != 2 { // folder + one live bookmark
-		t.Fatalf("restored live nodes = %d, want 2", len(nodes))
+	if len(nodes) != 3 { // canonical holder + folder + one live bookmark
+		t.Fatalf("restored live nodes = %d, want 3", len(nodes))
 	}
 	var restored *store.Bookmark
 	var restoredFolder *store.Bookmark
@@ -58,7 +59,9 @@ func TestSnapshotRestoreRoundtrip(t *testing.T) {
 		if n.Title == "书签一" {
 			restored = n
 		}
-		if n.Type == "folder" {
+		// pick the user folder by title — the canonical 其他书签 holder is
+		// also a folder and would otherwise win by iteration order
+		if n.Type == "folder" && n.Title == "根目录A" {
 			restoredFolder = n
 		}
 	}
@@ -108,10 +111,12 @@ func TestConcurrentMultiDevicePush(t *testing.T) {
 					return
 				}
 				// also update it once
-				b.Title = fmt.Sprintf("d%d-%d-upd", d, i)
-				b.UpdatedAt += 1
-				if _, _, err := s.UpdateLWW(b, nil); err != nil {
-					done <- err
+				title := fmt.Sprintf("d%d-%d-upd", d, i)
+				if res := s.ApplyBatch([]store.BatchOp{{
+					ID: b.ID, Op: "update", Title: &title,
+					UpdatedAt: b.UpdatedAt + 1, DeviceID: dev, ObservedRevision: b.Revision,
+				}}, store.Now()); len(res) != 1 || (!res[0].Win && res[0].Error == "") {
+					done <- fmt.Errorf("update lost: %+v", res)
 					return
 				}
 			}
@@ -124,11 +129,15 @@ func TestConcurrentMultiDevicePush(t *testing.T) {
 		}
 	}
 	nodes, _ := s.Tree()
-	if len(nodes) != devices*perDevice {
-		t.Fatalf("lost writes: have %d want %d", len(nodes), devices*perDevice)
+	// +1: the canonical 其他书签 holder (migration 0003) is a live row too
+	if len(nodes) != devices*perDevice+1 {
+		t.Fatalf("lost writes: have %d want %d", len(nodes)-1, devices*perDevice)
 	}
 	revs := map[int64]bool{}
 	for _, n := range nodes {
+		if n.ID == "md-others" {
+			continue // migration row, not a device write
+		}
 		if revs[n.Revision] {
 			t.Fatalf("duplicate revision %d on %s", n.Revision, n.Title)
 		}
@@ -144,23 +153,20 @@ func TestLWWCrossDeviceClockOrder(t *testing.T) {
 	b, _ = s.Create(b, nil)
 
 	// device B edited earlier locally but pushes later
-	old := *b
-	old.Title = "B 旧编辑"
-	old.UpdatedAt = 900
-	old.DeviceID = "dB"
-	if _, win, _ := s.UpdateLWW(&old, nil); win {
+	oldTitle := "B 旧编辑"
+	if res := s.ApplyBatch([]store.BatchOp{{
+		ID: b.ID, Op: "update", Title: &oldTitle,
+		UpdatedAt: 900, DeviceID: "dB", ObservedRevision: b.Revision,
+	}}, store.Now()); res[0].Win {
 		t.Fatal("older edit from other device must not win")
 	}
 	// device B edits later
-	newer := *b
-	newer.Title = "B 新编辑"
-	newer.UpdatedAt = 1100
-	newer.DeviceID = "dB"
-	got, win, err := s.UpdateLWW(&newer, nil)
-	if err != nil || !win {
-		t.Fatalf("later edit should win: win=%v err=%v", win, err)
-	}
-	if got.Title != "B 新编辑" {
-		t.Fatalf("title = %s", got.Title)
+	newTitle := "B 新编辑"
+	res := s.ApplyBatch([]store.BatchOp{{
+		ID: b.ID, Op: "update", Title: &newTitle,
+		UpdatedAt: 1100, DeviceID: "dB", ObservedRevision: b.Revision,
+	}}, store.Now())
+	if !res[0].Win || res[0].State == nil || res[0].State.Title != "B 新编辑" {
+		t.Fatalf("later edit should win: %+v", res[0])
 	}
 }

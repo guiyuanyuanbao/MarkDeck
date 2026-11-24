@@ -68,50 +68,121 @@ func TestLWWConflict(t *testing.T) {
 	s := newTestStore(t)
 	b := seed(s, "", "url", "orig", "https://a")
 
-	older := *b
-	older.Title = "older"
-	older.UpdatedAt = b.UpdatedAt - 10
-	older.DeviceID = "aaa"
-	got, win, err := s.UpdateLWW(&older, nil)
-	if err != nil || win {
-		t.Fatalf("older should lose: win=%v err=%v", win, err)
-	}
-	if got.Title != "orig" {
-		t.Fatalf("title changed by losing write: %q", got.Title)
-	}
-
-	newer := *b
-	newer.Title = "newer"
-	newer.UpdatedAt = b.UpdatedAt + 10
-	newer.DeviceID = "bbb"
-	got, win, err = s.UpdateLWW(&newer, nil)
-	if err != nil || !win || got.Title != "newer" {
-		t.Fatalf("newer should win: %+v win=%v err=%v", got, win, err)
+	// helper: run one batch update op through the reconcile apply path
+	apply := func(id, title string, updatedAt int64, device string, observed int64) BatchResult {
+		res := s.ApplyBatch([]BatchOp{{
+			ID: id, Op: "update", Title: &title, UpdatedAt: updatedAt,
+			DeviceID: device, ObservedRevision: observed,
+		}}, Now())
+		if len(res) != 1 {
+			t.Fatalf("batch = %d results", len(res))
+		}
+		return res[0]
 	}
 
-	// tie (same UpdatedAt as current winner) from a DIFFERENT device:
-	// the current row is kept (author clocks are indistinguishable within
-	// one second; a genuinely newer edit carries a later second). This also
-	// protects snapshot-restored rows from stale same-second tombstones —
-	// the old "higher device id wins" rule handed the tie to whichever id
-	// sorted higher, letting the web UI's fixed "web" id beat every
-	// extension uuid.
-	tie := *b
-	tie.Title = "tie-b"
-	tie.UpdatedAt = b.UpdatedAt + 10
-	tie.DeviceID = "zzz"
-	got, _, _ = s.UpdateLWW(&tie, nil)
-	if got.Title != "newer" {
-		t.Fatalf("different-device same-second tie must keep current row: %q", got.Title)
+	older := b.UpdatedAt - 10
+	if res := apply(b.ID, "older", older, "aaa", b.Revision); res.Win {
+		t.Fatalf("older should lose: %+v", res)
 	}
-	// same device continuing its edit chain within the same second wins
-	tieSameDev := *b
-	tieSameDev.Title = "chain-b"
-	tieSameDev.UpdatedAt = b.UpdatedAt + 10
-	tieSameDev.DeviceID = "bbb"
-	got, _, _ = s.UpdateLWW(&tieSameDev, nil)
-	if got.Title != "chain-b" {
-		t.Fatalf("same-device edit chain must win: %q", got.Title)
+	cur, _ := s.Get(b.ID)
+	if cur.Title != "orig" {
+		t.Fatalf("title changed by losing write: %q", cur.Title)
+	}
+
+	newer := b.UpdatedAt + 10
+	res := apply(b.ID, "newer", newer, "bbb", b.Revision)
+	if !res.Win || res.State.Title != "newer" {
+		t.Fatalf("newer should win: %+v", res)
+	}
+	newRev := res.State.Revision
+
+	// tie (same UpdatedAt as current winner) from a DIFFERENT device with a
+	// STALE baseline (observed < current revision): the concurrent write the
+	// client never saw wins — identical rule to the old per-op protocol.
+	tie := newer
+	if res := apply(b.ID, "tie-b", tie, "zzz", b.Revision); res.Win {
+		t.Fatalf("stale-baseline tie must lose against unseen concurrent write: %+v", res)
+	}
+	cur, _ = s.Get(b.ID)
+	if cur.Title != "newer" || cur.Revision != newRev {
+		t.Fatalf("row must be untouched: %+v", cur)
+	}
+	// same tie but authored against the CURRENT revision: legitimate
+	// follow-up edit, wins
+	if res := apply(b.ID, "chain-b", tie, "zzz", newRev); !res.Win || res.State.Title != "chain-b" {
+		t.Fatalf("current-baseline follow-up must win tie: %+v", res)
+	}
+}
+
+func TestApplyBatchIdempotentReplay(t *testing.T) {
+	s := newTestStore(t)
+	// a create for an already-existing row degrades to an idempotent update
+	// (half-applied batch replay) instead of erroring on the PK collision
+	f := seed(s, "", "folder", "f", "")
+	res := s.ApplyBatch([]BatchOp{{
+		ID: f.ID, Op: "create", Type: "folder", Title: strptr("f-renamed"),
+		UpdatedAt: f.UpdatedAt + 5, DeviceID: "d1", ObservedRevision: f.Revision,
+	}}, Now())
+	if !res[0].Win {
+		t.Fatalf("replay-create must win via LWW: %+v", res[0])
+	}
+	cur, _ := s.Get(f.ID)
+	if cur.Title != "f-renamed" {
+		t.Fatalf("replay must merge content: %+v", cur)
+	}
+	// a create with a truly new id still inserts
+	res = s.ApplyBatch([]BatchOp{{
+		ID: "bm-new", Op: "create", Type: "url", ParentID: &f.ID,
+		Title: strptr("ok"), URL: strptr("https://ok"), UpdatedAt: 100, DeviceID: "d1",
+	}}, Now())
+	if !res[0].Win || res[0].Error != "" {
+		t.Fatalf("fresh create must win: %+v", res[0])
+	}
+}
+
+func TestApplyBatchParentOrdering(t *testing.T) {
+	s := newTestStore(t)
+	// folder first, child after — parents created earlier in the batch pass
+	// validation inside the tx
+	res := s.ApplyBatch([]BatchOp{
+		{ID: "f1", Op: "create", Type: "folder", Title: strptr("F1"), UpdatedAt: 100, DeviceID: "d"},
+		{ID: "f2", Op: "create", Type: "folder", ParentID: strptr("f1"), Title: strptr("F2"), UpdatedAt: 100, DeviceID: "d"},
+		{ID: "b1", Op: "create", Type: "url", ParentID: strptr("f2"), Title: strptr("B"), URL: strptr("https://b"), UpdatedAt: 100, DeviceID: "d"},
+	}, Now())
+	for i, r := range res {
+		if !r.Win {
+			t.Fatalf("op %d failed: %+v", i, r)
+		}
+	}
+	b, err := s.Get("b1")
+	if err != nil || b.ParentID != "f2" {
+		t.Fatalf("nested create lost: %+v err=%v", b, err)
+	}
+	// parent AFTER child must fail the child (not silently orphan it)
+	res = s.ApplyBatch([]BatchOp{
+		{ID: "b2", Op: "create", Type: "url", ParentID: strptr("nope"), Title: strptr("X"), URL: strptr("https://x"), UpdatedAt: 100, DeviceID: "d"},
+	}, Now())
+	if res[0].Win || res[0].Error == "" {
+		t.Fatalf("unknown parent must error: %+v", res[0])
+	}
+}
+
+func TestApplyBatchDeleteSubtree(t *testing.T) {
+	s := newTestStore(t)
+	f := seed(s, "", "folder", "F", "")
+	k := seed(s, f.ID, "url", "K", "https://k")
+	res := s.ApplyBatch([]BatchOp{{ID: f.ID, Op: "delete", UpdatedAt: 500, DeviceID: "d"}}, Now())
+	if !res[0].Win {
+		t.Fatalf("delete failed: %+v", res[0])
+	}
+	kid, _ := s.Get(k.ID)
+	if kid.DeletedAt == 0 {
+		t.Fatal("subtree child must be tombstoned with the folder")
+	}
+	// deleting an already-absent row is a win (idempotent)
+	res = s.ApplyBatch([]BatchOp{{ID: "ghost", Op: "delete", UpdatedAt: 500, DeviceID: "d"}}, Now())
+	if !res[0].Win {
+		t.Fatalf("idempotent delete must win: %+v", res[0])
 	}
 }
 
@@ -190,27 +261,27 @@ func TestTagsAndSearch(t *testing.T) {
 	}
 }
 
-func TestChangesSince(t *testing.T) {
+func strptr(s string) *string { return &s }
+
+func TestApplyBatchReconcileRoundtrip(t *testing.T) {
+	// mirrors the reconciler's full cycle: pull tree → apply local edits →
+	// tree reflects them and head advances monotonically
 	s := newTestStore(t)
-	b1 := seed(s, "", "url", "one", "https://1")
-	seed(s, "", "url", "two", "https://2")
-	changed, maxRev, err := s.ChangesSince(0, 0)
-	if err != nil || len(changed) != 2 {
-		t.Fatalf("changes = %d err=%v", len(changed), err)
+	before, _ := s.MaxRevision()
+	f := seed(s, "", "folder", "Work", "")
+	base := f.Revision
+	if base < before {
+		t.Fatalf("revision went backwards: %d < %d", base, before)
 	}
-	// modify one
-	b1.Title = "one!"
-	b1.UpdatedAt += 5
-	if _, _, err := s.UpdateLWW(b1, nil); err != nil {
-		t.Fatal(err)
+	res := s.ApplyBatch([]BatchOp{{
+		ID: f.ID, Op: "update", Title: strptr("Work2"),
+		UpdatedAt: f.UpdatedAt + 5, DeviceID: "ext-1", ObservedRevision: f.Revision,
+	}}, Now())
+	if !res[0].Win {
+		t.Fatalf("update lost: %+v", res[0])
 	}
-	changed, maxRev, _ = s.ChangesSince(0, 0)
-	if len(changed) != 2 || maxRev < 3 {
-		t.Fatalf("after change: n=%d max=%d", len(changed), maxRev)
-	}
-	since := changed[0].Revision
-	changed2, max2, _ := s.ChangesSince(since, 0)
-	if len(changed2) != 1 || max2 != maxRev {
-		t.Fatalf("incremental: n=%d max=%d", len(changed2), max2)
+	after, _ := s.MaxRevision()
+	if after <= before {
+		t.Fatalf("head did not advance: %d -> %d", before, after)
 	}
 }

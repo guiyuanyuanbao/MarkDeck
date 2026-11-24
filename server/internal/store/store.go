@@ -40,6 +40,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.MigrateOthersHolders(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate others holders: %w", err)
+	}
 	return s, nil
 }
 

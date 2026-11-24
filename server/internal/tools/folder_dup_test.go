@@ -12,6 +12,10 @@ func newTestChain(t *testing.T) *Chain {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Close before t.TempDir cleanup: on Windows an open SQLite handle
+	// makes RemoveAll fail ("file in use") and the test reports that
+	// cleanup error instead of its assertions.
+	t.Cleanup(func() { st.Close() })
 	return NewChain(st, filepath.Join(t.TempDir(), "snaps"), nil)
 }
 

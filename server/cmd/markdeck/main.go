@@ -41,8 +41,15 @@ func main() {
 	am := auth.NewManager(st, cfg.SessionTTLHours, secure)
 	hub := sync.NewHub()
 	chain := tools.NewChain(st, cfg.SnapshotDir, func(rev int64) {
+		// tools historically broadcast literal 0, which the hub's monotonic
+		// filter always dropped — snapshot restores/dead-link scans never
+		// woke live devices. Resolve the real head instead.
 		if rev > 0 {
 			hub.Broadcast(rev)
+			return
+		}
+		if head, err := st.MaxRevision(); err == nil && head > 0 {
+			hub.Broadcast(head)
 		}
 	})
 	fetcher := favicon.NewFetcher(st)
