@@ -84,7 +84,11 @@ async function loadList() {
     const inFolder = nodes.filter((n) => n.parentId === currentFolder.value)
     inFolder.sort((a, b) => a.position - b.position)
     list.value = tagFilter.value ? inFolder.filter((n) => n.tags?.includes(tagFilter.value)) : inFolder
-    checked.value = new Set()
+    // keep ids that still exist: a background revision mid-selection used to
+    // wipe the user's checked set entirely
+    const live = new Set(list.value.map((n) => n.id))
+    checked.value = new Set([...checked.value].filter((id) => live.has(id)))
+    lastIndex = -1
   } finally {
     loading.value = false
   }
@@ -109,7 +113,13 @@ watch(searchQ, () => {
   searchTimer = setTimeout(doSearch, 300)
 })
 
-function onRevision() { loadTree(); loadList() }
+// revision bursts (batch syncs fire many pings) used to trigger two full
+// reloads per ping; coalesce to one refresh per 800ms window
+let revTimer: ReturnType<typeof setTimeout> | null = null
+function onRevision() {
+  if (revTimer) return
+  revTimer = setTimeout(() => { revTimer = null; loadTree(); loadList() }, 800)
+}
 onMounted(() => {
   loadTree(); loadList()
   bookmarksApi.tags().then((r) => (allTags.value = r.tags))
@@ -125,15 +135,21 @@ function openEdit(b: Bookmark) {
   editDlg.value?.openEdit(b)
 }
 async function toggleFav(b: Bookmark) {
-  await bookmarksApi.update(b.id, { favorite: !b.favorite })
-  loadList()
+  try {
+    await bookmarksApi.update(b.id, { favorite: !b.favorite })
+    loadList()
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 async function removeMany(ids: string[]) {
   if (!ids.length) return
-  await ElMessageBox.confirm(`将 ${ids.length} 项移入回收站？`, '删除', { type: 'warning' })
-  await bookmarksApi.batch({ ids, action: 'delete' })
-  ElMessage.success(`已删除 ${ids.length} 项`)
-  loadTree(); loadList()
+  try {
+    await ElMessageBox.confirm(`将 ${ids.length} 项移入回收站？`, '删除', { type: 'warning' })
+  } catch { return } // user cancelled — not an error
+  try {
+    await bookmarksApi.batch({ ids, action: 'delete' })
+    ElMessage.success(`已删除 ${ids.length} 项`)
+    loadTree(); loadList()
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 
 // ---- selection ----
@@ -179,8 +195,10 @@ function batchTag() {
 async function batchFavorite(value: boolean) {
   const ids = [...checked.value]
   if (!ids.length) return
-  await bookmarksApi.batch({ ids, action: 'favorite', value })
-  loadTree(); loadList()
+  try {
+    await bookmarksApi.batch({ ids, action: 'favorite', value })
+    loadTree(); loadList()
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 
 // ---- open semantics ----
@@ -303,32 +321,42 @@ function copySelected(mode: 'copy' | 'cut') {
   clipboard.value = { mode, ids }
   ElMessage.success(mode === 'copy' ? `已复制 ${ids.length} 项` : `已剪切 ${ids.length} 项`)
 }
+let pasting = false
 async function paste() {
   const clip = clipboard.value
-  if (!clip) return
+  if (!clip || pasting) return // Ctrl+V auto-repeat / double-fire guard
+  pasting = true
   try {
     if (clip.mode === 'cut') {
       await bookmarksApi.batch({ ids: clip.ids, action: 'move', parentId: currentFolder.value })
       clipboard.value = null // cut is one-shot
       ElMessage.success('已粘贴（移动）')
     } else {
+      let done = 0
+      let failed = 0
       for (const id of clip.ids) {
         const src = flat.value.get(id)
         if (!src) continue
-        await bookmarksApi.create({
-          type: src.type,
-          parentId: currentFolder.value,
-          title: src.title,
-          url: src.url || '',
-          note: src.note || '',
-          favorite: src.favorite,
-          tags: src.tags || [],
-        })
+        try {
+          await bookmarksApi.create({
+            type: src.type,
+            parentId: currentFolder.value,
+            title: src.title,
+            url: src.url || '',
+            note: src.note || '',
+            favorite: src.favorite,
+            tags: src.tags || [],
+          })
+          done++
+        } catch { failed++ }
       }
-      ElMessage.success(`已复制 ${clip.ids.length} 项`)
+      if (failed) ElMessage.warning(`已粘贴 ${done} 项，${failed} 项失败`)
+      else ElMessage.success(`已复制 ${done} 项`)
     }
     loadTree(); loadList()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e: any) { ElMessage.error(e.message) } finally {
+    pasting = false
+  }
 }
 
 // ---- keyboard (scoped to .bm-content) ----

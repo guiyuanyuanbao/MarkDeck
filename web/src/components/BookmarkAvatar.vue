@@ -2,7 +2,7 @@
 // Shared bookmark avatar: favicon with per-host fallback to the letter
 // gradient. Extracted from BookmarksView so list rows and grid cards
 // render identically without duplicating the fallback logic.
-import { ref, watch } from 'vue'
+import { ref, watch, onBeforeUnmount } from 'vue'
 import type { Bookmark } from '../api/client'
 
 const props = withDefaults(defineProps<{
@@ -15,11 +15,21 @@ const failed = ref(false)
 // changed → favicons may have been re-pushed). Appended to the favicon URL
 // so updated icons bust the browser cache instantly instead of sticking
 // for the CDN lifetime.
+//
+// ONE module-level listener instead of one per instance: a 100-row list
+// used to register 100 window listeners (and write localStorage 100×),
+// none of them ever removed. `failed` also resets on the bump — previously
+// an icon that failed once kept showing the letter fallback forever even
+// after the server got the real icon.
 const iconVer = ref(Number(localStorage.getItem('md-icon-ver') || 0))
-window.addEventListener('md:revision', () => {
+function onRevision() {
   iconVer.value++
+  failed.value = false
   localStorage.setItem('md-icon-ver', String(iconVer.value))
-})
+}
+window.addEventListener('md:revision', onRevision)
+onBeforeUnmount(() => window.removeEventListener('md:revision', onRevision))
+
 watch(() => props.b.url, () => { failed.value = false })
 
 function hostOf(b: Bookmark): string | null {

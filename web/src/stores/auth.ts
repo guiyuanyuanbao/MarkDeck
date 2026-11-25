@@ -50,6 +50,7 @@ export const useAuthStore = defineStore('auth', {
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let wsAttempt = 0
 
 export function connectWS() {
   if (ws && ws.readyState <= 1) return
@@ -60,6 +61,12 @@ export function connectWS() {
     startPolling()
     return
   }
+  ws.onopen = () => {
+    wsAttempt = 0
+    // WS is live again: the 6s polling fallback is now redundant double
+    // channel (it used to run forever once started, doubling every request)
+    stopPolling()
+  }
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data)
@@ -68,16 +75,27 @@ export function connectWS() {
   }
   ws.onclose = () => {
     ws = null
-    reconnectTimer = setTimeout(connectWS, 5000) // retry, falls back to polling on repeat failure
+    stopPolling()
+    reconnectTimer = setTimeout(() => {
+      // only the retry path may degrade to polling: one failed WS attempt
+      // starts the 6s fallback; a later successful connect (onopen) stops it
+      wsAttempt++
+      if (wsAttempt >= 2) startPolling()
+      connectWS()
+    }, 5000)
   }
-  ws.onerror = () => startPolling()
+  ws.onerror = () => { try { ws?.close() } catch { /* already closing */ } }
 }
 
 export function disconnectWS() {
   if (reconnectTimer) clearTimeout(reconnectTimer)
-  if (pollTimer) clearInterval(pollTimer)
+  stopPolling()
   ws?.close()
   ws = null
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
 function startPolling() {

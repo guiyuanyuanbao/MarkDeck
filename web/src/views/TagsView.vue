@@ -17,32 +17,42 @@ async function load() {
 onMounted(load)
 
 async function rename(t: TagInfo) {
+  let value: string
   try {
-    const { value } = await ElMessageBox.prompt(`重命名标签「${t.tag}」`, '重命名', { inputValue: t.tag })
-    const to = value.trim()
-    if (!to || to === t.tag) return
+    ;({ value } = await ElMessageBox.prompt(`重命名标签「${t.tag}」`, '重命名', { inputValue: t.tag }))
+  } catch { return } // cancelled
+  const to = value.trim()
+  if (!to || to === t.tag) return
+  try {
     const r = await bookmarksApi.renameTag(t.tag, to)
     ElMessage.success(`已重命名（影响 ${r.affected} 个书签）`)
     load()
-  } catch { /* cancelled */ }
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 
 async function merge(t: TagInfo) {
+  let value: string
   try {
-    const { value } = await ElMessageBox.prompt(`将「${t.tag}」合并到哪个标签？`, '合并标签')
-    const to = value.trim()
-    if (!to) return
+    ;({ value } = await ElMessageBox.prompt(`将「${t.tag}」合并到哪个标签？`, '合并标签'))
+  } catch { return } // cancelled
+  const to = value.trim()
+  if (!to) return
+  try {
     const r = await bookmarksApi.renameTag(t.tag, to)
     ElMessage.success(`已合并（影响 ${r.affected} 个书签）`)
     load()
-  } catch { /* cancelled */ }
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 
 async function remove(t: TagInfo) {
-  await ElMessageBox.confirm(`从所有书签移除标签「${t.tag}」？（不影响书签本身）`, '删除标签', { type: 'warning' })
-  const r = await bookmarksApi.deleteTag(t.tag)
-  ElMessage.success(`已移除（影响 ${r.affected} 个书签）`)
-  load()
+  try {
+    await ElMessageBox.confirm(`从所有书签移除标签「${t.tag}」？（不影响书签本身）`, '删除标签', { type: 'warning' })
+  } catch { return }
+  try {
+    const r = await bookmarksApi.deleteTag(t.tag)
+    ElMessage.success(`已移除（影响 ${r.affected} 个书签）`)
+    load()
+  } catch (e: any) { ElMessage.error(e.message) }
 }
 </script>
 

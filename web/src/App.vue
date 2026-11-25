@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { Icon } from '@/components/icons'
@@ -30,6 +30,9 @@ function isActive(p: string) {
   if (p === '/') return route.path === '/'
   return route.path.startsWith(p)
 }
+// the devices icon deep-links to /settings#devices; route.path never carries
+// the hash, so isActive('/settings#devices') was permanently false
+const devicesActive = computed(() => route.path === '/settings' && (route.hash === '#devices' || route.hash === ''))
 
 onMounted(() => {
   window.addEventListener('md:unauthorized', () => {
@@ -62,7 +65,7 @@ onMounted(() => {
       </nav>
 
       <div class="md-header-right">
-        <button class="md-topicon" :class="{ active: isActive('/settings#devices') }" title="配对设备" @click="router.push('/settings#devices')">
+        <button class="md-topicon" :class="{ active: devicesActive }" title="配对设备" @click="router.push('/settings#devices')">
           <Icon name="laptop" :size="17" />
         </button>
         <button class="md-topicon" title="设置" @click="router.push('/settings')">

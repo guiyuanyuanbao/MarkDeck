@@ -21,16 +21,25 @@ const deadDeleting = ref(false)
 
 onMounted(load)
 
-async function load() {
+async function load(preserveSelection = false) {
   loading.value = true
   try {
     const [d, g, fg] = await Promise.all([toolsApi.deadLinks(), toolsApi.duplicates(), toolsApi.folderDuplicates()])
     dead.value = d.links || []
     dups.value = g.groups || []
     folderDups.value = fg.groups || []
-    selDup.value = new Set()
-    selFolder.value = new Set()
-    deadSel.value = new Set()
+    // selection-preserving mode for the scan poller: wiping deadSel every
+    // 3s tick made it impossible to tick checkboxes while a scan ran
+    if (!preserveSelection) {
+      selDup.value = new Set()
+      selFolder.value = new Set()
+      deadSel.value = new Set()
+    } else {
+      const liveDead = new Set(dead.value.map((x) => x.bookmark.id))
+      deadSel.value = new Set([...deadSel.value].filter((id) => liveDead.has(id)))
+    }
+  } catch (e: any) {
+    ElMessage.error('工具数据加载失败: ' + e.message)
   } finally {
     loading.value = false
   }
@@ -52,7 +61,7 @@ function pollScan() {
   const t = setInterval(async () => {
     try {
       const st = await toolsApi.scanStatus()
-      await load()
+      await load(true)
       if (!st.running) {
         scanning.value = false
         clearInterval(t)
@@ -60,7 +69,15 @@ function pollScan() {
       }
     } catch { /* keep polling */ }
   }, 3000)
-  setTimeout(() => clearInterval(t), 10 * 60 * 1000)
+  // the deadline must also reset `scanning` — previously a 10-minute cap
+  // left the button loading forever on an over-long scan
+  setTimeout(() => {
+    clearInterval(t)
+    if (scanning.value) {
+      scanning.value = false
+      ElMessage.warning('扫描超时（10 分钟），请稍后手动刷新查看结果')
+    }
+  }, 10 * 60 * 1000)
 }
 
 function statusTag(s: string) {
