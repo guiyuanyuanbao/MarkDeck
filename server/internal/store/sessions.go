@@ -103,10 +103,17 @@ func (s *Store) ListDevices() ([]DeviceRow, error) {
 	return out, rows.Err()
 }
 
-// DeleteDevice revokes a device.
+// DeleteDevice revokes a device. ErrNotFound when the id does not exist so
+// the revoke endpoint can answer 404 instead of a silent 200.
 func (s *Store) DeleteDevice(id string) error {
-	_, err := s.DB.Exec(`DELETE FROM devices WHERE id=?`, id)
-	return err
+	res, err := s.DB.Exec(`DELETE FROM devices WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ---- pairing codes ----

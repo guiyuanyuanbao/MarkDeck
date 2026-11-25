@@ -320,8 +320,10 @@ func (a *API) handleNewPairCode(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	name := strings.TrimSpace(body.DeviceName)
-	if len(name) > 60 {
-		name = name[:60]
+	// rune-safe cap: a byte slice used to cut multi-byte names mid-character,
+	// persisting invalid UTF-8
+	if runes := []rune(name); len(runes) > 60 {
+		name = string(runes[:60])
 	}
 	code, err := a.Auth.NewPairCode(name)
 	if err != nil {
@@ -392,6 +394,10 @@ func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	if err := a.Auth.RevokeDevice(r.PathValue("id")); err != nil {
+		if err == store.ErrNotFound {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+			return
+		}
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
