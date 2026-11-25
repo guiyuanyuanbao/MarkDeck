@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { toolsApi, authApi, type Bookmark } from '@/api/client'
+import { toolsApi, authApi, bookmarksApi, type Bookmark } from '@/api/client'
 import { Icon } from '@/components/icons'
 
 const tab = ref('dead')
@@ -16,6 +16,8 @@ const selDup = ref<Set<string>>(new Set())      // group keys
 const selFolder = ref<Set<string>>(new Set())   // parentId+title
 const mergingAll = ref(false)
 const clearingFavicons = ref(false)
+const deadSel = ref<Set<string>>(new Set())
+const deadDeleting = ref(false)
 
 onMounted(load)
 
@@ -28,6 +30,7 @@ async function load() {
     folderDups.value = fg.groups || []
     selDup.value = new Set()
     selFolder.value = new Set()
+    deadSel.value = new Set()
   } finally {
     loading.value = false
   }
@@ -65,6 +68,24 @@ function statusTag(s: string) {
   if (s.startsWith('blocked:')) return 'warning'
   if (s.startsWith('http:4')) return 'warning'
   return 'danger'
+}
+
+// ---- dead links quick actions ----
+async function deleteDeadSelected() {
+  const ids = [...deadSel.value]
+  if (!ids.length) return
+  try {
+    await ElMessageBox.confirm(`将所选 ${ids.length} 条失效/可疑书签移入回收站？可在回收站恢复。`, '批量删除', { type: 'warning' })
+    deadDeleting.value = true
+    await bookmarksApi.batch({ ids, action: 'delete' })
+    ElMessage.success(`已移入回收站 ${ids.length} 条`)
+    deadSel.value = new Set()
+    await load()
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } finally {
+    deadDeleting.value = false
+  }
 }
 
 // ---- duplicate bookmarks ----
@@ -224,7 +245,14 @@ async function clearFavicons() {
         <el-button type="primary" :loading="scanning" @click="startScan">开始扫描</el-button>
         <span class="tm-hint">检查所有书签 URL 可达性（HEAD → GET 回退，并发 8，每域名限速）</span>
       </div>
-      <el-table :data="dead">
+      <div v-if="dead.length" class="tm-bar">
+        <el-button type="danger" plain :disabled="!deadSel.size" :loading="deadDeleting" @click="deleteDeadSelected">
+          移入回收站（{{ deadSel.size }}）
+        </el-button>
+        <span class="tm-hint">blocked:4xx 多为反爬拦截，不一定是死链；删除前请人工确认</span>
+      </div>
+      <el-table :data="dead" @selection-change="(rows: any[]) => (deadSel = new Set(rows.map((r: any) => r.bookmark.id)))">
+        <el-table-column type="selection" width="42" />
         <el-table-column label="书签" min-width="260">
           <template #default="{ row }">{{ row.bookmark.title || row.bookmark.url }}</template>
         </el-table-column>

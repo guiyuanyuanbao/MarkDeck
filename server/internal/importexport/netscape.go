@@ -3,6 +3,8 @@
 package importexport
 
 import (
+	"net/url"
+	"encoding/base64"
 	"fmt"
 	html "golang.org/x/net/html"
 	"sort"
@@ -16,7 +18,8 @@ import (
 type Node struct {
 	Title    string
 	URL      string
-	AddDate  int64 // unix seconds
+	AddDate  int64  // unix seconds
+	IconData []byte // decoded ICON="data:image/...;base64,..." attribute (may be nil)
 	Children []*Node
 	// toolbarFolderAttr: the H3 carried PERSONAL_TOOLBAR_FOLDER="true" —
 	// Chromium's locale-independent marker for "this is my bookmarks bar".
@@ -66,16 +69,19 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 			case "a":
 				var title, url string
 				var add int64
+				var iconData []byte
 				for _, a := range t.Attr {
 					switch a.Key {
 					case "href":
 						url = a.Val
 					case "add_date":
 						add = parseTime(a.Val)
+					case "icon":
+						iconData = decodeDataURI(a.Val)
 					}
 				}
 				// text follows in next TextToken
-				n := &Node{URL: url, AddDate: add}
+				n := &Node{URL: url, AddDate: add, IconData: iconData}
 				if txt := nextText(tk); txt != "" {
 					title = txt
 				}
@@ -263,6 +269,23 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 	res := &ImportResult{}
 	at := store.Now()
 
+	// favicon harvesting: Chrome exports embed each bookmark's real icon as
+	// a data: URI — far more accurate than fetching. Collect per-host (first
+	// non-empty wins) and store after a successful import.
+	iconsByHost := map[string][]byte{}
+	var harvestIcons func(n *Node)
+	harvestIcons = func(n *Node) {
+		if n.IconData != nil && n.URL != "" {
+			if h := hostOfURL(n.URL); h != "" && iconsByHost[h] == nil {
+				iconsByHost[h] = n.IconData
+			}
+		}
+		for _, c := range n.Children {
+			harvestIcons(c)
+		}
+	}
+	harvestIcons(root)
+
 	var existingURLs map[string]bool
 	if opts.Mode == "merge" {
 		existingURLs = map[string]bool{}
@@ -420,6 +443,7 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 				res.Created++
 			}
 		}
+		storeIcons(s, iconsByHost)
 		return res, nil
 	}
 
@@ -430,7 +454,33 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 		return nil, err
 	}
 	res.RootID = rid
+	storeIcons(s, iconsByHost)
 	return res, nil
+}
+
+// hostOfURL extracts the hostname for favicon keying ("" on parse failure).
+func hostOfURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// storeIcons writes harvested icons into the favicon cache. These are the
+// browser's own icons — they outrank any cached fetch, so write unconditionally.
+func storeIcons(s *store.Store, icons map[string][]byte) {
+	for host, data := range icons {
+		ctype := "image/png"
+		if len(data) >= 3 && data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+			ctype = "image/gif"
+		} else if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xD8 {
+			ctype = "image/jpeg"
+		} else if len(data) >= 4 && data[0] == '<' && data[1] == 's' && data[2] == 'v' {
+			ctype = "image/svg+xml"
+		}
+		_ = s.FaviconPut(host, ctype, data)
+	}
 }
 
 // ExportNetscapeHTML renders the live tree as Netscape bookmark HTML.
@@ -539,4 +589,20 @@ var trackingParams = map[string]bool{
 	"utm_term": true, "utm_content": true, "utm_id": true,
 	"fbclid": true, "gclid": true, "ref": true, "ref_src": true,
 	"spm": true, "share_token": true, "share_source": true,
+}
+
+
+// decodeDataURI decodes a data: URI payload (ICON attributes carry base64
+// images). Returns nil for anything non-image or undecodable — icon data is
+// strictly best-effort.
+func decodeDataURI(raw string) []byte {
+	i := strings.Index(raw, "base64,")
+	if i < 0 || !strings.HasPrefix(raw, "data:image/") {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(raw[i+len("base64,"):])
+	if err != nil || len(data) == 0 || len(data) > 256<<10 {
+		return nil
+	}
+	return data
 }

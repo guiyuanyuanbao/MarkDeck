@@ -115,3 +115,52 @@ func TestImportChromeExportNoWrapperLayer(t *testing.T) {
 		t.Fatalf("created=%d want 3", res.Created)
 	}
 }
+
+// ICON attributes in Chrome exports carry each bookmark's REAL favicon as a
+// data: URI — the correct source for admin-UI icons. Import must harvest
+// them into the favicons table per host.
+func TestImportHarvestsIconsFromExport(t *testing.T) {
+	// 1x1 red PNG
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+	const ghPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	sample := `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+    <DT><H3 PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+    <DL><p>
+        <DT><A HREF="https://mail.google.com/" ICON="data:image/png;base64,` + png + `">Gmail</A>
+        <DT><A HREF="https://github.com/" ICON="data:image/png;base64,` + ghPng + `">GitHub</A>
+        <DT><A HREF="https://no-icon.test/">No Icon</A>
+    </DL><p>
+</DL><p>`
+	root, err := ParseNetscapeHTML([]byte(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := Import(st, root, ImportOptions{Mode: "merge", DeviceID: "import"}); err != nil {
+		t.Fatal(err)
+	}
+	// Gmail icon stored under its host
+	row, err := st.FaviconGet("mail.google.com")
+	if err != nil || len(row.Data) == 0 {
+		t.Fatalf("Gmail icon not harvested: %v", err)
+	}
+	if row.ContentType != "image/png" {
+		t.Fatalf("content type = %s", row.ContentType)
+	}
+	row2, err := st.FaviconGet("github.com")
+	if err != nil || len(row2.Data) == 0 {
+		t.Fatalf("GitHub icon not harvested")
+	}
+	if string(row.Data) == string(row2.Data) {
+		t.Fatal("per-host icons must differ")
+	}
+	// no-icon host must NOT appear
+	if _, err := st.FaviconGet("no-icon.test"); err == nil {
+		t.Fatal("host without ICON must not have an entry")
+	}
+}

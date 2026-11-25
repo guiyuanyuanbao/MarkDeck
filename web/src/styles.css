@@ -2,6 +2,7 @@
    MarkDeck Design System — modern, soft, focused
    ============================================================ */
 :root {
+  --md-header-h: 56px;
   --md-bg: #f5f6fa;
   --md-surface: #ffffff;
   --md-border: #e8eaf1;
@@ -31,16 +32,15 @@
   --md-login-bg1: var(--md-login-bg1);
   --md-login-bg2: var(--md-login-bg2);
   --md-sidebar-bg: linear-gradient(180deg, #14172a, #191d36);
-  --md-sidebar-text: var(--md-sidebar-text);
+  --md-sidebar-text: #b6bad0;
   --md-sidebar-text-dim: #8f95ad;
-  --md-sidebar-active: var(--md-sidebar-active);
-  --md-sidebar-hover: var(--md-sidebar-hover);
+  --md-sidebar-active: rgba(255, 255, 255, 0.08);
+  --md-sidebar-hover: rgba(255, 255, 255, 0.05);
   --md-folder-grad: linear-gradient(135deg, #f0b95a, #f59e0b);
   --md-radius: 14px;
   --md-radius-sm: 10px;
   --md-shadow: 0 1px 2px rgba(24, 28, 58, 0.05), 0 2px 10px rgba(24, 28, 58, 0.05);
   --md-shadow-lg: 0 10px 34px rgba(24, 28, 58, 0.12);
-  --md-sidebar-w: 236px;
   --md-font: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
 }
 
@@ -81,85 +81,11 @@ body {
 /* ============================================================
    App layout + sidebar
    ============================================================ */
-.md-layout { display: flex; height: 100%; }
 
-.md-sidebar {
-  width: var(--md-sidebar-w);
-  flex-shrink: 0;
-  background: var(--md-sidebar-bg);
-  color: var(--md-sidebar-text);
-  display: flex;
-  flex-direction: column;
-  padding: 18px 14px;
-  user-select: none;
-}
 
-.md-logo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px 20px;
-}
-.md-logo-mark {
-  width: 34px; height: 34px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, var(--md-primary), color-mix(in srgb, var(--md-primary) 55%, #a855f7));
-  display: grid; place-items: center;
-  color: #fff;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--md-primary) 45%, transparent);
-  flex-shrink: 0;
-}
-.md-logo-name {
-  font-size: 17px;
-  font-weight: 700;
-  color: #fff;
-  letter-spacing: 0.4px;
-}
 
-.md-nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
-.md-nav-item {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  font-size: 14px;
-  color: var(--md-sidebar-text-dim);
-  cursor: pointer;
-  transition: background 0.16s ease, color 0.16s ease;
-  border: none;
-  background: transparent;
-  width: 100%;
-  text-align: left;
-  font-family: inherit;
-}
-.md-nav-item:hover { background: rgba(255, 255, 255, 0.06); color: var(--md-sidebar-text); }
-.md-nav-item.active {
-  background: linear-gradient(90deg, rgba(91, 103, 242, 0.28), rgba(91, 103, 242, 0.12));
-  color: #fff;
-  font-weight: 600;
-}
-.md-nav-item.active .md-nav-ico { display: inline-flex; align-items: center; color: var(--md-primary-light-5); }
-.md-nav-ico { display: inline-flex; align-items: center; font-size: 17px; color: var(--md-sidebar-text-dim); display: grid; place-items: center; }
 
-.md-sidebar-foot { padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.07); }
-.md-user-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px 12px; }
-.md-user-avatar {
-  width: 30px; height: 30px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--md-success), var(--md-primary));
-  color: #fff; font-size: 13px; font-weight: 700;
-  display: grid; place-items: center;
-}
-.md-user-name { font-size: 13px; color: var(--md-sidebar-text); flex: 1; }
-.md-logout {
-  background: none; border: none; color: var(--md-sidebar-text-dim);
-  cursor: pointer; font-size: 13px; padding: 4px 6px; border-radius: 6px;
-  font-family: inherit;
-}
-.md-logout:hover { color: var(--md-danger-soft); background: rgba(229, 72, 77, 0.12); }
 
-.md-main { flex: 1; overflow: auto; padding: 22px 26px; }
 
 /* ============================================================
    Generic surfaces (cards, dialogs, tables on secondary pages)
@@ -260,8 +186,7 @@ body {
   backdrop-filter: blur(6px);
 }
 .login-brand { display: flex; flex-direction: column; align-items: center; gap: 12px; margin-bottom: 6px; }
-.login-brand .md-logo-mark { width: 52px; height: 52px; border-radius: 15px; }
-.login-title { font-size: 20px; font-weight: 700; }
+.login-brand .login-title { font-size: 20px; font-weight: 700; }
 .login-sub { color: var(--md-text-2); font-size: 13px; }
 
 /* ============================================================
@@ -921,7 +846,79 @@ body {
 .gs-btn:hover { color: var(--md-text-2); }
 .gs-btn.active { background: var(--md-primary-soft); color: var(--md-primary); }
 .gs-btn svg { display: block; }
-.md-main {
-  padding: 18px 26px 26px;
-  overflow: auto;
+
+
+/* ============================================================
+   Single-header layout (sidebar removed)
+   ============================================================ */
+.md-page { height: 100%; display: flex; flex-direction: column; }
+.md-header {
+  height: var(--md-header-h);
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 22px;
+  background: var(--md-sidebar-bg);
+  flex-shrink: 0;
+}
+.md-header-brand {
+  display: flex; align-items: center; gap: 9px;
+  cursor: pointer; flex-shrink: 0;
+}
+.md-header-brand .md-brand-name { color: #fff; font-weight: 700; font-size: 16px; letter-spacing: .3px; }
+.md-header-nav { display: flex; gap: 2px; flex: 1; }
+.md-hnav-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: none; background: none;
+  padding: 7px 13px;
+  border-radius: 9px;
+  font-size: 13.5px; font-family: inherit;
+  color: var(--md-sidebar-text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.md-hnav-item:hover { color: #fff; background: var(--md-sidebar-hover); }
+.md-hnav-item.active { color: #fff; background: var(--md-sidebar-active); font-weight: 600; }
+.md-header-right { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.md-header-right .md-topicon { color: var(--md-sidebar-text); }
+.md-header-right .md-topicon:hover, .md-header-right .md-topicon.active { background: var(--md-sidebar-active); color: #fff; }
+.md-header-right .theme-pop { color: var(--md-text); }
+.md-header-sep { width: 1px; height: 20px; background: rgba(255,255,255,.14); margin: 0 4px; }
+.md-user-chip { display: flex; align-items: center; gap: 7px; }
+.md-user-chip .theme-wrap { position: relative; }
+.theme-pop {
+  position: absolute;
+  right: 0; top: 38px;
+  background: var(--md-surface);
+  border: 1px solid var(--md-border);
+  border-radius: var(--md-radius-sm);
+  box-shadow: var(--md-shadow-lg);
+  padding: 6px;
+  min-width: 150px;
+  z-index: 500;
+}
+.theme-opt {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  border-radius: 7px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--md-text);
+  cursor: pointer;
+}
+.theme-opt:hover { background: var(--md-primary-soft); }
+.theme-opt.active { color: var(--md-primary); font-weight: 600; }
+.theme-swatch { width: 16px; height: 16px; border-radius: 5px; flex-shrink: 0; }
+.md-topicon {
+  width: 32px; height: 32px;
+  border: none; background: none;
+  border-radius: 9px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
 }

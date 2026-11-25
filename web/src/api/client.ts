@@ -127,6 +127,7 @@ export const authApi = {
   getProxy: () => api.get<{ proxy: string }>('/api/network/proxy'),
   clearFavicons: () => api.post<{ ok: string; cleared: string }>('/api/favicon/clear', {}),
   setProxy: (proxy: string) => api.post<{ ok: string }>('/api/network/proxy', { proxy }),
+  testProxy: (proxy: string) => api.post<{ ok: boolean; status?: number; ms?: number; error?: string }>('/api/network/proxy-test', { proxy }),
   devices: () => api.get<{ devices: Device[] }>('/api/devices'),
   revokeDevice: (id: string) => api.del(`/api/devices/${id}`),
 }

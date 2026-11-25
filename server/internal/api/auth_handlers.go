@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
@@ -36,6 +37,7 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/extension/update", a.handleExtensionUpdate)
 	mux.HandleFunc("GET /api/network/proxy", a.requireSession(a.handleGetProxy))
 	mux.HandleFunc("POST /api/network/proxy", a.requireSession(a.handleSetProxy))
+	mux.HandleFunc("POST /api/network/proxy-test", a.requireSession(a.handleTestProxy))
 	mux.HandleFunc("GET /api/devices", a.requireSession(a.handleListDevices))
 	mux.HandleFunc("DELETE /api/devices/{id}", a.requireSession(a.handleRevokeDevice))
 
@@ -247,6 +249,36 @@ func (a *API) handleSetProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+}
+
+// handleTestProxy fetches google.com/generate_204 through the configured
+// proxy (or directly when none) and reports latency — the admin UI's
+// connectivity check button.
+func (a *API) handleTestProxy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Proxy string `json:"proxy"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	transport := &http.Transport{ Proxy: nil }
+	if p := strings.TrimSpace(body.Proxy); p != "" {
+		u, err := url.Parse(p)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "代理格式无效"})
+			return
+		}
+		transport.Proxy = http.ProxyURL(u)
+	}
+	client := &http.Client{ Timeout: 8 * time.Second, Transport: transport }
+	start := time.Now()
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://www.google.com/generate_204", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	resp.Body.Close()
+	ms := time.Since(start).Milliseconds()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": resp.StatusCode, "ms": ms})
 }
 
 // handleExtensionUpdate tells the extension which version is current so its

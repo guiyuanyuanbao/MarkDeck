@@ -60,6 +60,7 @@ async function loadDevices() {
     // a new device appeared while a pairing code is on screen: announce it
     const sig = list.map(x => x.id).sort().join(',')
     if (pairCode.value && lastDeviceSig && sig !== lastDeviceSig) {
+      pairCode.value = '' // consumed: stop showing a dead code
       ElMessage.success('新设备已配对，同步已开始')
     }
     lastDeviceSig = sig
@@ -128,6 +129,23 @@ async function loadProxy() {
     proxyUrl.value = r.proxy || ''
   } catch { /* server older than this feature */ }
 }
+const proxyTesting = ref(false)
+const proxyTestResult = ref<{ ok: boolean; text: string } | null>(null)
+async function testProxy() {
+  proxyTesting.value = true
+  proxyTestResult.value = null
+  try {
+    const r = await authApi.testProxy(proxyUrl.value.trim())
+    proxyTestResult.value = r.ok && r.status === 204
+      ? { ok: true, text: `连通正常（${r.ms} ms 经 Google 连通性端点）` }
+      : { ok: false, text: r.ok ? `HTTP ${r.status}（非预期响应）` : (r.error || '无法连接') }
+  } catch (e: any) {
+    proxyTestResult.value = { ok: false, text: e.message }
+  } finally {
+    proxyTesting.value = false
+  }
+}
+
 async function saveProxy() {
   try {
     await authApi.setProxy(proxyUrl.value.trim())
@@ -149,8 +167,22 @@ async function newPairCode() {
 }
 async function copyPairCode() {
   if (!pairCode.value) return
+  const code = pairCode.value
+  // navigator.clipboard only exists in secure contexts — most self-hosted
+  // deployments run plain http on a LAN, so fall back to a hidden textarea
   try {
-    await navigator.clipboard.writeText(pairCode.value)
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(code)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = code
+      ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      if (!ok) throw new Error('copy rejected')
+    }
     ElMessage.success('配对码已复制')
   } catch {
     ElMessage.error('复制失败，请手动选择')
@@ -277,12 +309,16 @@ async function restoreSnap(s: Snapshot) {
       <el-tab-pane label="网络代理" name="network">
         <el-alert type="info" :closable="false" style="margin-bottom: 12px"
           title="服务端抓取网页图标和死链检测的出站代理。部署在国内访问境外站点困难时，配置后图标抓取成功率会显著提升。" />
-        <div style="display:flex;gap:10px;align-items:center;max-width:560px">
+        <div style="display:flex;gap:10px;align-items:center;max-width:640px">
           <el-input v-model="proxyUrl" placeholder="留空为直连；支持 http:// 或 socks5://host:port" clearable />
           <el-button @click="saveProxy">保存</el-button>
+          <el-button :loading="proxyTesting" @click="testProxy">连通性检测</el-button>
+        </div>
+        <div v-if="proxyTestResult" style="margin-top:10px">
+          <el-tag :type="proxyTestResult.ok ? 'success' : 'danger'" size="small">{{ proxyTestResult.text }}</el-tag>
         </div>
         <div style="color:var(--md-text-3);font-size:12px;margin-top:8px">
-          保存后立即生效（无需重启）。示例: http://127.0.0.1:7890 · socks5://127.0.0.1:1080
+          检测通过 google.com 连通性端点验证实际可达性。保存后立即生效（无需重启）。示例: http://127.0.0.1:7890 · socks5://127.0.0.1:1080
         </div>
       </el-tab-pane>
 

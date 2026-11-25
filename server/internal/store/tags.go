@@ -17,7 +17,7 @@ func (s *Store) ListTags() ([]TagInfo, error) {
 	rows, err := s.DB.Query(`SELECT bt.tag, COUNT(*)
 		FROM bookmark_tags bt
 		JOIN bookmarks b ON b.id = bt.bookmark_id
-		WHERE b.deleted_at = 0
+		WHERE b.deleted_at = 0 AND bt.tag NOT LIKE '\_%'
 		GROUP BY bt.tag ORDER BY bt.tag`)
 	if err != nil {
 		return nil, err

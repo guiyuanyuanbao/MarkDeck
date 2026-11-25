@@ -36,7 +36,11 @@ type Chain struct {
 // NewChain wires a Chain.
 func NewChain(st *store.Store, snapshotDir string, broadcast func(int64)) *Chain {
 	_ = os.MkdirAll(snapshotDir, 0o700)
-	return &Chain{Store: st, SnapshotDir: snapshotDir, Broadcast: broadcast}
+	c := &Chain{Store: st, SnapshotDir: snapshotDir, Broadcast: broadcast}
+	// migration 0005 moved dead-link state to its own table; scrub the
+	// pseudo-tags legacy scans left on bookmarks (one-time, cheap)
+	go c.PurgeLegacyDeadTags()
+	return c
 }
 
 // ---- dead links ----
@@ -107,7 +111,7 @@ func (c *Chain) ScanDeadLinks(ctx context.Context) (int, error) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			status := checkURL(bm.URL)
-			applyDeadTag(c.Store, bm, status)
+			recordDeadLink(c.Store, bm.ID, status)
 			// atomic-ish counter, single writer per goroutine: use int
 			checked++
 		}(b)
@@ -156,23 +160,59 @@ func statusStr(code int) string {
 	return fmt.Sprintf("http:%d", code)
 }
 
-func applyDeadTag(s *store.Store, bm *store.Bookmark, status string) {
-	var tags []string
-	for _, t := range bm.Tags {
-		if !strings.HasPrefix(t, "_dead:") && !strings.HasPrefix(t, "_checked:") {
-			tags = append(tags, t)
+// recordDeadLink writes the check outcome to the dead_links table (replaces
+// the old _dead:/_checked: pseudo-tags that polluted the user's tag list).
+func recordDeadLink(s *store.Store, bookmarkID, status string) {
+	_, err := s.DB.Exec(`INSERT INTO dead_links(bookmark_id, status, checked_at)
+		VALUES(?,?,?)
+		ON CONFLICT(bookmark_id) DO UPDATE SET status=excluded.status, checked_at=excluded.checked_at`,
+		bookmarkID, status, store.Now())
+	_ = err
+}
+
+// PurgeLegacyDeadTags strips the old _dead:/_checked: pseudo-tags from every
+// bookmark (migration 0005 moved state to dead_links; one-time cleanup runs
+// at startup via NewChain's first use).
+func (c *Chain) PurgeLegacyDeadTags() {
+	rows, err := c.Store.DB.Query(`SELECT b.id, b.tags FROM bookmarks b
+		JOIN bookmark_tags bt ON bt.bookmark_id = b.id
+		WHERE bt.tag LIKE '\_%dead:%' OR bt.tag LIKE '\_%checked:%'`)
+	if err != nil {
+		return
+	}
+	type idTags struct {
+		id   string
+		tags []string
+	}
+	var targets []idTags
+	seen := map[string]bool{}
+	for rows.Next() {
+		var id, tag string
+		if err := rows.Scan(&id, &tag); err != nil {
+			continue
 		}
+		if !strings.HasPrefix(tag, "_dead:") && !strings.HasPrefix(tag, "_checked:") {
+			continue
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		bm, err := c.Store.Get(id)
+		if err != nil {
+			continue
+		}
+		var keep []string
+		for _, t := range bm.Tags {
+			if !strings.HasPrefix(t, "_dead:") && !strings.HasPrefix(t, "_checked:") {
+				keep = append(keep, t)
+			}
+		}
+		targets = append(targets, idTags{id: id, tags: keep})
 	}
-	if status != "ok" {
-		tags = append(tags, "_dead:"+status)
-	}
-	tags = append(tags, "_checked:"+i64s(store.Now()))
-	// Internal tags must not bump user-facing tag counters; SetTags writes
-	// rows wholesale which is fine since underscore tags are filtered
-	// from the tags API.
-	if _, err := s.SetTags(bm.ID, tags, "tools"); err != nil {
-		// non-fatal
-		_ = err
+	rows.Close()
+	for _, t := range targets {
+		_, _ = c.Store.SetTags(t.id, t.tags, "tools")
 	}
 }
 
@@ -206,24 +246,31 @@ func (c *Chain) DeadLinks() ([]DeadLink, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []DeadLink
+	byID := map[string]*store.Bookmark{}
 	for _, n := range nodes {
-		for _, t := range n.Tags {
-			if strings.HasPrefix(t, "_dead:") {
-				checked := int64(0)
-				for _, t2 := range n.Tags {
-					if strings.HasPrefix(t2, "_checked:") {
-						checked = s2i64(strings.TrimPrefix(t2, "_checked:"))
-					}
-				}
-				out = append(out, DeadLink{
-					Bookmark: withFilteredTags(n),
-					Status:   strings.TrimPrefix(t, "_dead:"),
-					Checked:  checked,
-				})
-				break
-			}
+		byID[n.ID] = n
+	}
+	rows, err := c.Store.DB.Query(`SELECT bookmark_id, status, checked_at FROM dead_links ORDER BY checked_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeadLink
+	for rows.Next() {
+		var id, status string
+		var checked int64
+		if err := rows.Scan(&id, &status, &checked); err != nil {
+			continue
 		}
+		n, ok := byID[id]
+		if !ok {
+			continue // trashed/purged since the scan
+		}
+		out = append(out, DeadLink{
+			Bookmark: withFilteredTags(n),
+			Status:   status,
+			Checked:  checked,
+		})
 	}
 	return out, nil
 }
