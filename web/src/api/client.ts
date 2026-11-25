@@ -104,7 +104,7 @@ export interface Bookmark {
 }
 
 export interface TagInfo { tag: string; count: number }
-export interface Device { id: string; name: string; clientName?: string; createdAt: number; lastSeen: number }
+export interface Device { id: string; name: string; clientName?: string; createdAt: number; lastSeen: number; online?: boolean }
 export interface Snapshot { id: string; createdAt: number; size: number; file: string; cause: string }
 
 export const bookmarksApi = {

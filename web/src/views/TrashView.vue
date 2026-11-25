@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
+import { Icon } from '@/components/icons'
+import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 
 const trash = ref<Bookmark[]>([])
 const loading = ref(false)
-const selection = ref<Bookmark[]>([])
+const selection = ref<Set<string>>(new Set())
 const busy = ref(false)
+// selection drives per-row check state directly (checkbox + row highlight)
 
 async function load() {
   loading.value = true
   try {
     const r = await bookmarksApi.trash()
     trash.value = r.nodes || []
+    selection.value = new Set()
   } catch (e: any) {
     ElMessage.error('回收站加载失败: ' + e.message)
   } finally {
@@ -20,6 +24,18 @@ async function load() {
   }
 }
 onMounted(load)
+
+const selectedRows = computed(() => trash.value.filter((b) => selection.value.has(b.id)))
+const allSelected = computed(() => trash.value.length > 0 && trash.value.every((b) => selection.value.has(b.id)))
+function toggleRow(b: Bookmark) {
+  const next = new Set(selection.value)
+  if (next.has(b.id)) next.delete(b.id)
+  else next.add(b.id)
+  selection.value = next
+}
+function toggleAll() {
+  selection.value = allSelected.value ? new Set() : new Set(trash.value.map((b) => b.id))
+}
 
 async function restore(b: Bookmark) {
   try {
@@ -63,39 +79,78 @@ async function emptyAll() {
   await runForAll(trash.value, (b) => bookmarksApi.purge(b.id), '已删除')
 }
 async function batchRestore() {
-  if (!selection.value.length) return
-  await runForAll(selection.value, (b) => bookmarksApi.restore(b.id), '已恢复')
+  if (!selection.value.size) return
+  await runForAll(selectedRows.value, (b) => bookmarksApi.restore(b.id), '已恢复')
+}
+
+function fmtTime(ts?: number) {
+  return ts ? new Date(ts * 1000).toLocaleString() : '—'
 }
 </script>
 
 <template>
-  <el-card shadow="never">
-    <template #header>
-      <div style="display:flex; gap:8px; align-items:center">
+  <div class="page-shell">
+    <div class="page-hero">
+      <div class="page-hero-title">
         <h1 class="page-title">回收站</h1>
-        <span style="color:var(--md-text-3); font-size: 12px">删除的书签保留在此，可随时恢复</span>
-        <el-button v-if="selection.length" type="success" plain size="small" :disabled="busy" @click="batchRestore">恢复所选 ({{ selection.length }})</el-button>
-        <el-button v-if="trash.length" type="danger" plain size="small" :disabled="busy" @click="emptyAll">清空回收站</el-button>
+        <span class="page-sub">删除的书签保留在此，可随时恢复</span>
       </div>
-    </template>
-    <el-table :data="trash" v-loading="loading" @selection-change="(rows: Bookmark[]) => (selection = rows)" row-key="id">
-      <el-table-column type="selection" width="42" />
-      <el-table-column label="标题" min-width="240">
-        <template #default="{ row }">{{ row.title || row.url }}</template>
-      </el-table-column>
-      <el-table-column label="URL" min-width="240">
-        <template #default="{ row }"><span class="bm-url">{{ row.url }}</span></template>
-      </el-table-column>
-      <el-table-column label="删除时间" width="160">
-        <template #default="{ row }">{{ row.deletedAt ? new Date(row.deletedAt * 1000).toLocaleString() : '—' }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="160">
-        <template #default="{ row }">
-          <el-button link size="small" type="success" @click="restore(row)">恢复</el-button>
-          <el-button link size="small" type="danger" @click="purge(row)">彻底删除</el-button>
-        </template>
-      </el-table-column>
-      <template #empty><el-empty description="回收站为空" /></template>
-    </el-table>
-  </el-card>
+      <div class="page-hero-actions">
+        <el-button v-if="selection.size" type="primary" plain size="small" :disabled="busy" @click="batchRestore">
+          恢复所选 ({{ selection.size }})
+        </el-button>
+        <el-button v-if="trash.length" type="danger" plain size="small" :disabled="busy" @click="emptyAll">
+          清空回收站
+        </el-button>
+      </div>
+    </div>
+
+    <div v-loading="loading">
+      <div v-if="trash.length" class="data-list">
+        <!-- header row: select-all -->
+        <div class="data-row" style="padding: 9px 18px; background: var(--md-bg)">
+          <el-checkbox
+            class="row-check"
+            :model-value="allSelected"
+            @change="toggleAll"
+          />
+          <span class="data-row-sub" style="font-size: 12.5px">
+            {{ trash.length }} 项<template v-if="selection.size"> · 已选 {{ selection.size }} 项</template>
+          </span>
+        </div>
+        <div
+          v-for="b in trash"
+          :key="b.id"
+          class="data-row"
+          :class="{ selected: selection.has(b.id) }"
+        >
+          <el-checkbox
+            class="row-check"
+            :model-value="selection.has(b.id)"
+            @change="toggleRow(b)"
+          />
+          <BookmarkAvatar :b="b" :size="34" />
+          <div class="data-row-main">
+            <span class="data-row-title">{{ b.title || b.url }}</span>
+            <span v-if="b.url" class="data-row-sub">{{ b.url }}</span>
+          </div>
+          <div class="data-row-meta">
+            <span>{{ fmtTime(b.deletedAt) }}</span>
+          </div>
+          <div class="data-row-actions">
+            <button class="row-act success" @click="restore(b)">恢复</button>
+            <button class="row-act danger" @click="purge(b)">彻底删除</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="!loading" class="list-empty">
+        <div class="list-empty-icon">
+          <Icon name="trash" :size="26" />
+        </div>
+        <div class="list-empty-title">回收站是空的</div>
+        <div class="list-empty-hint">删除的书签会先出现在这里，确认后再彻底清除</div>
+      </div>
+    </div>
+  </div>
 </template>

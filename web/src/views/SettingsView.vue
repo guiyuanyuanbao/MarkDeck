@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, onBeforeUnmount, watch } from 'v
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { authApi, toolsApi, type Device, type Snapshot } from '@/api/client'
+import { Icon } from '@/components/icons'
 
 const tab = ref('account')
 // deep-link: /settings#devices jumps straight to the pairing tab (the
@@ -239,128 +240,237 @@ async function restoreSnap(s: Snapshot) {
   }
 }
 </script>
-
 <template>
-  <el-card shadow="never">
-    <el-tabs v-model="tab">
-      <!-- account -->
-      <el-tab-pane label="账户" name="account">
-        <h3>修改密码</h3>
-        <el-form label-width="90px" style="max-width: 420px">
-          <el-form-item label="当前密码"><el-input v-model="oldPw" type="password" show-password /></el-form-item>
-          <el-form-item label="新密码"><el-input v-model="newPw" type="password" show-password /></el-form-item>
-          <el-form-item label="确认新密码"><el-input v-model="newPw2" type="password" show-password /></el-form-item>
-          <el-button type="primary" @click="changePassword">修改密码</el-button>
-        </el-form>
+  <div class="page-shell">
+    <div class="page-hero">
+      <div class="page-hero-title">
+        <h1 class="page-title">设置</h1>
+        <span class="page-sub">账户安全、设备同步与数据备份</span>
+      </div>
+    </div>
 
-        <el-divider />
-        <h3>两步验证 (TOTP)</h3>
-        <p v-if="totpEnabled">
-          <el-tag type="success">已开启</el-tag>
-          <el-button size="small" style="margin-left: 8px" @click="disableTotp">关闭两步验证</el-button>
-        </p>
-        <div v-else>
-          <el-button type="primary" :loading="totpLoading" @click="startTotp">开启两步验证</el-button>
-          <div v-if="totpOtpauth" style="margin-top: 12px; max-width: 480px">
-            <el-alert type="info" :closable="false" style="margin-bottom: 8px"
-              title="用 Google Authenticator / 1Password 等 App 扫码或手动输入密钥" />
-            <p style="word-break: break-all; font-family: monospace; font-size: 12px">{{ totpOtpauth }}</p>
-            <p>密钥: <b style="font-family: monospace">{{ totpSecret }}</b></p>
-            <el-input v-model="totpCode" placeholder="输入 App 显示的 6 位验证码" maxlength="6" style="width: 200px" />
-            <el-button type="primary" style="margin-left: 8px" @click="confirmTotp">确认开启</el-button>
+    <div class="pill-tabs">
+      <button class="pill-tab" :class="{ active: tab === 'account' }" @click="tab = 'account'">
+        <Icon name="shield" :size="14" /> 账户
+      </button>
+      <button class="pill-tab" :class="{ active: tab === 'devices' }" @click="tab = 'devices'">
+        <Icon name="laptop" :size="14" /> 设备同步
+      </button>
+      <button class="pill-tab" :class="{ active: tab === 'network' }" @click="tab = 'network'">
+        <Icon name="link" :size="14" /> 网络代理
+      </button>
+      <button class="pill-tab" :class="{ active: tab === 'snapshots' }" @click="tab = 'snapshots'">
+        <Icon name="restore" :size="14" /> 备份快照
+      </button>
+    </div>
+
+    <!-- ================= account ================= -->
+    <template v-if="tab === 'account'">
+      <div class="section-card">
+        <h2 class="section-card-title">
+          <span class="sec-ico"><Icon name="shield" :size="16" /></span>
+          修改密码
+          <span class="section-card-sub">修改后所有会话失效，需重新登录</span>
+        </h2>
+        <div class="form-stack">
+          <el-input v-model="oldPw" type="password" show-password placeholder="当前密码" />
+          <el-input v-model="newPw" type="password" show-password placeholder="新密码（至少 8 位）" />
+          <el-input v-model="newPw2" type="password" show-password placeholder="确认新密码" />
+          <div>
+            <el-button type="primary" @click="changePassword">修改密码</el-button>
           </div>
         </div>
-      </el-tab-pane>
+      </div>
 
-      <!-- devices -->
-      <el-tab-pane label="设备同步" name="devices">
-        <el-alert type="info" :closable="false" style="margin-bottom: 12px"
-          title="浏览器插件通过一次性配对码接入。生成配对码后，在插件设置页填入服务器地址与配对码。" />
-        <div style="margin-bottom: 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+      <div class="section-card">
+        <h2 class="section-card-title">
+          <span class="sec-ico"><Icon name="shield" :size="16" /></span>
+          两步验证 (TOTP)
+        </h2>
+        <div v-if="totpEnabled" class="inline-row">
+          <span class="status-pill ok">已开启</span>
+          <el-button size="small" @click="disableTotp">关闭两步验证</el-button>
+        </div>
+        <div v-else>
+          <el-button v-if="!totpOtpauth" type="primary" :loading="totpLoading" @click="startTotp">开启两步验证</el-button>
+          <div v-if="totpOtpauth" class="totp-setup">
+            <p class="totp-tip">用 Google Authenticator / 1Password 等 App 添加以下密钥：</p>
+            <div class="totp-secret-row">
+              <code class="totp-secret">{{ totpSecret }}</code>
+            </div>
+            <p class="totp-uri">{{ totpOtpauth }}</p>
+            <div class="inline-row">
+              <el-input v-model="totpCode" placeholder="App 显示的 6 位验证码" maxlength="6" style="width: 200px" />
+              <el-button type="primary" @click="confirmTotp">确认开启</el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ================= devices ================= -->
+    <template v-if="tab === 'devices'">
+      <div class="section-card">
+        <h2 class="section-card-title">
+          <span class="sec-ico"><Icon name="laptop" :size="16" /></span>
+          配对新设备
+          <span class="section-card-sub">浏览器插件通过一次性配对码接入</span>
+        </h2>
+        <div class="inline-row">
           <el-input v-model="pairDeviceName" placeholder="设备名称（可选，如：公司电脑）" clearable style="width: 220px" />
           <el-button type="primary" @click="newPairCode">生成配对码</el-button>
-          <span v-if="pairCode" style="font-size: 20px; font-family: monospace; letter-spacing: 4px">
-            {{ pairCode }}
-          </span>
-          <el-button v-if="pairCode" size="small" plain @click="copyPairCode">复制</el-button>
-          <span v-if="pairCode" style="color: #909399; font-size: 12px">
-            <template v-if="pairRemain !== null && pairRemain > 0">{{ Math.floor(pairRemain / 60) }}:{{ String(pairRemain % 60).padStart(2, '0') }} 内有效 · 使用一次后立即失效</template>
-            <template v-else><span style="color: var(--md-danger, #e5484d)">已过期 — 请重新生成</span></template>
+        </div>
+        <div v-if="pairCode" class="pair-code-box">
+          <span class="pair-code">{{ pairCode }}</span>
+          <el-button size="small" plain @click="copyPairCode">复制</el-button>
+          <span class="pair-expiry">
+            <template v-if="pairRemain !== null && pairRemain > 0">
+              {{ Math.floor(pairRemain / 60) }}:{{ String(pairRemain % 60).padStart(2, '0') }} 内有效 · 一次性
+            </template>
+            <span v-else class="pair-expired">已过期 — 请重新生成</span>
           </span>
         </div>
-        <el-table :data="devices">
-          <el-table-column label="设备" min-width="200">
-            <template #default="{ row }">
-              <div style="display:flex;align-items:center;gap:8px">
-                <b>{{ row.name }}</b>
-                <span v-if="row.clientName && row.clientName !== row.name"
-                  style="color:var(--md-text-3);font-size:12px">（客户端报名: {{ row.clientName }}）</span>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <span v-if="row.online" style="color:var(--md-success)">● 在线</span>
-              <span v-else style="color:var(--md-text-3)">○ 离线</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="配对时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt * 1000).toLocaleString() }}</template>
-          </el-table-column>
-          <el-table-column label="最近同步" width="170">
-            <template #default="{ row }">{{ row.lastSeen ? new Date(row.lastSeen * 1000).toLocaleString() : '从未' }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="100">
-            <template #default="{ row }">
-              <el-button link type="danger" size="small" @click="revoke(row)">吊销</el-button>
-            </template>
-          </el-table-column>
-          <template #empty><el-empty description="暂无已配对设备" /></template>
-        </el-table>
-      </el-tab-pane>
+        <p class="field-hint">在插件设置页填入服务器地址与该配对码即可完成连接。</p>
+      </div>
 
-      <!-- network -->
-      <el-tab-pane label="网络代理" name="network">
-        <el-alert type="info" :closable="false" style="margin-bottom: 12px"
-          title="服务端抓取网页图标和死链检测的出站代理。部署在国内访问境外站点困难时，配置后图标抓取成功率会显著提升。" />
-        <div style="display:flex;gap:10px;align-items:center;max-width:640px">
-          <el-input v-model="proxyUrl" placeholder="留空为直连；支持 http:// 或 socks5://host:port" clearable />
+      <div class="section-head">
+        <h2 class="section-head-title">已配对设备</h2>
+        <span class="section-head-sub" v-if="devices.length">{{ devices.length }} 台</span>
+      </div>
+      <div v-if="devices.length" class="data-list">
+        <div v-for="d in devices" :key="d.id" class="data-row">
+          <div class="device-ico">
+            <Icon name="laptop" :size="17" />
+          </div>
+          <div class="data-row-main">
+            <span class="data-row-title">
+              {{ d.name }}
+              <span v-if="d.clientName && d.clientName !== d.name" class="device-client">（{{ d.clientName }}）</span>
+            </span>
+            <span class="data-row-sub">
+              配对于 {{ new Date(d.createdAt * 1000).toLocaleString() }}
+              · 最近同步 {{ d.lastSeen ? new Date(d.lastSeen * 1000).toLocaleString() : '从未' }}
+            </span>
+          </div>
+          <div class="data-row-meta">
+            <span :class="d.online ? 'dot-online' : 'dot-offline'">{{ d.online ? '● 在线' : '○ 离线' }}</span>
+          </div>
+          <div class="data-row-actions">
+            <button class="row-act danger" @click="revoke(d)">吊销</button>
+          </div>
+        </div>
+      </div>
+      <div v-else class="list-empty">
+        <div class="list-empty-icon"><Icon name="laptop" :size="24" /></div>
+        <div class="list-empty-title">还没有配对设备</div>
+        <div class="list-empty-hint">生成配对码后在浏览器插件里完成配对</div>
+      </div>
+    </template>
+
+    <!-- ================= network ================= -->
+    <template v-if="tab === 'network'">
+      <div class="section-card">
+        <h2 class="section-card-title">
+          <span class="sec-ico"><Icon name="link" :size="16" /></span>
+          出站代理
+          <span class="section-card-sub">用于服务端抓取网站图标与死链检测</span>
+        </h2>
+        <div class="inline-row" style="max-width: 640px">
+          <el-input v-model="proxyUrl" placeholder="留空为直连；http:// 或 socks5://host:port" clearable />
           <el-button @click="saveProxy">保存</el-button>
           <el-button :loading="proxyTesting" @click="testProxy">连通性检测</el-button>
         </div>
-        <div v-if="proxyTestResult" style="margin-top:10px">
+        <div v-if="proxyTestResult" style="margin-top: 12px">
           <el-tag :type="proxyTestResult.ok ? 'success' : 'danger'" size="small">{{ proxyTestResult.text }}</el-tag>
         </div>
-        <div style="color:var(--md-text-3);font-size:12px;margin-top:8px">
+        <p class="field-hint">
           检测通过 google.com 连通性端点验证实际可达性。保存后立即生效（无需重启）。示例: http://127.0.0.1:7890 · socks5://127.0.0.1:1080
-        </div>
-      </el-tab-pane>
+        </p>
+      </div>
+    </template>
 
-      <!-- snapshots -->
-      <el-tab-pane label="备份快照" name="snapshots">
-        <div style="margin-bottom: 12px">
-          <el-button type="primary" @click="takeSnapshot">立即创建快照</el-button>
-          <span style="color:var(--md-text-3); font-size:12px; margin-left: 8px">每天自动快照，保留最近 30 份</span>
+    <!-- ================= snapshots ================= -->
+    <template v-if="tab === 'snapshots'">
+      <div class="section-card">
+        <h2 class="section-card-title">
+          <span class="sec-ico"><Icon name="restore" :size="16" /></span>
+          备份快照
+          <span class="section-card-sub">每天自动快照，保留最近 30 份</span>
+        </h2>
+        <el-button type="primary" @click="takeSnapshot">立即创建快照</el-button>
+      </div>
+      <div v-if="snapshots.length" class="data-list">
+        <div v-for="s in snapshots" :key="s.id" class="data-row">
+          <div class="device-ico"><Icon name="restore" :size="17" /></div>
+          <div class="data-row-main">
+            <span class="data-row-title">{{ new Date(s.createdAt * 1000).toLocaleString() }}</span>
+            <span class="data-row-sub">{{ (s.size / 1024).toFixed(1) }} KB · {{ s.cause }}</span>
+          </div>
+          <div class="data-row-actions">
+            <button class="row-act" @click="restoreSnap(s)">恢复</button>
+            <a :href="'/api/snapshots/' + s.id + '/download'" target="_blank" class="row-act">下载</a>
+          </div>
         </div>
-        <el-table :data="snapshots">
-          <el-table-column label="时间" width="180">
-            <template #default="{ row }">{{ new Date(row.createdAt * 1000).toLocaleString() }}</template>
-          </el-table-column>
-          <el-table-column label="大小" width="100">
-            <template #default="{ row }">{{ (row.size / 1024).toFixed(1) }} KB</template>
-          </el-table-column>
-          <el-table-column prop="cause" label="来源" width="120" />
-          <el-table-column label="操作" width="180">
-            <template #default="{ row }">
-              <el-button link size="small" @click="restoreSnap(row)">恢复</el-button>
-              <a :href="`/api/snapshots/${row.id}/download`" target="_blank">
-                <el-button link size="small">下载</el-button>
-              </a>
-            </template>
-          </el-table-column>
-          <template #empty><el-empty description="暂无快照" /></template>
-        </el-table>
-      </el-tab-pane>
-    </el-tabs>
-  </el-card>
+      </div>
+      <div v-else class="list-empty">
+        <div class="list-empty-icon"><Icon name="restore" :size="24" /></div>
+        <div class="list-empty-title">暂无快照</div>
+        <div class="list-empty-hint">点击「立即创建快照」，或等待每天自动备份</div>
+      </div>
+    </template>
+  </div>
 </template>
+
+<style scoped>
+.form-stack { display: flex; flex-direction: column; gap: 10px; max-width: 380px; }
+.inline-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.field-hint { color: var(--md-text-3); font-size: 12px; margin: 10px 0 0; line-height: 1.6; }
+.status-pill { padding: 3px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
+.status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
+
+.totp-setup { margin-top: 4px; max-width: 480px; }
+.totp-tip { font-size: 13px; color: var(--md-text-2); margin: 0 0 10px; }
+.totp-secret-row { margin-bottom: 10px; }
+.totp-secret {
+  display: inline-block;
+  font-family: ui-monospace, monospace;
+  font-size: 14px;
+  letter-spacing: 1px;
+  background: var(--md-bg);
+  border: 1px solid var(--md-border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  user-select: all;
+}
+.totp-uri { font-size: 11.5px; color: var(--md-text-3); word-break: break-all; margin: 0 0 12px; font-family: ui-monospace, monospace; }
+
+.pair-code-box {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 14px; padding: 14px 16px;
+  background: var(--md-bg);
+  border: 1px solid var(--md-border);
+  border-radius: var(--md-radius-sm);
+  max-width: 520px;
+}
+.pair-code {
+  font-size: 24px; font-weight: 700;
+  font-family: ui-monospace, monospace;
+  letter-spacing: 5px;
+  color: var(--md-primary);
+}
+.pair-expiry { display: inline-flex; align-items: center; gap: 5px; color: var(--md-text-3); font-size: 12.5px; }
+.pair-expired { color: var(--md-danger); font-weight: 600; }
+
+.section-head { display: flex; align-items: baseline; gap: 8px; margin: 20px 2px 10px; }
+.section-head-title { font-size: 14.5px; font-weight: 700; margin: 0; color: var(--md-text); }
+.section-head-sub { color: var(--md-text-3); font-size: 12.5px; }
+
+.device-ico {
+  width: 34px; height: 34px; flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--md-primary-soft);
+  color: var(--md-primary);
+  display: grid; place-items: center;
+}
+.device-client { color: var(--md-text-3); font-weight: 400; font-size: 12px; }
+</style>

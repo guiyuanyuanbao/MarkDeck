@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { toolsApi, authApi, bookmarksApi, type Bookmark } from '@/api/client'
 import { Icon } from '@/components/icons'
+import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 
 const tab = ref('dead')
 const scanning = ref(false)
@@ -80,14 +81,19 @@ function pollScan() {
   }, 10 * 60 * 1000)
 }
 
-function statusTag(s: string) {
-  if (s === 'ok') return 'success'
-  if (s.startsWith('blocked:')) return 'warning'
-  if (s.startsWith('http:4')) return 'warning'
-  return 'danger'
-}
-
 // ---- dead links quick actions ----
+// row-level selection (the old el-table drove this via selection-change;
+// the data-row list drives it from per-row checkboxes)
+const allDeadSelected = computed(() => dead.value.length > 0 && dead.value.every((r) => deadSel.value.has(r.bookmark.id)))
+function toggleDead(row: { bookmark: Bookmark }) {
+  const next = new Set(deadSel.value)
+  if (next.has(row.bookmark.id)) next.delete(row.bookmark.id)
+  else next.add(row.bookmark.id)
+  deadSel.value = next
+}
+function toggleAllDead() {
+  deadSel.value = allDeadSelected.value ? new Set() : new Set(dead.value.map((r) => r.bookmark.id))
+}
 async function deleteDeadSelected() {
   const ids = [...deadSel.value]
   if (!ids.length) return
@@ -237,60 +243,76 @@ async function clearFavicons() {
   }
 }
 </script>
-
 <template>
-  <div v-loading="loading">
-    <div class="tm-head">
-      <h1 class="page-title">工具中心</h1>
-      <div class="page-sub">批量整理与健康检查</div>
+  <div class="page-shell">
+    <div class="page-hero">
+      <div class="page-hero-title">
+        <h1 class="page-title">工具中心</h1>
+        <span class="page-sub">批量整理与健康检查</span>
+      </div>
     </div>
 
-    <div class="tm-tabs">
-      <button class="tm-tab" :class="{ active: tab === 'dead' }" @click="tab = 'dead'">死链检测</button>
-      <button class="tm-tab" :class="{ active: tab === 'dup' }" @click="tab = 'dup'">
+    <div class="pill-tabs">
+      <button class="pill-tab" :class="{ active: tab === 'dead' }" @click="tab = 'dead'">死链检测</button>
+      <button class="pill-tab" :class="{ active: tab === 'dup' }" @click="tab = 'dup'">
         重复书签 <span v-if="dups.length" class="tm-count">{{ dups.length }}</span>
       </button>
-      <button class="tm-tab" :class="{ active: tab === 'folderdup' }" @click="tab = 'folderdup'">
+      <button class="pill-tab" :class="{ active: tab === 'folderdup' }" @click="tab = 'folderdup'">
         重复文件夹 <span v-if="folderDups.length" class="tm-count">{{ folderDups.length }}</span>
       </button>
-      <button class="tm-tab" :class="{ active: tab === 'favicon' }" @click="tab = 'favicon'">网站图标</button>
+      <button class="pill-tab" :class="{ active: tab === 'favicon' }" @click="tab = 'favicon'">网站图标</button>
     </div>
 
     <!-- dead links -->
-    <div v-if="tab === 'dead'" class="tm-panel">
-      <div class="tm-bar">
-        <el-button type="primary" :loading="scanning" @click="startScan">开始扫描</el-button>
-        <span class="tm-hint">检查所有书签 URL 可达性（HEAD → GET 回退，并发 8，每域名限速）</span>
+    <div v-if="tab === 'dead'">
+      <div class="section-card">
+        <div class="inline-row">
+          <el-button type="primary" :loading="scanning" @click="startScan">开始扫描</el-button>
+          <el-button v-if="dead.length" type="danger" plain :disabled="!deadSel.size" :loading="deadDeleting" @click="deleteDeadSelected">
+            移入回收站（{{ deadSel.size }}）
+          </el-button>
+          <span class="tm-hint">HEAD → GET 回退，并发 8；blocked:4xx 多为反爬拦截，删除前请人工确认</span>
+        </div>
       </div>
-      <div v-if="dead.length" class="tm-bar">
-        <el-button type="danger" plain :disabled="!deadSel.size" :loading="deadDeleting" @click="deleteDeadSelected">
-          移入回收站（{{ deadSel.size }}）
-        </el-button>
-        <span class="tm-hint">blocked:4xx 多为反爬拦截，不一定是死链；删除前请人工确认</span>
+      <div v-if="dead.length" class="data-list">
+        <div class="data-row" style="padding: 9px 18px; background: var(--md-bg)">
+          <el-checkbox class="row-check" :model-value="allDeadSelected" @change="toggleAllDead" />
+          <span class="data-row-sub" style="font-size: 12.5px">{{ dead.length }} 条记录<template v-if="deadSel.size"> · 已选 {{ deadSel.size }}</template></span>
+        </div>
+        <div
+          v-for="row in dead"
+          :key="row.bookmark.id"
+          class="data-row"
+          :class="{ selected: deadSel.has(row.bookmark.id) }"
+        >
+          <el-checkbox
+            class="row-check"
+            :model-value="deadSel.has(row.bookmark.id)"
+            @change="toggleDead(row)"
+          />
+          <BookmarkAvatar :b="row.bookmark" :size="34" />
+          <div class="data-row-main">
+            <span class="data-row-title">{{ row.bookmark.title || row.bookmark.url }}</span>
+            <span class="data-row-sub">{{ row.bookmark.url }}</span>
+          </div>
+          <div class="data-row-meta">
+            <span class="status-pill" :class="row.status === 'ok' ? 'ok' : row.status.startsWith('blocked') ? 'warn' : 'err'">
+              {{ row.status === 'ok' ? '正常' : row.status }}
+            </span>
+            <span>{{ row.checked ? new Date(row.checked * 1000).toLocaleString() : '-' }}</span>
+          </div>
+        </div>
       </div>
-      <el-table :data="dead" @selection-change="(rows: any[]) => (deadSel = new Set(rows.map((r: any) => r.bookmark.id)))">
-        <el-table-column type="selection" width="42" />
-        <el-table-column label="书签" min-width="260">
-          <template #default="{ row }">{{ row.bookmark.title || row.bookmark.url }}</template>
-        </el-table-column>
-        <el-table-column label="URL" min-width="240">
-          <template #default="{ row }"><span class="bm-url">{{ row.bookmark.url }}</span></template>
-        </el-table-column>
-        <el-table-column label="状态" width="120">
-          <template #default="{ row }">
-            <el-tag :type="statusTag(row.status)" size="small">{{ row.status === 'ok' ? '正常' : row.status }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="检查时间" width="160">
-          <template #default="{ row }">{{ row.checked ? new Date(row.checked * 1000).toLocaleString() : '-' }}</template>
-        </el-table-column>
-        <template #empty><el-empty description="暂无死链记录（点击开始扫描）" /></template>
-      </el-table>
+      <div v-else class="list-empty">
+        <div class="list-empty-icon"><Icon name="check" :size="26" style="color: var(--md-success)" /></div>
+        <div class="list-empty-title">暂无死链记录</div>
+        <div class="list-empty-hint">点击「开始扫描」检查所有书签的可达性</div>
+      </div>
     </div>
 
     <!-- duplicate bookmarks -->
-    <div v-if="tab === 'dup'" class="tm-panel">
-      <div v-if="dups.length" class="tm-bar">
+    <div v-if="tab === 'dup'" class="section-card">
+      <div v-if="dups.length" class="inline-row" style="margin-bottom: 14px">
         <el-checkbox :model-value="allDupSelected" @change="toggleAllDup">全选</el-checkbox>
         <el-button type="primary" :disabled="!selDup.size" :loading="mergingAll" @click="mergeSelectedDups">
           合并所选组（{{ selDup.size }}）
@@ -312,16 +334,19 @@ async function clearFavicons() {
           <el-tag v-for="t in item.tags" :key="t" size="small">{{ t }}</el-tag>
         </div>
       </div>
-      <el-empty v-if="!dups.length" description="没有发现重复书签">
-        <template #image><Icon name="check" :size="42" style="color:var(--md-success)" /></template>
-      </el-empty>
+      <div v-if="!dups.length" class="list-empty">
+        <div class="list-empty-icon"><Icon name="check" :size="26" style="color: var(--md-success)" /></div>
+        <div class="list-empty-title">没有发现重复书签</div>
+        <div class="list-empty-hint">书签库很干净</div>
+      </div>
     </div>
 
     <!-- duplicate folders -->
-    <div v-if="tab === 'folderdup'" class="tm-panel">
-      <el-alert type="info" :closable="false" style="margin-bottom: 12px"
-        title="同名文件夹的多份副本（多设备历史同步产生）。合并会把副本中的书签并入保留文件夹，URL 重复的丢弃，副本壳移入回收站。" />
-      <div v-if="folderDups.length" class="tm-bar">
+    <div v-if="tab === 'folderdup'" class="section-card">
+      <p class="field-hint" style="margin-bottom: 14px">
+        同名文件夹的多份副本（多设备历史同步产生）。合并会把副本中的书签并入保留文件夹，URL 重复的丢弃，副本壳移入回收站。
+      </p>
+      <div v-if="folderDups.length" class="inline-row" style="margin-bottom: 14px">
         <el-checkbox :model-value="allFolderSelected" @change="toggleAllFolder">全选</el-checkbox>
         <el-button type="primary" :disabled="!selFolder.size" :loading="mergingAll" @click="mergeSelectedFolders">
           合并所选组（{{ selFolder.size }}）
@@ -331,7 +356,7 @@ async function clearFavicons() {
         <div class="tm-group-head">
           <div class="tm-group-title">
             <el-checkbox :model-value="selFolder.has(folderKey(g))" @change="toggleFolder(g)" />
-            <Icon name="folder" :size="15" style="color:var(--md-warning)" />
+            <Icon name="folder" :size="15" style="color: var(--md-warning)" />
             <span class="tm-key">{{ g.title }}</span>
             <span class="tm-badge">{{ g.items.length }} 份</span>
           </div>
@@ -342,19 +367,38 @@ async function clearFavicons() {
           <span class="tm-member-dim">创建于 {{ new Date(item.createdAt * 1000).toLocaleString() }}</span>
         </div>
       </div>
-      <el-empty v-if="!folderDups.length" description="没有发现重复文件夹">
-        <template #image><Icon name="check" :size="42" style="color:var(--md-success)" /></template>
-      </el-empty>
+      <div v-if="!folderDups.length" class="list-empty">
+        <div class="list-empty-icon"><Icon name="check" :size="26" style="color: var(--md-success)" /></div>
+        <div class="list-empty-title">没有发现重复文件夹</div>
+        <div class="list-empty-hint">文件夹结构很干净</div>
+      </div>
     </div>
 
     <!-- favicons -->
-    <div v-if="tab === 'favicon'" class="tm-panel">
-      <el-alert type="info" :closable="false" style="margin-bottom: 12px"
-        title="网站图标由已配对的浏览器插件上传（浏览器里显示什么，管理页就显示什么）。若某些图标缺失或显示为占位图，清空缓存后各设备会在下次同步时重新上传。" />
-      <div class="tm-bar">
-        <el-button type="primary" :loading="clearingFavicons" @click="clearFavicons">清空图标缓存并重扫</el-button>
-        <span class="tm-hint">服务端也会对未命中的站点重新抓取（国内部署建议先配置出站代理）</span>
-      </div>
+    <div v-if="tab === 'favicon'" class="section-card">
+      <h2 class="section-card-title">
+        <span class="sec-ico"><Icon name="star" :size="16" /></span>
+        网站图标
+      </h2>
+      <p class="field-hint" style="margin: 0 0 14px">
+        网站图标由已配对的浏览器插件上传（浏览器里显示什么，管理页就显示什么）。若某些图标缺失或显示为占位图，清空缓存后各设备会在下次同步时重新上传；服务端也会对未命中的站点重新抓取（国内部署建议先配置出站代理）。
+      </p>
+      <el-button type="primary" :loading="clearingFavicons" @click="clearFavicons">清空图标缓存并重扫</el-button>
     </div>
   </div>
 </template>
+
+<style scoped>
+.inline-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.field-hint { color: var(--md-text-3); font-size: 12.5px; margin: 0; line-height: 1.7; }
+.status-pill {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
+.status-pill.warn { background: color-mix(in srgb, var(--md-warning) 15%, transparent); color: var(--md-warning); }
+.status-pill.err { background: var(--md-danger-soft); color: var(--md-danger); }
+</style>
