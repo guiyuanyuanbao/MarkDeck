@@ -1,9 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { authApi, toolsApi, type Device, type Snapshot } from '@/api/client'
 
 const tab = ref('account')
+// deep-link: /settings#devices jumps straight to the pairing tab (the
+// topbar's device icon routes here — pairing should never be buried)
+function applyHashTab(h: string) {
+  if (h === 'devices' || h === 'network' || h === 'snapshots') tab.value = h
+}
+applyHashTab(location.hash.replace('#', ''))
+// vue-router updates route.hash without a native hashchange event when the
+// path stays the same — watch the route instead
+const route = useRoute()
+watch(() => route.hash, (h: string) => applyHashTab(h.replace('#', '')))
 const totpEnabled = ref(false)
 const totpLoading = ref(false)
 const totpSecret = ref('')
@@ -18,6 +29,7 @@ const newPw2 = ref('')
 const devices = ref<Device[]>([])
 const pairCode = ref('')
 const pairDeviceName = ref('')
+const proxyUrl = ref('')
 const pairExpiry = ref(0)
 const snapshots = ref<Snapshot[]>([])
 
@@ -31,6 +43,7 @@ onMounted(() => {
   pollTimer = window.setInterval(() => {
     if (pairCode.value && Date.now() < pairExpiry.value) loadDevices()
   }, 3000)
+  loadProxy()
 })
 let pollTimer: number | undefined
 onUnmounted(() => {
@@ -106,6 +119,21 @@ async function disableTotp() {
     ElMessage.success('已关闭')
   } catch (e: any) {
     if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  }
+}
+
+async function loadProxy() {
+  try {
+    const r = await authApi.getProxy()
+    proxyUrl.value = r.proxy || ''
+  } catch { /* server older than this feature */ }
+}
+async function saveProxy() {
+  try {
+    await authApi.setProxy(proxyUrl.value.trim())
+    ElMessage.success('代理配置已保存，立即生效')
+  } catch (e: any) {
+    ElMessage.error(e.message)
   }
 }
 
@@ -215,11 +243,19 @@ async function restoreSnap(s: Snapshot) {
           <span v-if="pairCode" style="color: #909399; font-size: 12px">5 分钟内有效 · 使用一次后立即失效</span>
         </div>
         <el-table :data="devices">
-          <el-table-column prop="name" label="设备" min-width="180" />
+          <el-table-column label="设备" min-width="200">
+            <template #default="{ row }">
+              <div style="display:flex;align-items:center;gap:8px">
+                <b>{{ row.name }}</b>
+                <span v-if="row.clientName && row.clientName !== row.name"
+                  style="color:var(--md-text-3);font-size:12px">（客户端报名: {{ row.clientName }}）</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <span v-if="row.online" style="color:#67c23a">● 在线</span>
-              <span v-else style="color:#909399">○ 离线</span>
+              <span v-if="row.online" style="color:var(--md-success)">● 在线</span>
+              <span v-else style="color:var(--md-text-3)">○ 离线</span>
             </template>
           </el-table-column>
           <el-table-column label="配对时间" width="170">
@@ -237,11 +273,24 @@ async function restoreSnap(s: Snapshot) {
         </el-table>
       </el-tab-pane>
 
+      <!-- network -->
+      <el-tab-pane label="网络代理" name="network">
+        <el-alert type="info" :closable="false" style="margin-bottom: 12px"
+          title="服务端抓取网页图标和死链检测的出站代理。部署在国内访问境外站点困难时，配置后图标抓取成功率会显著提升。" />
+        <div style="display:flex;gap:10px;align-items:center;max-width:560px">
+          <el-input v-model="proxyUrl" placeholder="留空为直连；支持 http:// 或 socks5://host:port" clearable />
+          <el-button @click="saveProxy">保存</el-button>
+        </div>
+        <div style="color:var(--md-text-3);font-size:12px;margin-top:8px">
+          保存后立即生效（无需重启）。示例: http://127.0.0.1:7890 · socks5://127.0.0.1:1080
+        </div>
+      </el-tab-pane>
+
       <!-- snapshots -->
       <el-tab-pane label="备份快照" name="snapshots">
         <div style="margin-bottom: 12px">
           <el-button type="primary" @click="takeSnapshot">立即创建快照</el-button>
-          <span style="color:#909399; font-size:12px; margin-left: 8px">每天自动快照，保留最近 30 份</span>
+          <span style="color:var(--md-text-3); font-size:12px; margin-left: 8px">每天自动快照，保留最近 30 份</span>
         </div>
         <el-table :data="snapshots">
           <el-table-column label="时间" width="180">

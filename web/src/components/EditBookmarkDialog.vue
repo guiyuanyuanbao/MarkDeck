@@ -28,8 +28,8 @@ const folders = ref<{ id: string; label: string }[]>([])
 async function loadFolders() {
   const { nodes } = await bookmarksApi.tree()
   folders.value = [
-    { id: '', label: '📂 根目录' },
-    ...nodes.filter((n) => n.type === 'folder').map((n) => ({ id: n.id, label: '📁 ' + (n.title || '(未命名)') })),
+    { id: '', label: '根目录' },
+    ...nodes.filter((n) => n.type === 'folder').map((n) => ({ id: n.id, label: (n.title || '(未命名)') })),
   ]
 }
 

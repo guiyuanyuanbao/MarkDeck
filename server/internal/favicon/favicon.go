@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +31,19 @@ const (
 	maxPageBytes   = 512 << 10
 )
 
+// ProxyFunc returns the proxy URL to use for outbound fetches, or nil.
+// Wired to the store's settings so the admin UI can change it at runtime.
+var ProxyFunc = func() *url.URL { return nil }
+
 var client = &http.Client{
 	Timeout: 8 * time.Second,
 	Transport: &http.Transport{
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			if p := ProxyFunc(); p != nil {
+				return p, nil
+			}
+			return nil, nil
+		},
 		MaxIdleConns:          16,
 		IdleConnTimeout:       60 * time.Second,
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,

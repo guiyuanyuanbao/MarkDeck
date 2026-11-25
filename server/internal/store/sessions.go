@@ -50,14 +50,16 @@ func (s *Store) CleanupSessions(now int64) error {
 
 // DeviceRow is a paired extension client.
 type DeviceRow struct {
-	ID        string
-	Name      string
-	CreatedAt int64
-	LastSeen  int64
+	ID         string
+	Name       string // authoritative: the admin's pre-bound name, or the client's
+	ClientName string // what the client called itself (context when a bound name exists)
+	CreatedAt  int64
+	LastSeen   int64
 }
 
-// CreateDevice registers a device by token hash.
-func (s *Store) CreateDevice(tokenHash, name string) (string, error) {
+// CreateDevice registers a device by token hash. clientName is what the
+// extension self-reported (may be empty).
+func (s *Store) CreateDevice(tokenHash, name, clientName string) (string, error) {
 	id, err := NewUUID()
 	if err != nil {
 		return "", err
@@ -65,17 +67,17 @@ func (s *Store) CreateDevice(tokenHash, name string) (string, error) {
 	if name == "" {
 		name = "unnamed device"
 	}
-	_, err = s.DB.Exec(`INSERT INTO devices(id, name, token_hash, created_at) VALUES(?,?,?,?)`,
-		id, name, tokenHash, Now())
+	_, err = s.DB.Exec(`INSERT INTO devices(id, name, client_name, token_hash, created_at) VALUES(?,?,?,?,?)`,
+		id, name, clientName, tokenHash, Now())
 	return id, err
 }
 
 // TouchDevice resolves a token hash to its device and updates last_seen.
 func (s *Store) TouchDevice(tokenHash string, now int64) *DeviceRow {
-	row := s.DB.QueryRow(`SELECT d.id, d.name, d.created_at FROM devices d
+	row := s.DB.QueryRow(`SELECT d.id, d.name, d.client_name, d.created_at FROM devices d
 		WHERE d.token_hash=?`, tokenHash)
 	var d DeviceRow
-	if err := row.Scan(&d.ID, &d.Name, &d.CreatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.Name, &d.ClientName, &d.CreatedAt); err != nil {
 		return nil
 	}
 	_, _ = s.DB.Exec(`UPDATE devices SET last_seen=? WHERE id=?`, now, d.ID)
@@ -85,7 +87,7 @@ func (s *Store) TouchDevice(tokenHash string, now int64) *DeviceRow {
 
 // ListDevices returns all devices with usage info.
 func (s *Store) ListDevices() ([]DeviceRow, error) {
-	rows, err := s.DB.Query(`SELECT id, name, created_at, last_seen FROM devices ORDER BY created_at`)
+	rows, err := s.DB.Query(`SELECT id, name, client_name, created_at, last_seen FROM devices ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +95,7 @@ func (s *Store) ListDevices() ([]DeviceRow, error) {
 	var out []DeviceRow
 	for rows.Next() {
 		var d DeviceRow
-		if err := rows.Scan(&d.ID, &d.Name, &d.CreatedAt, &d.LastSeen); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.ClientName, &d.CreatedAt, &d.LastSeen); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

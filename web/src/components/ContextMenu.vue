@@ -3,6 +3,7 @@
 // the menu teleports to <body>, flips at viewport edges and closes on
 // click-away / Escape / scroll. One instance per view, driven via expose().
 import { nextTick, ref } from 'vue'
+import { Icon } from './icons'
 
 export interface CtxMenuItem {
   label: string
@@ -69,7 +70,7 @@ defineExpose({ open, close })
           :disabled="it.disabled"
           @click.stop="onItem(it)"
         >
-          <span v-if="it.icon" class="ctx-ico">{{ it.icon }}</span>
+          <span v-if="it.icon" class="ctx-ico"><Icon :name="it.icon" :size="14" /></span>
           <span class="ctx-label">{{ it.label }}</span>
         </button>
       </template>

@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"net/url"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/favicon"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
 )
 
@@ -46,6 +48,12 @@ func NewChain(st *store.Store, snapshotDir string, broadcast func(int64)) *Chain
 var httpClient = &http.Client{
 	Timeout: 10 * time.Second,
 	Transport: &http.Transport{
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			if p := favicon.ProxyFunc(); p != nil {
+				return p, nil
+			}
+			return nil, nil
+		},
 		MaxIdleConns:        32,
 		MaxConnsPerHost:     2,
 		IdleConnTimeout:     60 * time.Second,

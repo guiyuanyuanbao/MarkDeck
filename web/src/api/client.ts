@@ -85,7 +85,7 @@ export interface Bookmark {
 }
 
 export interface TagInfo { tag: string; count: number }
-export interface Device { id: string; name: string; createdAt: number; lastSeen: number }
+export interface Device { id: string; name: string; clientName?: string; createdAt: number; lastSeen: number }
 export interface Snapshot { id: string; createdAt: number; size: number; file: string; cause: string }
 
 export const bookmarksApi = {
@@ -124,6 +124,9 @@ export const authApi = {
   totpEnable: (code: string) => api.post('/api/auth/totp-enable', { code }),
   totpDisable: () => api.post('/api/auth/totp-disable'),
   newPairCode: (deviceName?: string) => api.post<{ code: string }>('/api/pair-code', deviceName ? { deviceName } : {}),
+  getProxy: () => api.get<{ proxy: string }>('/api/network/proxy'),
+  clearFavicons: () => api.post<{ ok: string; cleared: string }>('/api/favicon/clear', {}),
+  setProxy: (proxy: string) => api.post<{ ok: string }>('/api/network/proxy', { proxy }),
   devices: () => api.get<{ devices: Device[] }>('/api/devices'),
   revokeDevice: (id: string) => api.del(`/api/devices/${id}`),
 }

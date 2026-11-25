@@ -1,20 +1,33 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { Icon } from '@/components/icons'
+import { THEMES, currentTheme, applyTheme, type ThemeId } from '@/theme'
 
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-const nav = [
-  { path: '/', label: '书签管理', ico: '🔖' },
-  { path: '/tags', label: '标签', ico: '🏷️' },
-  { path: '/trash', label: '回收站', ico: '🗑️' },
-  { path: '/tools', label: '工具中心', ico: '🧰' },
-  { path: '/import', label: '导入 / 导出', ico: '📦' },
-  { path: '/settings', label: '设置', ico: '⚙️' },
+// primary destinations live in the sidebar; everything else is one click
+// away in the top bar — no more digging through settings tabs
+const sideNav = [
+  { path: '/', label: '书签', ico: 'bookmark' },
+  { path: '/trash', label: '回收站', ico: 'trash' },
 ]
+const topTools = [
+  { path: '/tags', label: '标签', ico: 'tag' },
+  { path: '/tools', label: '工具', ico: 'tools' },
+  { path: '/import', label: '导入导出', ico: 'box' },
+]
+
+const themeOpen = ref(false)
+const theme = ref<ThemeId>(currentTheme())
+function pickTheme(t: ThemeId) {
+  theme.value = t
+  applyTheme(t)
+  themeOpen.value = false
+}
 
 function isActive(p: string) {
   if (p === '/') return route.path === '/'
@@ -40,13 +53,13 @@ onMounted(() => {
 
       <nav class="md-nav">
         <button
-          v-for="item in nav"
+          v-for="item in sideNav"
           :key="item.path"
           class="md-nav-item"
           :class="{ active: isActive(item.path) }"
           @click="router.push(item.path)"
         >
-          <span class="md-nav-ico">{{ item.ico }}</span>
+          <span class="md-nav-ico"><Icon :name="item.ico" :size="17" /></span>
           {{ item.label }}
         </button>
       </nav>
@@ -60,6 +73,47 @@ onMounted(() => {
       </div>
     </aside>
     <main class="md-main">
+      <!-- top bar: page utilities one click away -->
+      <div class="md-topbar">
+        <div class="md-topbar-left">
+          <button
+            v-for="item in topTools"
+            :key="item.path"
+            class="md-toplink"
+            :class="{ active: isActive(item.path) }"
+            @click="router.push(item.path)"
+          >
+            <Icon :name="item.ico" :size="15" />
+            {{ item.label }}
+          </button>
+        </div>
+        <div class="md-topbar-right">
+          <button class="md-topicon" :class="{ active: isActive('/settings#devices') }" title="配对设备" @click="router.push('/settings#devices')">
+            <Icon name="laptop" :size="17" />
+          </button>
+          <button class="md-topicon" title="设置" @click="router.push('/settings')">
+            <Icon name="settings" :size="17" />
+          </button>
+          <div class="theme-wrap">
+            <button class="md-topicon" title="配色主题" @click="themeOpen = !themeOpen">
+              <Icon name="palette" :size="17" />
+            </button>
+            <div v-if="themeOpen" class="theme-pop">
+              <button
+                v-for="t in THEMES"
+                :key="t.id"
+                class="theme-opt"
+                :class="{ active: theme === t.id }"
+                @click="pickTheme(t.id)"
+              >
+                <span class="theme-swatch" :style="{ background: t.swatch }" />
+                {{ t.label }}
+                <Icon v-if="theme === t.id" name="check" :size="14" style="margin-left:auto" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
       <router-view />
     </main>
   </div>

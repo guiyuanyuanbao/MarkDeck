@@ -65,7 +65,7 @@ defineExpose({ open })
       @node-click="(n: NodeItem) => (target = n.id)"
     >
       <template #default="{ data }">
-        <span class="folder-node">📁 {{ data.label }}</span>
+        <span class="folder-node">{{ data.label }}</span>
       </template>
     </el-tree>
     <template #footer>

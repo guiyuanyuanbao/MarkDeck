@@ -153,28 +153,30 @@ func (m *Manager) ChangePassword(oldPw, newPw string) error {
 
 // Device is the API-facing view of a paired extension.
 type Device struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Created  int64  `json:"createdAt"`
-	LastSeen int64  `json:"lastSeen"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ClientName string `json:"clientName,omitempty"`
+	Created    int64  `json:"createdAt"`
+	LastSeen   int64  `json:"lastSeen"`
 }
 
 // PairDevice exchanges a valid pairing code for a long-lived device token.
-func (m *Manager) PairDevice(code, name string) (deviceID, token string, err error) {
-	// consume returns the admin's pre-bound name; it wins over whatever the
-	// client sent (the stored value is wiped by the consume itself)
+func (m *Manager) PairDevice(code, clientName string) (deviceID, token string, err error) {
+	// consume returns the admin's pre-bound name; it is authoritative for
+	// `name` while the client's self-report is kept as client_name context
 	bound, ok := m.Store.ConsumePairCode(code)
 	if !ok {
 		return "", "", ErrBadPairCode
 	}
-	if bound != "" {
-		name = bound
+	name := bound
+	if name == "" {
+		name = clientName
 	}
 	token, err = RandomToken(32)
 	if err != nil {
 		return "", "", err
 	}
-	id, err := m.Store.CreateDevice(TokenHash(token), name)
+	id, err := m.Store.CreateDevice(TokenHash(token), name, clientName)
 	if err != nil {
 		return "", "", err
 	}
@@ -211,7 +213,7 @@ func (m *Manager) ListDevices() ([]Device, error) {
 	}
 	out := make([]Device, 0, len(rows))
 	for _, d := range rows {
-		out = append(out, Device{ID: d.ID, Name: d.Name, Created: d.CreatedAt, LastSeen: d.LastSeen})
+		out = append(out, Device{ID: d.ID, Name: d.Name, ClientName: d.ClientName, Created: d.CreatedAt, LastSeen: d.LastSeen})
 	}
 	return out, nil
 }

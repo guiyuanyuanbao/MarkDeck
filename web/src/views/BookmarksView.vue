@@ -7,6 +7,7 @@ import BatchMoveDialog from '@/components/BatchMoveDialog.vue'
 import BatchTagDialog from '@/components/BatchTagDialog.vue'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
+import { Icon } from '@/components/icons'
 
 interface TreeNode {
   id: string
@@ -35,6 +36,15 @@ const ctxMenu = ref<InstanceType<typeof ContextMenu> | null>(null)
 // ---- view mode (list | grid), persisted ----
 const viewMode = ref<'list' | 'grid'>((localStorage.getItem('md-view-mode') as 'list' | 'grid') || 'list')
 watch(viewMode, (v) => localStorage.setItem('md-view-mode', v))
+const gridSize = ref<'small' | 'medium' | 'large'>((localStorage.getItem('md-grid-size') as 'small' | 'medium' | 'large') || 'medium')
+watch(gridSize, (v) => {
+  localStorage.setItem('md-grid-size', v)
+  document.documentElement.setAttribute('data-gridsize', v)
+})
+// apply on mount too (initTheme handles theme; this handles grid density)
+if (!document.documentElement.getAttribute('data-gridsize')) {
+  document.documentElement.setAttribute('data-gridsize', gridSize.value)
+}
 
 // searching / tag-filtering shows results outside the current folder —
 // drag-reorder and paste are meaningless there, so the view degrades to
@@ -364,27 +374,27 @@ function itemMenu(b: Bookmark, ev: MouseEvent) {
   const items: (CtxMenuItem | 'divider')[] = []
   if (multi) {
     items.push(
-      { label: `移动 ${ids.length} 项到…`, icon: '📂', handler: batchMove },
-      { label: `打标签（${ids.length} 项）`, icon: '🏷️', handler: batchTag },
-      { label: '全部收藏', icon: '⭐', handler: () => batchFavorite(true) },
-      { label: '取消收藏', icon: '☆', handler: () => batchFavorite(false) },
-      { label: `删除 ${ids.length} 项`, icon: '🗑️', danger: true, handler: batchDelete },
+      { label: `移动 ${ids.length} 项到…`, icon: 'folder', handler: batchMove },
+      { label: `打标签（${ids.length} 项）`, icon: 'tag', handler: batchTag },
+      { label: '全部收藏', icon: 'star', handler: () => batchFavorite(true) },
+      { label: '取消收藏', icon: 'starOff', handler: () => batchFavorite(false) },
+      { label: `删除 ${ids.length} 项`, icon: 'trash', danger: true, handler: batchDelete },
     )
   } else {
     if (b.type === 'folder') {
-      items.push({ label: '打开', icon: '📂', handler: () => (currentFolder.value = b.id) })
+      items.push({ label: '打开', icon: 'folder', handler: () => (currentFolder.value = b.id) })
     } else {
-      items.push({ label: '打开', icon: '🔗', handler: () => openUrl(b.url) })
+      items.push({ label: '打开', icon: 'open', handler: () => openUrl(b.url) })
     }
     items.push(
       'divider',
-      { label: '编辑', icon: '✏️', handler: () => openEdit(b) },
-      { label: b.favorite ? '取消收藏' : '收藏', icon: '⭐', handler: () => toggleFav(b) },
-      { label: '移动到…', icon: '📂', handler: () => moveDlg.value?.open([b.id]) },
-      { label: '复制', icon: '📄', disabled: !browsing.value, handler: () => copySelected('copy') },
-      { label: '剪切', icon: '✂️', disabled: !browsing.value, handler: () => copySelected('cut') },
+      { label: '编辑', icon: 'edit', handler: () => openEdit(b) },
+      { label: b.favorite ? '取消收藏' : '收藏', icon: 'star', handler: () => toggleFav(b) },
+      { label: '移动到…', icon: 'folder', handler: () => moveDlg.value?.open([b.id]) },
+      { label: '复制', icon: 'copy', disabled: !browsing.value, handler: () => copySelected('copy') },
+      { label: '剪切', icon: 'cut', disabled: !browsing.value, handler: () => copySelected('cut') },
       'divider',
-      { label: '删除', icon: '🗑️', danger: true, handler: () => removeMany([b.id]) },
+      { label: '删除', icon: 'trash', danger: true, handler: () => removeMany([b.id]) },
     )
   }
   ctxMenu.value?.open(ev.clientX, ev.clientY, items)
@@ -395,16 +405,16 @@ function blankMenu(ev: MouseEvent) {
   if ((ev.target as HTMLElement).closest('.bm-row, .bm-card')) return
   clearSelection()
   const items: (CtxMenuItem | 'divider')[] = [
-    { label: '新建书签', icon: '➕', disabled: !browsing.value, handler: () => openCreate('url') },
-    { label: '新建文件夹', icon: '📁', disabled: !browsing.value, handler: () => openCreate('folder') },
+    { label: '新建书签', icon: 'plus', disabled: !browsing.value, handler: () => openCreate('url') },
+    { label: '新建文件夹', icon: 'folder', disabled: !browsing.value, handler: () => openCreate('folder') },
   ]
   if (clipboard.value) {
-    items.push('divider', { label: `粘贴 ${clipboard.value.ids.length} 项`, icon: '📥', disabled: !browsing.value, handler: paste })
+    items.push('divider', { label: `粘贴 ${clipboard.value.ids.length} 项`, icon: 'paste', disabled: !browsing.value, handler: paste })
   }
   items.push(
     'divider',
-    { label: '全选', icon: '☑️', handler: toggleAll },
-    { label: viewMode.value === 'list' ? '切换到图标视图' : '切换到列表视图', icon: viewMode.value === 'list' ? '⊞' : '☰', handler: () => (viewMode.value = viewMode.value === 'list' ? 'grid' : 'list') },
+    { label: '全选', icon: 'check', handler: toggleAll },
+    { label: viewMode.value === 'list' ? '切换到图标视图' : '切换到列表视图', icon: viewMode.value === 'list' ? 'grid' : 'list', handler: () => (viewMode.value = viewMode.value === 'list' ? 'grid' : 'list') },
   )
   ctxMenu.value?.open(ev.clientX, ev.clientY, items)
 }
@@ -457,14 +467,14 @@ function goUp() {
               @dragleave="dropHoverId === data.id && (dropHoverId = null)"
               @drop.prevent="dropHoverId = null; moveIds(draggedIds($event), data.id)"
               @contextmenu.prevent.stop="ctxMenu?.open($event.clientX, $event.clientY, [
-                { label: '打开', icon: '📂', handler: () => (currentFolder = data.id) },
-                { label: '新建书签', icon: '➕', handler: () => editDlg?.openCreate(data.id, 'url') },
-                { label: '新建文件夹', icon: '📁', handler: () => editDlg?.openCreate(data.id, 'folder') },
+                { label: '打开', icon: 'folder', handler: () => (currentFolder = data.id) },
+                { label: '新建书签', icon: 'plus', handler: () => editDlg?.openCreate(data.id, 'url') },
+                { label: '新建文件夹', icon: 'folder', handler: () => editDlg?.openCreate(data.id, 'folder') },
                 'divider',
-                { label: '粘贴到此', icon: '📥', disabled: !clipboard, handler: () => { const f = currentFolder; currentFolder = data.id; paste().then(() => (currentFolder = f)) } },
+                { label: '粘贴到此', icon: 'paste', disabled: !clipboard, handler: () => { const f = currentFolder; currentFolder = data.id; paste().then(() => (currentFolder = f)) } },
               ])"
             >
-              <span>📁</span>
+              <span style="display:inline-flex;color:var(--md-warning)"><Icon name="folder" :size="15" /></span>
               <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ data.label }}</span>
             </span>
           </template>
@@ -500,7 +510,7 @@ function goUp() {
           </div>
           <div class="head-actions">
             <el-input v-model="searchQ" placeholder="搜索标题 / URL / 备注" clearable style="width: 250px" :prefix-icon="null">
-              <template #prefix>🔍</template>
+              <template #prefix><span style="display:inline-flex;color:var(--md-text-3)"><Icon name="search" :size="14" /></span></template>
             </el-input>
             <el-select v-model="tagFilter" placeholder="按标签筛选" clearable style="width: 140px">
               <el-option v-for="t in allTags" :key="t.tag" :label="`${t.tag} (${t.count})`" :value="t.tag" />
@@ -522,6 +532,11 @@ function goUp() {
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
               </button>
+            </div>
+            <div v-if="viewMode === 'grid'" class="grid-size-switch" role="group" aria-label="图标大小">
+              <button class="gs-btn" :class="{ active: gridSize === 'small' }" title="小图标" @click="gridSize = 'small'"><Icon name="grid" :size="11" /></button>
+              <button class="gs-btn" :class="{ active: gridSize === 'medium' }" title="中图标" @click="gridSize = 'medium'"><Icon name="grid" :size="14" /></button>
+              <button class="gs-btn" :class="{ active: gridSize === 'large' }" title="大图标" @click="gridSize = 'large'"><Icon name="grid" :size="17" /></button>
             </div>
             <el-button type="primary" @click="openCreate('url')">＋ 新书签</el-button>
           </div>
@@ -585,7 +600,7 @@ function goUp() {
                 <span v-if="b.favorite" class="fav-star">
                   <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
                 </span>
-                <span v-if="b.note" title="含备注" style="color:var(--md-text-3); font-size:12px">📝</span>
+                <span v-if="b.note" title="含备注" style="color:var(--md-text-3);display:inline-flex"><Icon name="note" :size="13" /></span>
               </div>
               <div class="bm-url" v-if="b.type === 'url'">{{ b.url }}</div>
             </div>

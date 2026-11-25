@@ -380,6 +380,40 @@ let pullTimer: ReturnType<typeof setTimeout> | null = null
 // once per run and uploaded only when the server doesn't already have a
 // fresh copy — the server 404s unknown hosts, 200s known ones.
 let favFailCount = 0 // consecutive-run error dampener: skip after 3 bad runs
+
+// Chrome's _favicon/ endpoint returns a DETERMINISTIC default placeholder
+// (a 601-byte gray-globe PNG, same bytes every time) for hosts the browser
+// has never rendered. Pushing it overwrites real icons with garbage — the
+// user-visible "icons didn't sync" bug. Root fix: learn the placeholder
+// once by fetching a guaranteed-unvisited host, fingerprint it, and refuse
+// to upload any payload matching that fingerprint.
+let placeholderHash: string | null = null
+function faviconHash(buf: ArrayBuffer): string {
+  const b = new Uint8Array(buf)
+  let h1 = 0x811c9dc5, h2 = 0x01000193
+  for (let i = 0; i < b.length; i++) {
+    h1 = ((h1 ^ b[i]) * 16777619) >>> 0
+    h2 = ((h2 + b[b.length - 1 - i]) * 16777619) >>> 0
+  }
+  return `${b.length}:${h1.toString(16)}${h2.toString(16)}`
+}
+async function placeholderFingerprint(cfg: Config): Promise<string | null> {
+  if (placeholderHash) return placeholderHash
+  try {
+    // an RFC 2606 .test domain is guaranteed unvisited/unresolvable —
+    // chrome falls back to the default placeholder for it
+    const url = chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://placeholder-probe-' + Date.now() + '.test/')}&size=32`)
+    const r = await fetch(url, { signal: AbortSignal.timeout(5000) })
+    if (!r.ok) return null
+    const buf = await r.arrayBuffer()
+    if (!buf.byteLength) return null
+    placeholderHash = faviconHash(buf)
+    return placeholderHash
+  } catch {
+    return null
+  }
+}
+
 async function syncFavicons(nodes: ServerNode[], cfg: Config) {
   if (typeof chrome.runtime.getURL !== 'function') return
   try {
@@ -389,7 +423,9 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
       try { hosts.add(new URL(n.url).hostname) } catch { /* malformed */ }
     }
     if (!hosts.size) return
+    const ph = await placeholderFingerprint(cfg)
     let pushed = 0
+    let skippedPlaceholder = 0
     for (const host of hosts) {
       try {
         // server-side probe first: 200 = fresh copy exists, skip
@@ -406,6 +442,8 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
         if (!iconResp.ok) continue
         const buf = await iconResp.arrayBuffer()
         if (!buf.byteLength || buf.byteLength > 200 * 1024) continue
+        // the chrome-default placeholder is junk: refuse to publish it
+        if (ph && faviconHash(buf) === ph) { skippedPlaceholder++; continue }
         const ctype = iconResp.headers.get('content-type') || 'image/png'
         const up = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host), {
           method: 'PUT',
@@ -416,7 +454,7 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
         if (up.ok) pushed++
       } catch { /* per-host best effort */ }
     }
-    if (pushed) console.log(`[favicons] pushed ${pushed}/${hosts.size}`)
+    if (pushed || skippedPlaceholder) console.log(`[favicons] pushed ${pushed}/${hosts.size} (skipped ${skippedPlaceholder} placeholders)`)
     favFailCount = 0
   } catch {
     if (++favFailCount >= 3) {

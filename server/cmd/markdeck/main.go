@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"encoding/json"
+	"net/url"
 	"io"
 	"strings"
 	"syscall"
@@ -62,6 +63,19 @@ func main() {
 		}
 	})
 	fetcher := favicon.NewFetcher(st)
+	// runtime proxy: the admin UI writes proxy settings; outbound favicon /
+	// dead-link fetches pick it up on the next request (no restart)
+	favicon.ProxyFunc = func() *url.URL {
+		raw, err := st.SettingsGet("network_proxy")
+		if err != nil || raw == "" {
+			return nil
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return nil
+		}
+		return u
+	}
 	a := api.New(st, cfg, am, hub)
 	a.RegisterTools(chain)
 
@@ -90,6 +104,31 @@ func main() {
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", `attachment; filename="markdeck-extension-`+extensionVersion+`.zip"`)
 		w.Write(data)
+	})
+	// admin clears stored favicons (whole cache or one host) so devices
+	// re-push, or the fetcher retries — recovers from placeholder garbage
+	mux.HandleFunc("POST /api/favicon/clear", func(w http.ResponseWriter, r *http.Request) {
+		if a.Auth.SessionFromRequest(r) == nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var body struct {
+			Host string `json:"host"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Host == "" {
+			if _, err := st.DB.Exec(`DELETE FROM favicons`); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]string{"ok": "1", "cleared": "all"})
+			return
+		}
+		if _, err := st.DB.Exec(`DELETE FROM favicons WHERE host=?`, body.Host); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"ok": "1", "cleared": body.Host})
 	})
 	// devices push browser-resolved favicons (MV3 _favicon/ endpoint yields
 	// the same icon chrome shows, including its Google fallback) so every

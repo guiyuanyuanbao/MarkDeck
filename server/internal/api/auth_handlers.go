@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
@@ -33,6 +34,8 @@ func (a *API) Register(mux *http.ServeMux) {
 
 	mux.HandleFunc("POST /api/pair-code", a.requireSession(a.handleNewPairCode))
 	mux.HandleFunc("GET /api/extension/update", a.handleExtensionUpdate)
+	mux.HandleFunc("GET /api/network/proxy", a.requireSession(a.handleGetProxy))
+	mux.HandleFunc("POST /api/network/proxy", a.requireSession(a.handleSetProxy))
 	mux.HandleFunc("GET /api/devices", a.requireSession(a.handleListDevices))
 	mux.HandleFunc("DELETE /api/devices/{id}", a.requireSession(a.handleRevokeDevice))
 
@@ -216,6 +219,36 @@ func (a *API) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 
 // ---- pair / devices ----
 
+// handleGetProxy / handleSetProxy: the outbound proxy used for favicon and
+// dead-link fetches. Stored in settings; the fetchers read it per request.
+func (a *API) handleGetProxy(w http.ResponseWriter, r *http.Request) {
+	v, _ := a.Store.SettingsGet("network_proxy")
+	writeJSON(w, http.StatusOK, map[string]string{"proxy": v})
+}
+
+func (a *API) handleSetProxy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Proxy string `json:"proxy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad payload"})
+		return
+	}
+	p := strings.TrimSpace(body.Proxy)
+	if p != "" {
+		u, err := url.Parse(p)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") || u.Host == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "代理格式无效（支持 http/https/socks5://host:port）"})
+			return
+		}
+	}
+	if err := a.Store.SettingsSet("network_proxy", p); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
+}
+
 // handleExtensionUpdate tells the extension which version is current so its
 // options page can surface "new version available" with a direct download
 // link (unpacked MV3 installs can't self-update; a version banner is the
@@ -278,18 +311,19 @@ func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 	// online = synced within the last 2 minutes (device tokens touch
 	// last_seen on every pull/push/WS-auth, so any live sync keeps it fresh)
 	type deviceView struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		CreatedAt int64  `json:"createdAt"`
-		LastSeen  int64  `json:"lastSeen"`
-		Online    bool   `json:"online"`
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		ClientName string `json:"clientName,omitempty"`
+		CreatedAt  int64  `json:"createdAt"`
+		LastSeen   int64  `json:"lastSeen"`
+		Online     bool   `json:"online"`
 	}
 	const onlineWindow = 120 // seconds
 	views := make([]deviceView, 0, len(devs))
 	now := store.Now()
 	for _, d := range devs {
 		views = append(views, deviceView{
-			ID: d.ID, Name: d.Name, CreatedAt: d.Created, LastSeen: d.LastSeen,
+			ID: d.ID, Name: d.Name, ClientName: d.ClientName, CreatedAt: d.Created, LastSeen: d.LastSeen,
 			Online: d.LastSeen > 0 && now-d.LastSeen <= onlineWindow,
 		})
 	}
