@@ -605,6 +605,14 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         })
         const data = await resp.json()
         if (!resp.ok) throw new Error(data.error || 'pair failed')
+        // CRITICAL: wipe base + touch on every pairing. md_base described
+        // the PREVIOUS pairing's server lineage; keeping it against a new
+        // (possibly emptied) server makes the reconcile read every stale
+        // base entry as 'server deleted this row' and mass-delete the
+        // browser's bookmarks — the wipe bug. A fresh pairing is a fresh
+        // three-way identity: empty base ⇒ first reconcile adopts the
+        // browser tree and pushes it (nothing is deleted).
+        await chrome.storage.local.remove([BASE_KEY, TOUCH_KEY])
         await saveConfigPatch({ server, token: data.token, deviceId: data.deviceId, rev: 0 })
         deviceIdCached = data.deviceId
         // first reconcile against an empty base = full adoption/import,
