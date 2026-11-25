@@ -72,8 +72,9 @@ function buildTree(nodes: Bookmark[]): TreeNode[] {
 
 async function loadTree() {
   const { nodes } = await bookmarksApi.tree()
-  flat.value = new Map(nodes.map((n) => [n.id, n]))
-  tree.value = buildTree(nodes)
+  const rows = nodes || [] // server nil-encodes empty sets
+  flat.value = new Map(rows.map((n) => [n.id, n]))
+  tree.value = buildTree(rows)
 }
 
 async function loadList() {
@@ -81,7 +82,7 @@ async function loadList() {
   try {
     const { nodes } = await bookmarksApi.tree()
     if (searchQ.value) { await doSearch(); return }
-    const inFolder = nodes.filter((n) => n.parentId === currentFolder.value)
+    const inFolder = (nodes || []).filter((n) => n.parentId === currentFolder.value)
     inFolder.sort((a, b) => a.position - b.position)
     list.value = tagFilter.value ? inFolder.filter((n) => n.tags?.includes(tagFilter.value)) : inFolder
     // keep ids that still exist: a background revision mid-selection used to
@@ -99,7 +100,10 @@ async function doSearch() {
   loading.value = true
   try {
     const { results } = await bookmarksApi.search(searchQ.value, 200)
-    list.value = tagFilter.value ? results.filter((n) => n.tags?.includes(tagFilter.value)) : results
+    // server returns results:null (not []) when nothing matches — assigning
+    // null killed the template render and blanked the whole router-view
+    const rows = results || []
+    list.value = tagFilter.value ? rows.filter((n) => n.tags?.includes(tagFilter.value)) : rows
     checked.value = new Set()
   } finally {
     loading.value = false
@@ -122,7 +126,7 @@ function onRevision() {
 }
 onMounted(() => {
   loadTree(); loadList()
-  bookmarksApi.tags().then((r) => (allTags.value = r.tags))
+  bookmarksApi.tags().then((r) => (allTags.value = r.tags || []))
   window.addEventListener('md:revision', onRevision)
 })
 onBeforeUnmount(() => window.removeEventListener('md:revision', onRevision))
@@ -548,6 +552,7 @@ function goUp() {
                 class="view-btn"
                 :class="{ active: viewMode === 'list' }"
                 title="列表视图"
+                aria-label="列表视图"
                 @click="viewMode = 'list'"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -556,6 +561,7 @@ function goUp() {
                 class="view-btn"
                 :class="{ active: viewMode === 'grid' }"
                 title="图标视图"
+                aria-label="图标视图"
                 @click="viewMode = 'grid'"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
@@ -683,7 +689,9 @@ function goUp() {
               <BookmarkAvatar :b="b" :size="40" />
             </div>
             <div class="card-title" :title="b.title || b.url">{{ b.title || b.url }}</div>
-            <div class="card-sub">{{ b.type === 'folder' ? '文件夹' : (b.tags?.[0] || fmtDate(b.createdAt)) }}</div>
+            <div class="card-sub">
+              {{ b.type === 'folder' ? '文件夹' : (b.tags?.length ? (b.tags.length > 1 ? `${b.tags[0]} +${b.tags.length - 1}` : b.tags[0]) : fmtDate(b.createdAt)) }}
+            </div>
           </div>
         </template>
 

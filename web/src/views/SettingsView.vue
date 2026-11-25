@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { authApi, toolsApi, type Device, type Snapshot } from '@/api/client'
@@ -32,6 +32,17 @@ const pairDeviceName = ref('')
 const proxyUrl = ref('')
 const pairExpiry = ref(0)
 const snapshots = ref<Snapshot[]>([])
+// live countdown so the user sees the code dying instead of copying an
+// already-expired one (the static "5 分钟内有效" gave no feedback)
+const nowTick = ref(Date.now())
+let tickTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => { tickTimer = setInterval(() => (nowTick.value = Date.now()), 1000) })
+onBeforeUnmount(() => { if (tickTimer) clearInterval(tickTimer) })
+const pairRemain = computed(() => {
+  if (!pairCode.value || !pairExpiry.value) return null
+  const s = Math.max(0, Math.floor((pairExpiry.value - nowTick.value) / 1000))
+  return s
+})
 
 onMounted(() => {
   loadAll()
@@ -272,7 +283,10 @@ async function restoreSnap(s: Snapshot) {
             {{ pairCode }}
           </span>
           <el-button v-if="pairCode" size="small" plain @click="copyPairCode">复制</el-button>
-          <span v-if="pairCode" style="color: #909399; font-size: 12px">5 分钟内有效 · 使用一次后立即失效</span>
+          <span v-if="pairCode" style="color: #909399; font-size: 12px">
+            <template v-if="pairRemain !== null && pairRemain > 0">{{ Math.floor(pairRemain / 60) }}:{{ String(pairRemain % 60).padStart(2, '0') }} 内有效 · 使用一次后立即失效</template>
+            <template v-else><span style="color: var(--md-danger, #e5484d)">已过期 — 请重新生成</span></template>
+          </span>
         </div>
         <el-table :data="devices">
           <el-table-column label="设备" min-width="200">

@@ -23,15 +23,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     credentials: 'same-origin',
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  if (resp.status === 401) {
-    // session expired: broadcast so router can bounce to /login
-    window.dispatchEvent(new CustomEvent('md:unauthorized'))
-    throw new ApiError(401, '登录已过期')
-  }
   const text = await resp.text()
   let data: any = null
   if (text) {
     try { data = JSON.parse(text) } catch { data = { raw: text } }
+  }
+  if (resp.status === 401) {
+    // login/setup 401 = wrong credentials, NOT an expired session: broadcasting
+    // md:unauthorized here showed "登录已过期" on a wrong password and bounced
+    // the login page into a redirect loop. The auth endpoints surface their own
+    // error text; only the authenticated API surface treats 401 as expiry.
+    if (data && typeof data.error === 'string' && !window.location.pathname.startsWith('/login')) {
+      window.dispatchEvent(new CustomEvent('md:unauthorized'))
+      throw new ApiError(401, '登录已过期')
+    }
+    throw new ApiError(401, (data && data.error) || `HTTP ${resp.status}`)
   }
   if (!resp.ok) {
     throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
@@ -46,13 +52,14 @@ export async function uploadFile<T = any>(path: string, file: File, fields: Reco
   const headers: Record<string, string> = {}
   if (csrfToken) headers['X-CSRF'] = csrfToken
   const resp = await fetch(BASE + path, { method: 'POST', headers, credentials: 'same-origin', body: fd })
-  if (resp.status === 401) {
-    window.dispatchEvent(new CustomEvent('md:unauthorized'))
-    throw new ApiError(401, '登录已过期')
-  }
   const text = await resp.text()
   let data: any = null
   if (text) { try { data = JSON.parse(text) } catch { data = { raw: text } } }
+  if (resp.status === 401) {
+    // import runs on an authenticated page: 401 here IS session expiry
+    window.dispatchEvent(new CustomEvent('md:unauthorized'))
+    throw new ApiError(401, '登录已过期')
+  }
   if (!resp.ok) throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
   return data as T
 }

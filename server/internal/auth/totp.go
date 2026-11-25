@@ -19,7 +19,7 @@ import (
 var (
 	ErrNotSetup       = errors.New("admin password not configured (first run)")
 	ErrAlreadySetup   = errors.New("admin password already configured")
-	ErrBadCredentials = errors.New("invalid credentials")
+	ErrBadCredentials = errors.New("密码错误")
 	ErrBadTOTP        = errors.New("invalid or missing TOTP code")
 	ErrWeakPassword   = errors.New("password must be at least 8 characters")
 	ErrBadPairCode    = errors.New("invalid or expired pairing code")

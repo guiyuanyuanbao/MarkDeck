@@ -14,13 +14,14 @@ const pendingIds = ref<string[]>([])
 
 async function loadFolders() {
   const { nodes } = await bookmarksApi.tree()
+  const rows = nodes || [] // server nil-encodes empty sets
   const mk = (list: Bookmark[]): NodeItem[] =>
     list.filter((n) => n.type === 'folder').map((n) => ({
       id: n.id,
       label: n.title || '(未命名)',
-      children: mk(nodes.filter((c) => c.parentId === n.id)),
+      children: mk(rows.filter((c) => c.parentId === n.id)),
     }))
-  folders.value = mk(nodes.filter((n) => n.parentId === ''))
+  folders.value = mk(rows.filter((n) => n.parentId === ''))
 }
 
 function open(ids: string[], excludeFolderId?: string) {
