@@ -59,7 +59,9 @@ async function save() {
   try {
     const tags = form.tags.split(/[,，]/).map((t) => t.trim()).filter(Boolean)
     if (mode.value === 'create') {
-      await bookmarksApi.create({ type: form.type, parentId: form.parentId, title: form.title, url: form.url, note: form.note, tags })
+      // favorite must ride the create payload: the dialog shows the switch
+      // for url creates, and dropping it silently discarded the user's pick
+      await bookmarksApi.create({ type: form.type, parentId: form.parentId, title: form.title, url: form.url, note: form.note, tags, favorite: form.favorite })
     } else {
       await bookmarksApi.update(form.id, { title: form.title, url: form.url, note: form.note, favorite: form.favorite, tags })
       if (form.parentId !== undefined) {

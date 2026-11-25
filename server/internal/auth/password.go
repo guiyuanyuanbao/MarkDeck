@@ -79,9 +79,19 @@ type Limiter struct {
 }
 
 // NewLimiter creates a limiter that locks an identity after maxFail
-// consecutive failures.
+// consecutive failures. A janitor goroutine prunes stale attempt records
+// hourly — without it the attempts map grows without bound (spoofable XFF
+// keys under a trusted proxy could balloon it deliberately).
 func NewLimiter(maxFail int) *Limiter {
-	return &Limiter{attempts: map[string]*attemptRecord{}, maxFail: maxFail}
+	l := &Limiter{attempts: map[string]*attemptRecord{}, maxFail: maxFail}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			l.Cleanup()
+		}
+	}()
+	return l
 }
 
 // Allow reports whether a login attempt from key may proceed now.

@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
 )
@@ -193,6 +195,13 @@ func (a *API) handleReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.Store.Reorder(body.ParentID, body.IDs, store.Now(), "web"); err != nil {
+		// validation failures (not-a-child, missing parent) are client
+		// errors: 400, not 500
+		if errors.Is(err, store.ErrNotFound) || strings.Contains(err.Error(), "not a child") ||
+			strings.Contains(err.Error(), "parent") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -200,7 +209,9 @@ func (a *API) handleReorder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
 
-// handleBatch: one call for move/delete/tag on many ids.
+// handleBatch: one call for move/delete/tag on many ids. Per-id failures are
+// collected (not fatal): the response reports affected AND failed so callers
+// can surface partial success instead of a bare count.
 func (a *API) handleBatch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IDs      []string `json:"ids"`
@@ -215,56 +226,64 @@ func (a *API) handleBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	at := store.Now()
 	affected := 0
+	var failedIDs []string
 	for _, id := range body.IDs {
 		var err error
+		ok := true
 		switch body.Action {
 		case "delete":
-			_, err = func() ([]string, error) { return a.Store.DeleteSoft(id, at, "web") }()
+			_, err = a.Store.DeleteSoft(id, at, "web")
 		case "restore":
 			_, err = a.Store.Restore(id, at, "web")
 		case "move":
 			_, err = a.Store.Move(id, body.ParentID, 0, at, "web")
 		case "tag":
 			cur, gerr := a.Store.Get(id)
-			if gerr == nil {
-				tags := append(cur.Tags, body.Tag)
-				_, err = a.Store.SetTags(id, tags, "web")
+			if gerr != nil {
+				ok = false
+				break
 			}
+			tags := append(cur.Tags, body.Tag)
+			_, err = a.Store.SetTags(id, tags, "web")
 		case "untag":
 			cur, gerr := a.Store.Get(id)
-			if gerr == nil {
-				var tags []string
-				for _, t := range cur.Tags {
-					if t != body.Tag {
-						tags = append(tags, t)
-					}
-				}
-				_, err = a.Store.SetTags(id, tags, "web")
+			if gerr != nil {
+				ok = false
+				break
 			}
+			var tags []string
+			for _, t := range cur.Tags {
+				if t != body.Tag {
+					tags = append(tags, t)
+				}
+			}
+			_, err = a.Store.SetTags(id, tags, "web")
 		case "favorite", "archive":
 			cur, gerr := a.Store.Get(id)
-			if gerr == nil {
-				if body.Action == "favorite" {
-					cur.Favorite = body.Value != nil && *body.Value
-				} else {
-					cur.Archived = body.Value != nil && *body.Value
-				}
-				cur.UpdatedAt = at
-				cur.DeviceID = "web"
-				_, _, err = a.Store.UpdateLWWBase(cur, nil, cur.Revision)
+			if gerr != nil {
+				ok = false
+				break
 			}
+			if body.Action == "favorite" {
+				cur.Favorite = body.Value != nil && *body.Value
+			} else {
+				cur.Archived = body.Value != nil && *body.Value
+			}
+			cur.UpdatedAt = at
+			cur.DeviceID = "web"
+			_, _, err = a.Store.UpdateLWWBase(cur, nil, cur.Revision)
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown action " + body.Action})
 			return
 		}
-		if err != nil && err != store.ErrNotFound {
-			httpError(w, http.StatusInternalServerError, err)
-			return
+		if (err != nil && err != store.ErrNotFound) || !ok {
+			failedIDs = append(failedIDs, id)
+			continue
 		}
 		affected++
 	}
 	a.broadcastRevision()
-	writeJSON(w, http.StatusOK, map[string]any{"affected": affected})
+	writeJSON(w, http.StatusOK, map[string]any{"affected": affected, "failed": failedIDs})
 }
 
 func (a *API) handleSetTags(w http.ResponseWriter, r *http.Request) {

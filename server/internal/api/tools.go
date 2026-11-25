@@ -163,6 +163,13 @@ func (a *API) handleDupMerge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// same-group validation: merge deletes nodes, so it must refuse ids that
+	// are NOT actual duplicate-URL group members — otherwise this endpoint
+	// is an arbitrary-delete primitive for any bearer/holder
+	if err := a.chain.ValidateDuplicateGroup(body.KeepID, body.RemoveIDs); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := a.chain.MergeDuplicate(body.KeepID, body.RemoveIDs); err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return
@@ -187,6 +194,16 @@ func (a *API) handleFolderDupMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.KeepID == "" || len(body.RemoveIDs) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId and removeIds required"})
+		return
+	}
+	for _, id := range body.RemoveIDs {
+		if id == body.KeepID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId in removeIds"})
+			return
+		}
+	}
+	if err := a.chain.ValidateFolderDuplicateGroup(body.KeepID, body.RemoveIDs); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	moved, err := a.chain.MergeFolderDuplicates(body.KeepID, body.RemoveIDs)

@@ -205,8 +205,16 @@ func (a *API) handleTOTPEnable(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err)
 		return
 	}
-	_ = a.Store.SettingsSet("totp_enabled", "1")
-	_ = a.Store.SettingsSet("totp_pending_secret", "")
+	// both writes must succeed: secret-set + enabled-flag is not atomic, and
+	// a swallowed failure left the secret stored while TOTP stayed off
+	if err := a.Store.SettingsSet("totp_enabled", "1"); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.Store.SettingsSet("totp_pending_secret", ""); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
 
@@ -214,8 +222,17 @@ func (a *API) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 	if secret, _ := a.Store.SettingsGet("totp_secret"); secret != "" {
 		auth.ForgetTOTPSecret(secret)
 	}
-	_ = a.Store.SettingsSet("totp_enabled", "0")
-	_ = a.Store.SettingsSet("totp_secret", "")
+	// also clear any dangling pending setup so a half-finished enrollment
+	// cannot be completed later against a disabled TOTP
+	_ = a.Store.SettingsSet("totp_pending_secret", "")
+	if err := a.Store.SettingsSet("totp_enabled", "0"); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.Store.SettingsSet("totp_secret", ""); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
 

@@ -13,11 +13,13 @@ type TagInfo struct {
 }
 
 // ListTags returns all tags with counts over non-deleted bookmarks.
+// LIKE needs an explicit ESCAPE or '\_' matches a literal backslash prefix,
+// not an underscore — internal `_`-prefixed tags would leak through.
 func (s *Store) ListTags() ([]TagInfo, error) {
 	rows, err := s.DB.Query(`SELECT bt.tag, COUNT(*)
 		FROM bookmark_tags bt
 		JOIN bookmarks b ON b.id = bt.bookmark_id
-		WHERE b.deleted_at = 0 AND bt.tag NOT LIKE '\_%'
+		WHERE b.deleted_at = 0 AND bt.tag NOT LIKE '\_%' ESCAPE '\'
 		GROUP BY bt.tag ORDER BY bt.tag`)
 	if err != nil {
 		return nil, err
@@ -35,10 +37,13 @@ func (s *Store) ListTags() ([]TagInfo, error) {
 }
 
 // RenameTag renames a tag everywhere, merging into the target if it exists.
-// All affected bookmarks get a revision bump so clients re-pull.
+// All affected bookmarks get a revision bump so clients re-pull. `from` is
+// normalized too — stored tags are lowercase, and an un-normalized from
+// (e.g. "Work") matched nothing and silently affected zero rows.
 func (s *Store) RenameTag(from, to string) (int, error) {
+	from = normalizeTag(from)
 	to = normalizeTag(to)
-	if to == "" {
+	if from == "" || to == "" {
 		return 0, fmt.Errorf("empty tag name")
 	}
 	tx, err := s.DB.Begin()
@@ -80,6 +85,10 @@ func (s *Store) RenameTag(from, to string) (int, error) {
 
 // DeleteTag removes a tag from all bookmarks and bumps those rows.
 func (s *Store) DeleteTag(tag string) (int, error) {
+	tag = normalizeTag(tag)
+	if tag == "" {
+		return 0, fmt.Errorf("empty tag name")
+	}
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return 0, err
@@ -123,8 +132,8 @@ func (s *Store) SetTags(id string, tags []string, deviceID string) (*Bookmark, e
 	}
 	for _, t := range tags {
 		nt := normalizeTag(t)
-		if nt == "" {
-			continue // drop empty/whitespace-only tags
+		if nt == "" || strings.HasPrefix(nt, "_") {
+			continue // drop empty tags and internal `_`-prefixed names
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag) VALUES(?,?)`,
 			id, nt); err != nil {
@@ -152,7 +161,9 @@ func (s *Store) Search(q string, limit int) ([]*Bookmark, error) {
 		limit = 50
 	}
 	if len([]rune(q)) < 3 {
-		like := "%" + strings.ReplaceAll(q, "%", "") + "%"
+		// strip BOTH LIKE wildcards (% and _) — an unescaped "_" matches any
+		// character and turned a one-char query into a full-table scan
+		like := "%" + strings.NewReplacer("%", "", "_", "").Replace(q) + "%"
 		return s.queryList(`SELECT `+scanCols+` FROM bookmarks
 			WHERE deleted_at=0 AND purged=0 AND (title LIKE ? OR url LIKE ? OR note LIKE ?)
 			ORDER BY updated_at DESC LIMIT ?`, like, like, like, limit)
@@ -186,7 +197,7 @@ func (s *Store) Stats() (map[string]int64, error) {
 	queries := map[string]string{
 		"bookmarks": `SELECT COUNT(*) FROM bookmarks WHERE type='url' AND deleted_at=0`,
 		"folders":   `SELECT COUNT(*) FROM bookmarks WHERE type='folder' AND deleted_at=0`,
-		"tags":      `SELECT COUNT(DISTINCT tag) FROM bookmark_tags bt JOIN bookmarks b ON b.id=bt.bookmark_id WHERE b.deleted_at=0`,
+		"tags":      `SELECT COUNT(DISTINCT tag) FROM bookmark_tags bt JOIN bookmarks b ON b.id=bt.bookmark_id WHERE b.deleted_at=0 AND bt.tag NOT LIKE '\_%' ESCAPE '\'`,
 		"trash":     `SELECT COUNT(*) FROM bookmarks WHERE deleted_at>0 AND purged=0`,
 		"archived":  `SELECT COUNT(*) FROM bookmarks WHERE archived=1 AND deleted_at=0`,
 		"favorites": `SELECT COUNT(*) FROM bookmarks WHERE favorite=1 AND deleted_at=0`,

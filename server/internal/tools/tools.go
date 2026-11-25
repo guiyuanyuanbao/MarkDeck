@@ -402,6 +402,57 @@ func (c *Chain) MergeFolderDuplicates(keepID string, removeIDs []string) (moved 
 	return moved, nil
 }
 
+// ValidateDuplicateGroup confirms keep+remove ids really belong to one
+// duplicate-URL group (same normalized key, ≥2 members). Merge deletes its
+// inputs, so without this the endpoint was an arbitrary-delete primitive.
+func (c *Chain) ValidateDuplicateGroup(keepID string, removeIDs []string) error {
+	nodes, err := c.Store.Tree()
+	if err != nil {
+		return err
+	}
+	byID := map[string]*store.Bookmark{}
+	for _, n := range nodes {
+		byID[n.ID] = n
+	}
+	keep, ok := byID[keepID]
+	if !ok || keep.Type != "url" {
+		return fmt.Errorf("keepId %s is not a live url bookmark", keepID)
+	}
+	key := normalizeForDup(keep.URL)
+	for _, rid := range removeIDs {
+		rm, ok := byID[rid]
+		if !ok || rm.Type != "url" || normalizeForDup(rm.URL) != key {
+			return fmt.Errorf("removeId %s is not a duplicate of the keep bookmark", rid)
+		}
+	}
+	return nil
+}
+
+// ValidateFolderDuplicateGroup confirms keep+remove are same-parent
+// same-title folder groups — the only shape MergeFolderDuplicates may
+// consume (same arbitrary-delete concern as ValidateDuplicateGroup).
+func (c *Chain) ValidateFolderDuplicateGroup(keepID string, removeIDs []string) error {
+	nodes, err := c.Store.Tree()
+	if err != nil {
+		return err
+	}
+	byID := map[string]*store.Bookmark{}
+	for _, n := range nodes {
+		byID[n.ID] = n
+	}
+	keep, ok := byID[keepID]
+	if !ok || keep.Type != "folder" {
+		return fmt.Errorf("keepId %s is not a live folder", keepID)
+	}
+	for _, rid := range removeIDs {
+		rm, ok := byID[rid]
+		if !ok || rm.Type != "folder" || rm.ParentID != keep.ParentID || rm.Title != keep.Title {
+			return fmt.Errorf("removeId %s is not a same-folder duplicate of the keep folder", rid)
+		}
+	}
+	return nil
+}
+
 func (c *Chain) FindDuplicates() ([]DupGroup, error) {
 	nodes, err := c.Store.Tree()
 	if err != nil {

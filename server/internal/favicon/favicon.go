@@ -224,16 +224,35 @@ func fetchIconFromHTML(ctx context.Context, base string) (string, bool) {
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && (n.Data == "link" || n.Data == "meta") {
-			var rel, href string
+			var rel, href, prop string
 			for _, a := range n.Attr {
 				switch a.Key {
 				case "rel":
 					rel = strings.ToLower(a.Val)
-				case "href", "content":
+				case "href":
 					href = a.Val
+				case "property":
+					prop = strings.ToLower(a.Val)
+				case "content":
+					// only meaningful for meta; kept separate from href
 				}
 			}
 			prio := 0
+			val := href
+			if n.Data == "meta" {
+				// og:image uses property= (not rel= — reading rel there
+				// never matched anything); its value rides content=
+				if prop == "og:image" || prop == "twitter:image" {
+					prio = 1
+					for _, a := range n.Attr {
+						if a.Key == "content" {
+							val = a.Val
+						}
+					}
+				} else {
+					val = ""
+				}
+			}
 			switch {
 			case strings.Contains(rel, "apple-touch-icon"):
 				prio = 4
@@ -241,12 +260,10 @@ func fetchIconFromHTML(ctx context.Context, base string) (string, bool) {
 				prio = 3
 			case strings.Contains(rel, "icon"):
 				prio = 2
-			case n.Data == "meta" && rel == "og:image" || href != "" && n.Data == "meta" && strings.Contains(strings.ToLower(rel), "image"):
-				prio = 1
 			}
-			if prio > score && href != "" {
+			if prio > score && val != "" {
 				score = prio
-				best = href
+				best = val
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {

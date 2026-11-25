@@ -196,23 +196,67 @@ func (s *Store) Purge(id string, at int64, deviceID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id=?`, id); err != nil {
-		return err
-	}
-	res, err := tx.Exec(`UPDATE bookmarks SET
-		parent_id='', title='', url='', note='', deleted_at=?, purged=1,
-		updated_at=?, device_id=? WHERE id=? AND deleted_at > 0`,
-		at, at, deviceID, id)
+	// Purge the WHOLE subtree: soft-deleting a folder tombstoned every
+	// descendant, and purging only the folder row left orphan child
+	// tombstones in the trash pointing at an emptied parent forever.
+	ids, err := subtreeIDsTx(tx, id)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	for _, bid := range ids {
+		if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id=?`, bid); err != nil {
+			return err
+		}
 	}
-	if _, err := bumpChange(tx, id); err != nil {
+	// scanned dead-link rows for purged bookmarks are noise (their bookmark
+	// no longer exists); drop them in the same tx
+	if _, err := tx.Exec(`DELETE FROM dead_links WHERE bookmark_id IN (`+placeholders(len(ids))+`)`, idArgs(ids)...); err != nil {
+		// dead_links exists only when migration 0005 applied; tolerate older DBs
+		if !strings.Contains(err.Error(), "no such table") {
+			return err
+		}
+	}
+	for _, bid := range ids {
+		res, err := tx.Exec(`UPDATE bookmarks SET
+			parent_id='', title='', url='', note='', deleted_at=?, purged=1,
+			updated_at=?, device_id=? WHERE id=? AND deleted_at > 0`,
+			at, at, deviceID, bid)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue // child already purged individually — fine
+		}
+		if _, err := bumpChange(tx, bid); err != nil {
+			return err
+		}
+	}
+	// the root id itself must have been a trashed row (guard unchanged)
+	var n int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE id=? AND deleted_at>0`, id).Scan(&n); err != nil {
 		return err
 	}
+	if n == 0 {
+		return ErrNotFound
+	}
 	return tx.Commit()
+}
+
+// placeholders builds "?,?" x n for IN clauses (ids are trusted server data,
+// but placeholders keep the queries uniform).
+func placeholders(n int) string {
+	if n <= 0 {
+		return "''"
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func idArgs(ids []string) []any {
+	out := make([]any, len(ids))
+	for i, id := range ids {
+		out[i] = id
+	}
+	return out
 }
 
 // Restore removes the tombstone from a trashed bookmark (and, if its parent

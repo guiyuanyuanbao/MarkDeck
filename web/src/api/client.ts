@@ -62,6 +62,18 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
+  // binary download with auth/401 handling (export endpoints return files)
+  getBlob: async (path: string): Promise<Blob> => {
+    const headers: Record<string, string> = {}
+    if (csrfToken) headers['X-CSRF'] = csrfToken
+    const resp = await fetch(BASE + path, { headers, credentials: 'same-origin' })
+    if (resp.status === 401) {
+      window.dispatchEvent(new CustomEvent('md:unauthorized'))
+      throw new ApiError(401, '登录已过期')
+    }
+    if (!resp.ok) throw new ApiError(resp.status, `HTTP ${resp.status}`)
+    return resp.blob()
+  },
 }
 
 // ---- shared types mirroring server models ----
