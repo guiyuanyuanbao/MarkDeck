@@ -13,48 +13,79 @@
       --primary: #5b67f2;
       --primary-soft: #eef0fe;
       --danger: #e5484d;
+      --danger-soft: #fdeced;
       --success: #23a877;
+      --success-soft: #e8f7f1;
       --warning: #f5a623;
-      --radius: 12px;
+      --warning-soft: #fef7e8;
+      --radius: 14px;
       --radius-sm: 9px;
       --shadow: 0 1px 2px rgba(24,28,58,.05), 0 2px 10px rgba(24,28,58,.06);
       --font: 'Inter','Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
     }
     * { box-sizing: border-box; margin: 0; }
-    html, body { width: 340px; font-family: var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+    html, body { width: 356px; font-family: var(--font); background: var(--bg); color: var(--text); -webkit-font-spacing: antialiased; -webkit-font-smoothing: antialiased; }
 
-    /* brand header */
+    /* light hero header — matches the web admin's single-header IA */
     header {
-      background: linear-gradient(135deg, #14172a 0%, #191d36 100%);
-      padding: 14px 16px 12px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 13px 16px;
       display: flex; align-items: center; gap: 10px;
+      position: sticky; top: 0; z-index: 10;
     }
     .logo-mark {
       width: 30px; height: 30px; border-radius: 9px;
-      display: grid; place-items: center; color: #fff; flex-shrink: 0;
-      overflow: hidden;
+      flex-shrink: 0; overflow: hidden;
+      box-shadow: 0 2px 8px rgba(91,103,242,.35);
     }
     .logo-mark img { width: 100%; height: 100%; display: block; border-radius: inherit; }
-    .logo-name { font-size: 15px; font-weight: 700; color: #fff; letter-spacing: .4px; flex: 1; }
+    .logo-name { font-size: 15px; font-weight: 700; letter-spacing: .2px; flex: 1; }
+    .settings-btn {
+      width: 30px; height: 30px;
+      border: none; border-radius: 9px;
+      background: none; color: var(--text2);
+      cursor: pointer;
+      display: grid; place-items: center;
+      transition: background .15s, color .15s;
+    }
+    .settings-btn:hover { background: var(--primary-soft); color: var(--primary); }
+    .icon { display: inline-flex; }
+    .icon svg { display: block; }
 
-    /* status strip */
+    /* status hero strip */
     .status {
       margin: 12px 12px 0;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
       box-shadow: var(--shadow);
-      padding: 10px 12px;
-      display: flex; align-items: center; gap: 9px;
+      padding: 11px 13px;
+      display: flex; align-items: center; gap: 10px;
       font-size: 13px;
     }
     .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
     .dot.online { background: var(--success); box-shadow: 0 0 0 3px rgba(35,168,119,.18); }
-    .dot.off    { background: var(--danger);  box-shadow: 0 0 0 3px rgba(229,72,77,.15); }
-    .dot.unconfigured { background: var(--warning); box-shadow: 0 0 0 3px rgba(245,166,35,.18); }
-    .dot.unauthorized { background: var(--danger);  box-shadow: 0 0 0 3px rgba(229,72,77,.15); }
+    .dot.off    { background: var(--warning); box-shadow: 0 0 0 3px rgba(245,166,35,.18); }
+    .dot.unconfigured { background: var(--text3); box-shadow: 0 0 0 3px rgba(156,161,182,.18); }
+    .dot.unauthorized { background: var(--danger); box-shadow: 0 0 0 3px rgba(229,72,77,.15); }
     #statusText { color: var(--text); font-weight: 600; }
     #queueInfo { margin-left: auto; color: var(--text3); font-size: 12px; }
+
+    /* inline alert banners (text-only, no buttons per established UX rule) */
+    .banner {
+      margin: 10px 12px 0;
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+    }
+    .banner.warn { background: var(--warning-soft); border: 1px solid #f5d98d; }
+    .banner.revoked { background: var(--danger-soft); border: 1px solid #f3b6b8; }
+    .banner-title { font-size: 12.5px; font-weight: 700; color: #9a6d0b; display: flex; align-items: center; gap: 6px; }
+    .banner.revoked .banner-title { color: var(--danger); }
+    .banner-desc { font-size: 11.5px; color: #9a6d0b; opacity: .85; margin: 4px 0 6px; line-height: 1.5; }
+    .banner.revoked .banner-desc { color: var(--danger); opacity: .9; }
+    .banner-queue { font-size: 12px; font-weight: 700; color: #9a6d0b; }
+    .banner.revoked .banner-queue { color: var(--danger); }
 
     /* cards */
     .card {
@@ -63,67 +94,77 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      padding: 12px 14px;
+      padding: 13px 14px;
     }
-    .card-label { font-size: 11px; font-weight: 700; color: var(--text3); letter-spacing: .4px; margin-bottom: 7px; }
+    .card-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 700; color: var(--text3);
+      letter-spacing: .4px; margin-bottom: 8px;
+    }
+    .card-label .icon { color: var(--primary); }
 
     input {
-      width: 100%; padding: 8px 10px;
+      width: 100%; padding: 8px 11px;
       border: 1px solid var(--border); border-radius: var(--radius-sm);
       font-family: var(--font); font-size: 13px; color: var(--text);
       background: #fafbfd; outline: none; margin-bottom: 8px;
-      transition: border-color .15s ease, background .15s ease;
+      transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
     }
-    input:focus { border-color: var(--primary); background: #fff; }
+    input:focus { border-color: var(--primary); background: #fff; box-shadow: 0 0 0 3px var(--primary-soft); }
     input::placeholder { color: var(--text3); }
 
-    button {
-      font-family: var(--font); font-size: 13px; font-weight: 600;
-      border: none; border-radius: var(--radius-sm);
-      padding: 8px 14px; cursor: pointer;
-      transition: filter .15s ease, transform .05s ease, background .15s ease;
-    }
-    button:active { transform: translateY(1px); }
+    button { font-family: var(--font); }
     .btn-primary {
       width: 100%;
       background: var(--primary); color: #fff;
-      padding: 9px; font-size: 14px;
+      border: none; border-radius: var(--radius-sm);
+      padding: 9px; font-size: 13.5px; font-weight: 600;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      transition: filter .15s ease, transform .05s ease;
     }
     .btn-primary:hover { filter: brightness(1.08); }
-    .btn-ghost { background: #eef0f6; color: var(--text2); flex: 1; }
+    .btn-primary:active { transform: translateY(1px); }
+    .btn-primary:disabled { opacity: .6; cursor: default; }
+    .btn-ghost {
+      background: #eef0f6; color: var(--text2);
+      border: none; border-radius: var(--radius-sm);
+      padding: 8px 14px; font-size: 13px; font-weight: 600;
+      cursor: pointer; flex: 1;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      transition: background .15s ease, color .15s ease;
+    }
     .btn-ghost:hover { background: #e3e6ef; color: var(--text); }
 
-    .row { display: flex; gap: 8px; }
-    .saved-msg { color: var(--success); font-size: 12px; font-weight: 600; margin-left: 8px; }
+    .saved-msg { color: var(--success); font-size: 12px; font-weight: 600; }
 
-    .conflict {
-      margin: 10px 12px 0;
-      background: #fef7e8;
-      border: 1px solid #f5d98d;
+    /* quiet utility row (browser sync settings) */
+    .utility-row {
+      margin: 10px 12px;
+      display: flex; align-items: center; gap: 9px;
+      background: var(--surface);
+      border: 1px solid var(--border);
       border-radius: var(--radius-sm);
       padding: 10px 12px;
     }
-    .conflict-title { font-size: 12.5px; font-weight: 700; color: #9a6d0b; }
-    .conflict-desc { font-size: 11.5px; color: #9a6d0b; opacity: .85; margin: 4px 0 8px; line-height: 1.5; }
-    .offline-banner {
-      margin: 10px 12px 0;
-      background: #fef7e8;
-      border: 1px solid #f5d98d;
-      border-radius: var(--radius-sm);
-      padding: 10px 12px;
+    .utility-row .u-ico {
+      width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+      background: var(--primary-soft); color: var(--primary);
+      display: grid; place-items: center;
     }
-    .offline-banner.revoked { background: #fdeced; border-color: #f3b6b8; }
-    .offline-title { font-size: 12.5px; font-weight: 700; color: #9a6d0b; }
-    .offline-banner.revoked .offline-title { color: var(--danger); }
-    .offline-desc { font-size: 11.5px; color: #9a6d0b; opacity: .85; margin: 4px 0 6px; line-height: 1.5; }
-    .offline-banner.revoked .offline-desc { color: var(--danger); opacity: .9; }
-    .offline-queue { font-size: 12px; font-weight: 700; color: #9a6d0b; }
-    .hint-line { font-size: 11.5px; color: var(--text3); line-height: 1.5; margin-bottom: 8px; }
-    .sync-btn {
-      width: 100%; background: #eef0f6; color: var(--text2); font-size: 12.5px;
-      padding: 8px;
+    .utility-row .u-text { flex: 1; min-width: 0; }
+    .utility-row .u-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+    .utility-row .u-sub { font-size: 11px; color: var(--text3); margin-top: 1px; }
+    .utility-row button {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text2);
+      border-radius: 999px;
+      font-size: 12px; font-weight: 600;
+      padding: 5px 12px; cursor: pointer;
+      transition: color .15s, border-color .15s, background .15s;
     }
-    .sync-btn:hover { background: #e3e6ef; color: var(--text); }
+    .utility-row button:hover { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
 
     /* local search results */
     .search-results { margin-top: 4px; }
@@ -138,17 +179,18 @@
       width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
       display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #fff;
     }
+    .search-empty { color: var(--text3); font-size: 12px; padding: 6px 8px; }
 
-    footer {
-      padding: 10px 14px 14px;
-      display: flex; gap: 8px;
-    }
+    footer { padding: 8px 12px 14px; }
   </style>
 </head>
 <body>
   <header>
     <div class="logo-mark"><img src="icons/icon128.png" alt="MarkDeck"></div>
     <div class="logo-name">MarkDeck</div>
+    <button id="optionsBtn" class="settings-btn" title="设置" aria-label="设置">
+      <span class="icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+    </button>
   </header>
 
   <div class="status">
@@ -157,40 +199,54 @@
     <span id="queueInfo"></span>
   </div>
 
-  <div class="conflict" id="conflictBar" style="display:none">
-    <div class="conflict-title">⚠️ 检测到重复书签</div>
-    <div class="conflict-desc">可能同时开启了浏览器自带书签同步，两者会互相冲突。</div>
+  <div class="banner warn" id="conflictBar" style="display:none">
+    <div class="banner-title">
+      <span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
+      检测到重复书签
+    </div>
+    <div class="banner-desc">可能同时开启了浏览器自带书签同步，两者会互相冲突。</div>
   </div>
 
-  <div class="offline-banner" id="offlineBanner" style="display:none">
-    <div class="offline-title" id="offlineTitle">⚠️ 与服务器断联</div>
-    <div class="offline-desc">你的改动已保存在本地，恢复连接后会自动同步，书签的查看与搜索不受影响。</div>
-    <div class="offline-queue" id="offlineQueue"></div>
+  <div class="banner warn" id="offlineBanner" style="display:none">
+    <div class="banner-title" id="offlineTitle">与服务器断联</div>
+    <div class="banner-desc">你的改动已保存在本地，恢复连接后会自动同步，书签的查看与搜索不受影响。</div>
+    <div class="banner-queue" id="offlineQueue"></div>
   </div>
 
   <div class="card">
-    <div class="card-label">收藏当前页面</div>
+    <div class="card-label">
+      <span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></span>
+      收藏当前页面
+    </div>
     <input id="title" placeholder="标题" />
     <input id="tags" placeholder="标签（逗号分隔，可选）" />
-    <button id="saveBtn" class="btn-primary">⭐ 收藏此页面</button>
-    <div style="text-align:center; margin-top: 4px"><span class="saved-msg" id="savedMsg"></span></div>
+    <button id="saveBtn" class="btn-primary">
+      <span class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></span>
+      收藏此页面
+    </button>
+    <div style="text-align:center; margin-top: 6px"><span class="saved-msg" id="savedMsg"></span></div>
   </div>
 
   <div class="card">
-    <div class="card-label">本地搜索书签（离线可用）</div>
+    <div class="card-label">
+      <span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg></span>
+      本地搜索书签（离线可用）
+    </div>
     <input id="localSearch" placeholder="输入关键词…" />
     <div class="search-results" id="searchResults"></div>
   </div>
 
-  <div class="card">
-    <div class="card-label">浏览器书签同步</div>
-    <div class="hint-line">如果同时开启了浏览器自带的账号书签同步，建议关闭该项以避免冲突。</div>
-    <button id="openSyncSettings" class="sync-btn">🌐 打开浏览器同步设置</button>
+  <div class="utility-row">
+    <div class="u-ico">
+      <span class="icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
+    </div>
+    <div class="u-text">
+      <div class="u-title">浏览器书签同步</div>
+      <div class="u-sub">与自带账号同步冲突时在此关闭</div>
+    </div>
+    <button id="openSyncSettings">打开设置</button>
   </div>
 
-  <footer>
-    <button id="optionsBtn" class="btn-ghost">⚙️ 设置</button>
-  </footer>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

@@ -56,10 +56,15 @@ $('resyncBtn').onclick = async () => {
 // differs from this build, surface a one-click upgrade banner (unpacked
 // installs can't self-update — this is the practical substitute)
 ;(async () => {
+  // header version badge: always show the running version (it doubles as the
+  // "which zip am I running" answer the user needs on unpacked installs)
+  const mine = chrome.runtime.getManifest().version
+  const badge = document.getElementById('versionBadge')
+  if (badge) badge.textContent = 'v' + mine
+
   const st: any = await chrome.storage.local.get('md_config')
   const server = st.md_config?.server
   if (!server) return
-  const mine = chrome.runtime.getManifest().version
   try {
     const r = await fetch(server.replace(/\/+$/, '') + '/api/extension/update', { signal: AbortSignal.timeout(8000) })
     if (!r.ok) return
@@ -67,10 +72,12 @@ $('resyncBtn').onclick = async () => {
     if (!d.version || d.version === mine) return
     const card = document.getElementById('connCard')!
     const up = document.createElement('div')
-    up.style.cssText = 'margin-top:10px;padding:9px 12px;background:#eef0fe;border-radius:9px;display:flex;align-items:center;gap:10px'
-    up.innerHTML = '<span style="font-size:12.5px;color:#1a1c28">有新版本 <b>v' + d.version + '</b>（当前 v' + mine + '）</span>'
+    up.style.cssText = 'margin-top:12px;padding:10px 13px;background:var(--primary-soft);border-radius:10px;display:flex;align-items:center;gap:10px'
+    up.innerHTML = '<span style="font-size:12.5px;color:var(--text)">有新版本 <b>v' + d.version + '</b>（当前 v' + mine + '）</span>'
     const btn = document.createElement('button')
     btn.className = 'btn-primary'
+    btn.style.padding = '7px 14px'
+    btn.style.fontSize = '12.5px'
     btn.textContent = '下载升级包'
     btn.onclick = () => {
       const a = document.createElement('a')
@@ -101,7 +108,7 @@ async function refreshConnStatus() {
         break
       case 'disconnected':
         dot.className = 'dot off'
-        title.textContent = '⚠ 与服务器断联'
+        title.textContent = '与服务器断联'
         desc.textContent = '改动已保存在本地（' + (resp.queued || 0) + ' 条待同步），恢复连接后自动同步；书签查看与搜索不受影响。'
         break
       case 'unauthorized':
@@ -146,10 +153,14 @@ async function runDiagnostics() {
   const hint = document.getElementById('diagHint')!
   card.style.display = 'block'
   rows.innerHTML = ''
+  const CHECK_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
+  const CROSS_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>'
+  const WAIT_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>'
   const row = (ok: boolean | null, label: string, detail = '') => {
     const div = document.createElement('div')
-    const icon = ok === true ? '✅' : ok === false ? '❌' : '⏳'
-    div.innerHTML = `${icon} ${label}${detail ? ` <span style="color:var(--text3)">${detail}</span>` : ''}`
+    div.className = 'diag-row ' + (ok === true ? 'ok' : ok === false ? 'bad' : 'pending')
+    const svg = ok === true ? CHECK_SVG : ok === false ? CROSS_SVG : WAIT_SVG
+    div.innerHTML = `<span class="diag-ico icon">${svg}</span><span class="diag-label">${label}${detail ? ` <span class="diag-detail">${detail}</span>` : ''}</span>`
     rows.appendChild(div)
     return ok
   }
@@ -289,7 +300,7 @@ async function runDiagnostics() {
     ? '发现问题：' + broken
     : '各项正常 — 若服务端书签仍未出现在浏览器，点击「手动全量同步」并确认浏览器书签栏'
   hint.textContent = broken
-    ? '按上面第一个 ❌ 项处理后点「重新检测」。'
+    ? '按上面第一个标错项处理后点「重新检测」。'
     : '浏览器书签同步范围 = 书签栏 + 其他书签；远端文件夹会原样出现在这两处。'
 }
 $('diagRefresh').onclick = runDiagnostics

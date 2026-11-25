@@ -60,7 +60,7 @@ function updateOfflineBanner(status: string, queued: number) {
   if (status === 'disconnected' || status === 'unauthorized') {
     banner.style.display = 'block'
     banner.className = 'offline-banner' + (status === 'unauthorized' ? ' revoked' : '')
-    title.textContent = status === 'unauthorized' ? '⚠️ 设备令牌已失效' : '⚠️ 与服务器断联'
+    title.textContent = status === 'unauthorized' ? '设备令牌已失效' : '与服务器断联'
     queue.textContent = queued > 0 ? `本地已保存 ${queued} 条改动，恢复连接后自动同步` : ''
   } else {
     banner.style.display = 'none'
@@ -120,7 +120,7 @@ function initSearch() {
     }
     if (!shown) {
       const p = document.createElement('div')
-      p.style.cssText = 'color:var(--text3); font-size:12px; padding:4px 8px'
+      p.className = 'search-empty'
       p.textContent = '没有匹配的书签'
       out.appendChild(p)
     }
