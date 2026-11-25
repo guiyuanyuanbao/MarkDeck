@@ -428,21 +428,28 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
     let skippedPlaceholder = 0
     for (const host of hosts) {
       try {
-        // server-side probe first: 200 = fresh copy exists, skip
-        // probe=1: cache-only check — a plain GET would make the server
-        // fetch its own (possibly worse) icon and 200 the probe, blocking
-        // our push forever
+        // probe=1: cache-only check (returns the STORED bytes; never
+        // triggers a server-side fetch). Outcomes:
+        //   404        → nothing stored → push ours
+        //   200, placeholder-fingerprint bytes → stored garbage from an
+        //              older build → overwrite with ours
+        //   200, other bytes → a real icon is already there → skip
         const probe = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host) + '?probe=1', {
           signal: AbortSignal.timeout(5000),
         })
-        if (probe.ok) continue
+        if (probe.ok) {
+          if (!ph) continue // can't fingerprint: trust the stored copy
+          const stored = await probe.arrayBuffer()
+          if (faviconHash(stored) !== ph) continue // real icon stored
+          // else: stored bytes ARE the placeholder → fall through and overwrite
+        }
         // resolve the icon from the browser cache
         const iconUrl = chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://' + host)}&size=32`)
         const iconResp = await fetch(iconUrl, { signal: AbortSignal.timeout(5000) })
         if (!iconResp.ok) continue
         const buf = await iconResp.arrayBuffer()
         if (!buf.byteLength || buf.byteLength > 200 * 1024) continue
-        // the chrome-default placeholder is junk: refuse to publish it
+        // never publish the chrome-default placeholder ourselves
         if (ph && faviconHash(buf) === ph) { skippedPlaceholder++; continue }
         const ctype = iconResp.headers.get('content-type') || 'image/png'
         const up = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host), {
