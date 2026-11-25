@@ -316,7 +316,11 @@ async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: str
     await applyChromeOps(plan.chromeOps, resolveParent, stats, createdBindings)
     for (const [sid, lid] of createdBindings) {
       const e = plan.newBaseEntries[sid]
-      if (e && !e.localId) e.localId = lid
+      // overwrite unconditionally: a null binding is the plain-create case,
+      // and a stale binding (URL-change remove+create re-created the row)
+      // must be replaced by the NEW chrome id — keeping the old one would
+      // point base at a node this plan just removed
+      if (e) e.localId = lid
     }
 
     // 6. advance base atomically: the new snapshot is the server tree plus

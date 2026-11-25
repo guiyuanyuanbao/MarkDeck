@@ -292,6 +292,20 @@ func looksLikeImage(b []byte) bool {
 	return false
 }
 
+// LooksLikeImage is the exported guard for the device-push endpoint: it
+// rejects arbitrary bytes (HTML/script) masquerading as images. SVG is
+// additionally refused on the push path — an SVG document served same-origin
+// is executable script, and the browser never pushes SVG via _favicon/.
+func LooksLikeImage(b []byte) bool {
+	if !looksLikeImage(b) {
+		return false
+	}
+	if b[0] == '<' { // svg / xml / html — all rejected for storage
+		return false
+	}
+	return true
+}
+
 func sniffType(b []byte) string {
 	switch {
 	case b[0] == 0x89 && b[1] == 'P':

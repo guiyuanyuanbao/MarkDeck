@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/favicon"
@@ -97,13 +98,13 @@ func (c *Chain) ScanDeadLinks(ctx context.Context) (int, error) {
 
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
-	var checked int32
+	var checked int64
 
 	for _, b := range urls {
 		select {
 		case <-ctx.Done():
 			wg.Wait()
-			return int(checked), ctx.Err()
+			return int(atomic.LoadInt64(&checked)), ctx.Err()
 		case sem <- struct{}{}:
 		}
 		wg.Add(1)
@@ -112,15 +113,14 @@ func (c *Chain) ScanDeadLinks(ctx context.Context) (int, error) {
 			defer func() { <-sem }()
 			status := checkURL(bm.URL)
 			recordDeadLink(c.Store, bm.ID, status)
-			// atomic-ish counter, single writer per goroutine: use int
-			checked++
+			atomic.AddInt64(&checked, 1)
 		}(b)
 	}
 	wg.Wait()
 	if c.Broadcast != nil {
 		c.Broadcast(0)
 	}
-	return int(checked), nil
+	return int(atomic.LoadInt64(&checked)), nil
 }
 
 // checkURL performs HEAD then GET fallback; returns "ok" or "code:<n>".

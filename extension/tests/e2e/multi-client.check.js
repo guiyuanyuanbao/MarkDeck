@@ -94,14 +94,24 @@ async function waitFor(fn, timeoutMs = 20000) {
 const { execSync } = require('child_process')
 ;(async () => {
   // ---- reset server to a clean state (kill, wipe data, restart) ----
+  // The old sequence had a startup race: taskkill + 0.8s sleep does not
+  // guarantee the previous server released the SQLite file locks, so the
+  // rmdir silently kept failing and the new server booted on a STALE
+  // database — T3 then "deleted" a leftover duplicate row and deletion
+  // propagation looked broken (2026-11-25 failure). Now: kill, wait until
+  // the dir is REALLY gone (rmdir retried until it succeeds), boot, and
+  // verify the database is actually fresh (auth must report setup mode).
   try { execSync('taskkill /F /IM markdeck-final.exe', { stdio: 'ignore' }) } catch {}
-  await new Promise(r => setTimeout(r, 800))
-  for (let i = 0; i < 10; i++) {
-    try { execSync('rmdir /s /q C:/Users/admin/AppData/Local/Temp/md-sync-test', { stdio: 'ignore' }); break } catch { await new Promise(r => setTimeout(r, 500)) }
+  const dataDir = 'C:/Users/admin/AppData/Local/Temp/md-sync-test'
+  let wiped = false
+  for (let i = 0; i < 20 && !wiped; i++) {
+    try { fs2.rmSync(dataDir, { recursive: true, force: true }); wiped = !fs2.existsSync(dataDir) } catch { /* locked: retry */ }
+    if (!wiped) await new Promise(r => setTimeout(r, 500))
   }
+  if (!wiped) throw new Error('cannot wipe ' + dataDir + ' — a markdeck-final.exe is still holding it')
   const serverBin = 'D:/Code/AiWorkSpace/ZCode/MarkDeck/.tools/markdeck-test/markdeck-final.exe'
   spawn(serverBin, [], {
-    env: { ...process.env, MARKDECK_ADDR: '127.0.0.1:8996', MARKDECK_DATA: 'C:/Users/admin/AppData/Local/Temp/md-sync-test' },
+    env: { ...process.env, MARKDECK_ADDR: '127.0.0.1:8996', MARKDECK_DATA: dataDir },
     stdio: 'ignore', detached: true,
   }).unref()
   for (let i = 0; i < 30; i++) {
@@ -109,6 +119,7 @@ const { execSync } = require('child_process')
   }
   // ---- server auth ----
   const state = JSON.parse((await api('/api/auth/state')).body)
+  if (!state.setup) throw new Error('server db is NOT fresh after wipe (auth.setup=false) — stale data dir')
   let cookie, csrf
   if (state.setup) {
     const s = await api('/api/auth/setup', { password: ADMIN_PW })

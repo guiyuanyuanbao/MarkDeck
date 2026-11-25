@@ -315,6 +315,15 @@ func (a *API) handleNewPairCode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handlePairExchange(w http.ResponseWriter, r *http.Request) {
+	// The pair endpoint is unauthenticated and accepts a 6-digit code that
+	// stays valid for 5 minutes — without throttling an attacker can sweep
+	// the whole keyspace (10^6 attempts) inside the window. Same exponential
+	// backoff ladder as login, keyed by client address.
+	pairKey := "pair:" + auth.ClientKey(r)
+	if !a.Limiter.Allow(pairKey) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try later"})
+		return
+	}
 	var body struct {
 		Code string `json:"code"`
 		Name string `json:"name"`
@@ -325,9 +334,11 @@ func (a *API) handlePairExchange(w http.ResponseWriter, r *http.Request) {
 	}
 	id, token, err := a.Auth.PairDevice(body.Code, body.Name)
 	if err != nil {
+		a.Limiter.Fail(pairKey)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	a.Limiter.Succeed(pairKey)
 	log.Printf("paired device %s (%s)", id, body.Name)
 	// wake the admin UI: its device list refreshes on revision pings
 	a.broadcastRevision()

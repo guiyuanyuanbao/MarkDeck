@@ -532,9 +532,22 @@ function localDiffers(ln: LocalNode, baseServer: ServerNode, touch: TouchJournal
   return false // title/url equal and no touch: treat as unchanged (position drift handled by planPositionOnly)
 }
 
-// apply server state to the browser (update/move/remove-and-recreate)
+// apply server state to the browser (update/move/remove-and-recreate).
+// chrome.bookmarks.update can only change the TITLE — a URL change cannot
+// be applied in place, and dropping it made the browser keep the old URL
+// forever while every reconcile churned. A URL-differing row is therefore
+// re-materialized: remove the bound node, recreate with the new URL (the
+// binding re-forms in this same plan via createdBindings).
 function planServerToLocal(sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats'], rank: number) {
-  if (ln.title !== sn.title || normBookmarkUrl(ln.url) !== normBookmarkUrl(sn.url)) {
+  const urlChanged = sn.type === 'url' && normBookmarkUrl(ln.url) !== normBookmarkUrl(sn.url)
+  if (urlChanged) {
+    chromeOps.push({ kind: 'remove', serverId: sn.id, localId })
+    stats.chromeRemoves++
+    chromeOps.push({ kind: 'create', serverId: sn.id, parentServerId: sn.parentId, type: 'url', title: sn.title, url: sn.url, index: rank })
+    stats.chromeCreates++
+    return
+  }
+  if (ln.title !== sn.title) {
     chromeOps.push({ kind: 'update', serverId: sn.id, localId, title: sn.title, url: sn.url })
     stats.chromeUpdates++
   }

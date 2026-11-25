@@ -156,6 +156,13 @@ func main() {
 		if ctype == "" || !strings.HasPrefix(ctype, "image/") {
 			ctype = "image/png"
 		}
+		// stored bytes are served back verbatim by GET /api/favicon/{host}:
+		// only real image payloads may enter the store (SVG/script rejected)
+		if !favicon.LooksLikeImage(data) {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "not an image payload"})
+			return
+		}
 		if err := st.FaviconPut(host, ctype, data); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -164,10 +171,14 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"ok": "1"})
 	})
 	mux.Handle("/", securityHeaders(webapp.Handler()))
-
+	// The API routes serve user-controlled bytes too (favicon store), so
+	// every handler runs behind the same security headers: without nosniff
+	// an image/svg+xml payload from PUT /api/favicon/{host} could be
+	// rendered as a same-origin document by direct navigation — a stored
+	// XSS with no CSP to stop it.
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

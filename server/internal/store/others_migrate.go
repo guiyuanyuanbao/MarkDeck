@@ -62,7 +62,7 @@ func (s *Store) MigrateOthersHolders() error {
 		return err
 	}
 	if len(holderIDs) == 0 {
-		return s.unwrapBookmarksBarWrappers()
+		return s.unwrapOnce()
 	}
 	log.Printf("migration: merging %d legacy others-holder(s) into %s", len(holderIDs), canonicalOthersID)
 
@@ -102,7 +102,25 @@ func (s *Store) MigrateOthersHolders() error {
 			return err
 		}
 	}
-	return s.unwrapBookmarksBarWrappers()
+	return s.unwrapOnce()
+}
+
+// unwrapOnce runs the bar-wrapper unwrap EXACTLY once per database: the
+// heuristic cannot tell a real user folder named like the browser bar from
+// the old importer's phantom shell (a user folder "书签栏" holding only
+// sub-folders looks identical to the residue), and re-running it on every
+// startup kept re-shredding such folders after every reconcile restored
+// them. The one-shot marker makes the repair an upgrade-time action only;
+// the importer itself strips wrappers now, so nothing needs a second pass.
+func (s *Store) unwrapOnce() error {
+	done, err := s.SettingsGet("migration_bar_unwrap_done")
+	if err == nil && done == "1" {
+		return nil
+	}
+	if err := s.unwrapBookmarksBarWrappers(); err != nil {
+		return err
+	}
+	return s.SettingsSet("migration_bar_unwrap_done", "1")
 }
 
 // unwrapBookmarksBarWrappers removes phantom "Bookmarks bar"-named wrapper
