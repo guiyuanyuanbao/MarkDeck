@@ -428,22 +428,18 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
     let skippedPlaceholder = 0
     for (const host of hosts) {
       try {
-        // probe=1: cache-only check (returns the STORED bytes; never
-        // triggers a server-side fetch). Outcomes:
-        //   404        → nothing stored → push ours
-        //   200, placeholder-fingerprint bytes → stored garbage from an
-        //              older build → overwrite with ours
-        //   200, other bytes → a real icon is already there → skip
+        // probe=1: cache-only check. Policy (server fetcher is
+        // authoritative; extension pushes are a fallback for hosts the
+        // server can't reach):
+        //   200 → server already holds an icon → skip entirely (never
+        //         overwrite server content from the browser — chrome's
+        //         _favicon/ may serve placeholders that look real)
+        //   404 → server has nothing → push ours ONLY if chrome's icon is
+        //         real (fingerprint != placeholder)
         const probe = await fetch(apiBase(cfg.server) + '/api/favicon/' + encodeURIComponent(host) + '?probe=1', {
           signal: AbortSignal.timeout(5000),
         })
-        if (probe.ok) {
-          if (!ph) continue // can't fingerprint: trust the stored copy
-          const stored = await probe.arrayBuffer()
-          if (faviconHash(stored) !== ph) continue // real icon stored
-          // else: stored bytes ARE the placeholder → fall through and overwrite
-        }
-        // resolve the icon from the browser cache
+        if (probe.ok) continue
         const iconUrl = chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent('https://' + host)}&size=32`)
         const iconResp = await fetch(iconUrl, { signal: AbortSignal.timeout(5000) })
         if (!iconResp.ok) continue

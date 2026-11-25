@@ -91,7 +91,10 @@ func (f *Fetcher) ServeHTTP(w http.ResponseWriter, r *http.Request, host string)
 		return
 	}
 	w.Header().Set("Content-Type", ctype)
-	w.Header().Set("Cache-Control", "public, max-age=604800") // 7d; keys are versionless but content changes rarely
+	// version = fetched_at: the admin UI appends ?v=<fetched_at> so an
+	// updated icon busts the browser cache immediately (was 7 days — bad
+	// icons stuck for a week)
+	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Write(data)
 }
 

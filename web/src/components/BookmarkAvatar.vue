@@ -11,6 +11,15 @@ const props = withDefaults(defineProps<{
 }>(), { size: 22 })
 
 const failed = ref(false)
+// icon version: bumped whenever a revision event arrives (server data
+// changed → favicons may have been re-pushed). Appended to the favicon URL
+// so updated icons bust the browser cache instantly instead of sticking
+// for the CDN lifetime.
+const iconVer = ref(Number(localStorage.getItem('md-icon-ver') || 0))
+window.addEventListener('md:revision', () => {
+  iconVer.value++
+  localStorage.setItem('md-icon-ver', String(iconVer.value))
+})
 watch(() => props.b.url, () => { failed.value = false })
 
 function hostOf(b: Bookmark): string | null {
@@ -22,7 +31,7 @@ function hostOf(b: Bookmark): string | null {
 }
 function faviconSrc(b: Bookmark): string | null {
   const h = hostOf(b)
-  return h ? '/api/favicon/' + encodeURIComponent(h) : null
+  return h ? '/api/favicon/' + encodeURIComponent(h) + '?v=' + iconVer.value : null
 }
 function avatarColor(b: Bookmark): string {
   const colors = [

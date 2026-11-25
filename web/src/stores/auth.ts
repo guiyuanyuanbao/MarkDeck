@@ -88,5 +88,5 @@ function startPolling() {
       const st = await api.get<{ head: number }>('/api/sync/status')
       window.dispatchEvent(new CustomEvent('md:revision', { detail: st.head }))
     } catch { /* server unreachable; keep trying */ }
-  }, 30000)
+  }, 6000)
 }
