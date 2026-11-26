@@ -30,9 +30,11 @@ function isActive(p: string) {
   if (p === '/') return route.path === '/'
   return route.path.startsWith(p)
 }
-// the devices icon deep-links to /settings#devices; route.path never carries
-// the hash, so isActive('/settings#devices') was permanently false
-const devicesActive = computed(() => route.path === '/settings' && (route.hash === '#devices' || route.hash === ''))
+// the settings gear highlights whenever we're on /settings; the devices icon
+// deep-links to /settings#devices and only lights up for that hash (a bare
+// /settings means the account tab — that's the gear's active state)
+const settingsActive = computed(() => route.path === '/settings' && route.hash !== '#devices')
+const devicesActive = computed(() => route.path === '/settings' && route.hash === '#devices')
 
 onMounted(() => {
   window.addEventListener('md:unauthorized', () => {
@@ -68,7 +70,7 @@ onMounted(() => {
         <button class="md-topicon" :class="{ active: devicesActive }" title="配对设备" @click="router.push('/settings#devices')">
           <Icon name="laptop" :size="17" />
         </button>
-        <button class="md-topicon" title="设置" @click="router.push('/settings')">
+        <button class="md-topicon" :class="{ active: settingsActive }" title="设置" @click="router.push('/settings')">
           <Icon name="settings" :size="17" />
         </button>
         <div class="theme-wrap">
@@ -90,8 +92,8 @@ onMounted(() => {
           </div>
         </div>
         <span class="md-header-sep" />
-        <div class="md-user-chip" title="管理员">
-          <span class="md-user-avatar">A</span>
+        <div class="md-user-chip" title="账户与安全">
+          <button class="md-user-avatar" aria-label="账户设置" @click="router.push('/settings')">A</button>
           <button class="md-logout" @click="auth.logout().then(() => router.push('/login'))">退出</button>
         </div>
       </div>

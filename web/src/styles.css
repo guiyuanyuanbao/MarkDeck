@@ -901,10 +901,13 @@ body {
 .md-user-chip { display: flex; align-items: center; gap: 8px; }
 .md-user-chip .md-user-avatar {
   width: 28px; height: 28px; border-radius: 50%;
+  border: none; padding: 0; cursor: pointer;
   background: linear-gradient(135deg, var(--md-success), var(--md-primary));
   color: #fff; font-size: 12px; font-weight: 700;
   display: inline-flex; align-items: center; justify-content: center;
+  transition: transform .15s, box-shadow .15s;
 }
+.md-user-chip .md-user-avatar:hover { transform: scale(1.08); box-shadow: 0 0 0 3px var(--md-primary-soft); }
 .md-logout {
   border: 1px solid var(--md-border);
   background: var(--md-surface);
@@ -1055,3 +1058,51 @@ body {
 }
 .drop-zone-title { font-size: 13.5px; color: var(--md-text); font-weight: 600; }
 .drop-zone-hint { font-size: 12px; color: var(--md-text-3); margin-top: 4px; }
+
+/* ============================================================
+   Trash view — side filter list (same rhythm as the bookmarks
+   folder tree panel) + original-location column
+   ============================================================ */
+.tr-nav { flex: 1; overflow: auto; padding: 4px 8px 8px; display: flex; flex-direction: column; gap: 2px; }
+.tr-link {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none; background: none;
+  border-radius: 9px;
+  font-size: 13.5px; font-family: inherit;
+  color: var(--md-sidebar-text);
+  cursor: pointer;
+  text-align: left;
+  transition: color .14s, background .14s;
+}
+.tr-link:hover { color: var(--md-text); background: var(--md-primary-soft); }
+.tr-link.active { color: var(--md-primary); background: var(--md-primary-soft); font-weight: 600; }
+.tr-ico { display: inline-flex; color: var(--md-text-3); flex-shrink: 0; }
+.tr-link.active .tr-ico { color: var(--md-primary); }
+.tr-link .count {
+  margin-left: auto;
+  font-size: 11.5px; font-weight: 600;
+  color: var(--md-text-3);
+  background: var(--md-bg);
+  border-radius: 999px;
+  padding: 1px 8px;
+  min-width: 20px; text-align: center;
+}
+.tr-link.active .count { color: var(--md-primary); background: color-mix(in srgb, var(--md-primary) 12%, white); }
+.tr-summary {
+  margin: 8px 12px 14px;
+  padding: 10px 12px;
+  border-radius: var(--md-radius-sm);
+  background: var(--md-bg);
+  border: 1px solid var(--md-border);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--md-text-3);
+}
+.tr-orig {
+  width: 150px; text-align: right; flex-shrink: 0;
+  font-size: 12.5px; color: var(--md-text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bm-card .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

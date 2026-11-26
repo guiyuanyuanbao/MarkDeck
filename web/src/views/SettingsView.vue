@@ -9,7 +9,7 @@ const tab = ref('account')
 // deep-link: /settings#devices jumps straight to the pairing tab (the
 // topbar's device icon routes here — pairing should never be buried)
 function applyHashTab(h: string) {
-  if (h === 'devices' || h === 'network' || h === 'snapshots') tab.value = h
+  if (h === 'account' || h === 'devices' || h === 'network' || h === 'snapshots') tab.value = h
 }
 applyHashTab(location.hash.replace('#', ''))
 // vue-router updates route.hash without a native hashchange event when the
