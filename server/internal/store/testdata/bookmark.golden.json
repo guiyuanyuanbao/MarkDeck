@@ -1,0 +1,31 @@
+[
+  {
+    "id": "row-1",
+    "parentId": "root",
+    "type": "url",
+    "title": "Example",
+    "url": "https://example.com",
+    "note": "a note",
+    "favorite": true,
+    "archived": false,
+    "position": 1.5,
+    "deletedAt": 1700000100,
+    "revision": 12,
+    "updatedAt": 1700000000,
+    "deviceId": "dev-1",
+    "createdAt": 1699999000,
+    "tags": ["a", "b"]
+  },
+  {
+    "id": "row-2",
+    "parentId": "root",
+    "type": "folder",
+    "title": "Folder",
+    "favorite": false,
+    "archived": true,
+    "position": 0,
+    "revision": 13,
+    "updatedAt": 1700000005,
+    "createdAt": 1699999000
+  }
+]
