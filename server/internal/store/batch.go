@@ -120,11 +120,11 @@ func (s *Store) applyBatchOp(tx *sql.Tx, op *BatchOp, at int64) BatchResult {
 			Position:  derefFloat(op.Position),
 			UpdatedAt: updated, DeviceID: device, CreatedAt: at,
 		}
-		if err := insertBookmarkTx(tx, b); err != nil {
+		if err := insertBookmark(tx, b); err != nil {
 			return BatchResult{ID: op.ID, Error: err.Error()}
 		}
 		if op.Tags != nil {
-			if err := setTagsTx(tx, b.ID, op.Tags); err != nil {
+			if err := setTags(tx, b.ID, op.Tags); err != nil {
 				return BatchResult{ID: op.ID, Error: err.Error()}
 			}
 		}
@@ -157,7 +157,7 @@ func (s *Store) applyBatchOp(tx *sql.Tx, op *BatchOp, at int64) BatchResult {
 		if cur == nil || cur.DeletedAt > 0 {
 			return BatchResult{ID: op.ID, Win: true} // already absent/trashed
 		}
-		ids, err := subtreeIDsTx(tx, op.ID)
+		ids, err := subtreeIDs(tx, op.ID)
 		if err != nil {
 			return BatchResult{ID: op.ID, Error: err.Error()}
 		}
@@ -228,11 +228,11 @@ func (s *Store) batchUpdate(tx *sql.Tx, cur *Bookmark, op *BatchOp, device strin
 	// otherwise deletion state stays as-is: deletes go through the "delete"
 	// branch (which tombstones the whole subtree), updates never flip it
 
-	if err := updateBookmarkTx(tx, &merged); err != nil {
+	if err := updateBookmark(tx, &merged); err != nil {
 		return BatchResult{ID: op.ID, Error: err.Error()}
 	}
 	if op.Tags != nil {
-		if err := setTagsTx(tx, op.ID, op.Tags); err != nil {
+		if err := setTags(tx, op.ID, op.Tags); err != nil {
 			return BatchResult{ID: op.ID, Error: err.Error()}
 		}
 	}
@@ -249,112 +249,6 @@ func (s *Store) batchUpdate(tx *sql.Tx, cur *Bookmark, op *BatchOp, device strin
 func getBookmarkTx(tx *sql.Tx, id string) (*Bookmark, error) {
 	row := tx.QueryRow(`SELECT `+scanCols+` FROM bookmarks WHERE id = ?`, id)
 	return scanBookmark(row.Scan)
-}
-
-// queryListTx is queryList bound to an open transaction (tags included).
-func queryListTx(tx *sql.Tx, q string, args ...any) ([]*Bookmark, error) {
-	rows, err := tx.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*Bookmark
-	for rows.Next() {
-		b, err := scanBookmark(rows.Scan)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, b := range out {
-		b.Tags = loadTagsTx(tx, b.ID)
-	}
-	return out, nil
-}
-
-// loadTagsTx is loadTags bound to an open transaction.
-func loadTagsTx(tx *sql.Tx, id string) []string {
-	rows, err := tx.Query(`SELECT tag FROM bookmark_tags WHERE bookmark_id = ? ORDER BY tag`, id)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var t string
-		if rows.Scan(&t) == nil {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-func insertBookmarkTx(tx *sql.Tx, b *Bookmark) error {
-	_, err := tx.Exec(`INSERT INTO bookmarks
-		(id, parent_id, type, title, url, note, favorite, archived, position,
-		 deleted_at, purged, updated_at, device_id, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.ParentID, b.Type, b.Title, b.URL, b.Note,
-		boolInt(b.Favorite), boolInt(b.Archived), b.Position,
-		b.DeletedAt, boolInt(b.Purged), b.UpdatedAt, b.DeviceID, b.CreatedAt)
-	return err
-}
-
-func updateBookmarkTx(tx *sql.Tx, b *Bookmark) error {
-	_, err := tx.Exec(`UPDATE bookmarks SET
-		parent_id=?, type=?, title=?, url=?, note=?, favorite=?, archived=?,
-		position=?, deleted_at=?, purged=?, updated_at=?, device_id=?
-		WHERE id=?`,
-		b.ParentID, b.Type, b.Title, b.URL, b.Note,
-		boolInt(b.Favorite), boolInt(b.Archived), b.Position,
-		b.DeletedAt, boolInt(b.Purged), b.UpdatedAt, b.DeviceID, b.ID)
-	return err
-}
-
-func setTagsTx(tx *sql.Tx, id string, tags []string) error {
-	if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id=?`, id); err != nil {
-		return err
-	}
-	for _, t := range tags {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag) VALUES(?,?)`,
-			id, normalizeTag(t)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// subtreeIDsTx is SubtreeIDs bound to a transaction (BFS, no recursive CTE).
-func subtreeIDsTx(tx *sql.Tx, id string) ([]string, error) {
-	ids := []string{id}
-	frontier := []string{id}
-	for len(frontier) > 0 {
-		next := []string{}
-		for _, pid := range frontier {
-			rows, err := tx.Query(`SELECT id FROM bookmarks WHERE parent_id = ?`, pid)
-			if err != nil {
-				return nil, err
-			}
-			for rows.Next() {
-				var cid string
-				if err := rows.Scan(&cid); err != nil {
-					rows.Close()
-					return nil, err
-				}
-				next = append(next, cid)
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, err
-			}
-		}
-		ids = append(ids, next...)
-		frontier = next
-	}
-	return ids, nil
 }
 
 func allFailed(ops []BatchOp, err error) []BatchResult {

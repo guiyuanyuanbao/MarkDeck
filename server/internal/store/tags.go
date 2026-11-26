@@ -164,14 +164,14 @@ func (s *Store) Search(q string, limit int) ([]*Bookmark, error) {
 		// strip BOTH LIKE wildcards (% and _) — an unescaped "_" matches any
 		// character and turned a one-char query into a full-table scan
 		like := "%" + strings.NewReplacer("%", "", "_", "").Replace(q) + "%"
-		return s.queryList(`SELECT `+scanCols+` FROM bookmarks
+		return queryList(s.DB, `SELECT `+scanCols+` FROM bookmarks
 			WHERE deleted_at=0 AND purged=0 AND (title LIKE ? OR url LIKE ? OR note LIKE ?)
 			ORDER BY updated_at DESC LIMIT ?`, like, like, like, limit)
 	}
 	// Quote the query as an FTS phrase so user punctuation stays literal;
 	// trigram tokenizer then does substring matching.
 	ftsQ := `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
-	return s.queryList(`SELECT `+scanColsQualified+` FROM bookmarks b
+	return queryList(s.DB, `SELECT `+scanColsQualified+` FROM bookmarks b
 		JOIN bookmarks_fts f ON f.rowid = b.rowid
 		WHERE bookmarks_fts MATCH ? AND b.deleted_at=0 AND b.purged=0
 		ORDER BY bm25(bookmarks_fts) LIMIT ?`, ftsQ, limit)

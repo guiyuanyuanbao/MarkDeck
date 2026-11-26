@@ -46,21 +46,11 @@ func (s *Store) Create(b *Bookmark, tags []string) (*Bookmark, error) {
 	if b.UpdatedAt == 0 {
 		b.UpdatedAt = b.CreatedAt
 	}
-	_, err = tx.Exec(`INSERT INTO bookmarks
-		(id, parent_id, type, title, url, note, favorite, archived, position,
-		 deleted_at, purged, updated_at, device_id, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.ParentID, b.Type, b.Title, b.URL, b.Note,
-		boolInt(b.Favorite), boolInt(b.Archived), b.Position,
-		b.DeletedAt, boolInt(b.Purged), b.UpdatedAt, b.DeviceID, b.CreatedAt)
-	if err != nil {
+	if err := insertBookmark(tx, b); err != nil {
 		return nil, err
 	}
-	for _, t := range tags {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag) VALUES(?,?)`,
-			b.ID, normalizeTag(t)); err != nil {
-			return nil, err
-		}
+	if err := setTags(tx, b.ID, tags); err != nil {
+		return nil, err
 	}
 	rev, err := bumpChange(tx, b.ID)
 	if err != nil {
@@ -110,26 +100,11 @@ func (s *Store) UpdateLWWBase(in *Bookmark, tags []string, baseRev int64) (*Book
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec(`UPDATE bookmarks SET
-		parent_id=?, type=?, title=?, url=?, note=?, favorite=?, archived=?,
-		position=?, deleted_at=?, purged=?, updated_at=?, device_id=?
-		WHERE id=?`,
-		in.ParentID, in.Type, in.Title, in.URL, in.Note,
-		boolInt(in.Favorite), boolInt(in.Archived), in.Position,
-		in.DeletedAt, boolInt(in.Purged), in.UpdatedAt, in.DeviceID, in.ID)
-	if err != nil {
+	if err := updateBookmark(tx, in); err != nil {
 		return nil, false, err
 	}
-	if tags != nil {
-		if _, err := tx.Exec(`DELETE FROM bookmark_tags WHERE bookmark_id=?`, in.ID); err != nil {
-			return nil, false, err
-		}
-		for _, t := range tags {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO bookmark_tags(bookmark_id, tag) VALUES(?,?)`,
-				in.ID, normalizeTag(t)); err != nil {
-				return nil, false, err
-			}
-		}
+	if err := setTags(tx, in.ID, tags); err != nil {
+		return nil, false, err
 	}
 	rev, err := bumpChange(tx, in.ID)
 	if err != nil {
@@ -199,7 +174,7 @@ func (s *Store) Purge(id string, at int64, deviceID string) error {
 	// Purge the WHOLE subtree: soft-deleting a folder tombstoned every
 	// descendant, and purging only the folder row left orphan child
 	// tombstones in the trash pointing at an emptied parent forever.
-	ids, err := subtreeIDsTx(tx, id)
+	ids, err := subtreeIDs(tx, id)
 	if err != nil {
 		return err
 	}
@@ -383,7 +358,7 @@ func (s *Store) RestoreWithPath(id string, at int64, deviceID string, opts Resto
 	defer tx.Rollback()
 
 	if cur.Type == "folder" && opts.IncludeChildren {
-		ids, err := subtreeIDsTx(tx, id)
+		ids, err := subtreeIDs(tx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -448,7 +423,7 @@ func (s *Store) mergeIntoTwin(id, twinID string, at int64, deviceID string) (*Bo
 			return nil, err
 		}
 		// deeper descendants: revive the whole sub-tree under this child
-		ids, err := subtreeIDsTx(tx, k.ID)
+		ids, err := subtreeIDs(tx, k.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -479,7 +454,7 @@ func (s *Store) mergeIntoTwin(id, twinID string, at int64, deviceID string) (*Bo
 // childrenTx returns all rows (live and tombstoned) whose parent is id,
 // ordered like Children does.
 func childrenTx(tx *sql.Tx, parentID string) ([]*Bookmark, error) {
-	return queryListTx(tx, `SELECT `+scanCols+` FROM bookmarks
+	return queryList(tx, `SELECT `+scanCols+` FROM bookmarks
 		WHERE parent_id = ? ORDER BY position, created_at`, parentID)
 }
 
@@ -621,18 +596,18 @@ func (s *Store) Get(id string) (*Bookmark, error) {
 
 // Children returns the live (non-deleted) children of a parent ordered by position.
 func (s *Store) Children(parentID string) ([]*Bookmark, error) {
-	return s.queryList(`SELECT `+scanCols+` FROM bookmarks
+	return queryList(s.DB, `SELECT `+scanCols+` FROM bookmarks
 		WHERE parent_id = ? AND deleted_at = 0 ORDER BY position, created_at`, parentID)
 }
 
 // Tree returns every live row; callers assemble the hierarchy client-side.
 func (s *Store) Tree() ([]*Bookmark, error) {
-	return s.queryList(`SELECT ` + scanCols + ` FROM bookmarks WHERE deleted_at = 0 ORDER BY parent_id, position, created_at`)
+	return queryList(s.DB, `SELECT ` + scanCols + ` FROM bookmarks WHERE deleted_at = 0 ORDER BY parent_id, position, created_at`)
 }
 
 // Trash returns tombstoned rows still holding content.
 func (s *Store) Trash() ([]*Bookmark, error) {
-	return s.queryList(`SELECT ` + scanCols + ` FROM bookmarks
+	return queryList(s.DB, `SELECT ` + scanCols + ` FROM bookmarks
 		WHERE deleted_at > 0 AND purged = 0 ORDER BY deleted_at DESC`)
 }
 
@@ -655,34 +630,9 @@ func (s *Store) MaxRevision() (int64, error) {
 	return max, err
 }
 
-// SubtreeIDs returns id and all descendant ids (depth-first).
+// SubtreeIDs returns id and all descendant ids.
 func (s *Store) SubtreeIDs(id string) ([]string, error) {
-	ids := []string{id}
-	frontier := []string{id}
-	for len(frontier) > 0 {
-		next := []string{}
-		for _, pid := range frontier {
-			rows, err := s.DB.Query(`SELECT id FROM bookmarks WHERE parent_id = ?`, pid)
-			if err != nil {
-				return nil, err
-			}
-			for rows.Next() {
-				var cid string
-				if err := rows.Scan(&cid); err != nil {
-					rows.Close()
-					return nil, err
-				}
-				next = append(next, cid)
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, err
-			}
-		}
-		ids = append(ids, next...)
-		frontier = next
-	}
-	return ids, nil
+	return subtreeIDs(s.DB, id)
 }
 
 // Move re-parents a node, rejecting moves into its own subtree.
@@ -772,45 +722,6 @@ func bumpChange(tx *sql.Tx, id string) (int64, error) {
 		return 0, err
 	}
 	return seq, nil
-}
-
-func loadTags(db *sql.DB, id string) []string {
-	rows, err := db.Query(`SELECT tag FROM bookmark_tags WHERE bookmark_id=? ORDER BY tag`, id)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var tags []string
-	for rows.Next() {
-		var t string
-		if rows.Scan(&t) == nil {
-			tags = append(tags, t)
-		}
-	}
-	return tags
-}
-
-func (s *Store) queryList(q string, args ...any) ([]*Bookmark, error) {
-	rows, err := s.DB.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*Bookmark
-	for rows.Next() {
-		b, err := scanBookmark(rows.Scan)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, b := range out {
-		b.Tags = loadTags(s.DB, b.ID)
-	}
-	return out, nil
 }
 
 func boolInt(b bool) int {
