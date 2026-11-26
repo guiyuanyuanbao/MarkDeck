@@ -1106,3 +1106,21 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .bm-card .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* trash hierarchy extras: folder rows hint at entering, empty-shell tag */
+.tr-folder { cursor: pointer; }
+.tr-folder:hover .bm-title span:first-child { color: var(--md-primary); }
+.tr-enter-hint { color: var(--md-text-3); font-size: 14px; margin: 0 2px 0 6px; flex-shrink: 0; }
+.tr-up-btn {
+  display: flex; align-items: center; gap: 6px;
+  width: calc(100% - 24px);
+  margin: 0 12px 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--md-border);
+  background: var(--md-surface);
+  border-radius: 8px;
+  color: var(--md-text-2);
+  font-size: 12.5px; font-family: inherit;
+  cursor: pointer;
+}
+.tr-up-btn:hover { color: var(--md-primary); border-color: var(--md-primary); background: var(--md-primary-soft); }

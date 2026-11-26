@@ -1,13 +1,15 @@
 <script setup lang="ts">
-// Trash view, laid out like BookmarksView (side panel + content card).
-// The side panel is a filter list (type / age buckets) instead of a folder
-// tree — the trash is flat, but the two-column rhythm stays consistent.
-// Right-click menus mirror the bookmark menus with trash-specific actions.
+// Trash view, laid out like BookmarksView (side panel + content card) with
+// PikPak-style hierarchical browsing: trashed folders are clickable rows —
+// entering one shows its tombstoned children, breadcrumbs navigate back up.
+// All restore flows go through RestoreDialog (the default mechanism): it
+// defaults to the original location, rebuilds deleted ancestor paths
+// server-side (RestoreWithPath shells) and merges into same-name folders.
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
-import BatchMoveDialog from '@/components/BatchMoveDialog.vue'
+import RestoreDialog from '@/components/RestoreDialog.vue'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
 import { Icon } from '@/components/icons'
@@ -17,6 +19,62 @@ const loading = ref(false)
 const checked = ref<Set<string>>(new Set())
 const busy = ref(false)
 let lastIndex = -1
+
+// ---- hierarchy: current browsing folder inside the trash ----
+const currentFolder = ref('') // '' = trash top level
+const trashById = computed(() => new Map(trash.value.map((b) => [b.id, b])))
+// rows whose parent is NOT itself trashed (top level of the trash)
+const topRows = computed(() => trash.value.filter((b) => !trashById.value.has(b.parentId)))
+const currentRows = computed(() =>
+  currentFolder.value === ''
+    ? topRows.value
+    : trash.value.filter((b) => b.parentId === currentFolder.value)
+)
+
+// direct + subtree tombstone counts per folder row (含 N 项 badge)
+function subtreeCount(id: string): number {
+  let n = 0
+  let frontier = [id]
+  let guard = 0
+  while (frontier.length && guard++ < 10000) {
+    const next: string[] = []
+    for (const row of trash.value) {
+      if (frontier.includes(row.parentId)) { n++; next.push(row.id) }
+    }
+    frontier = next
+  }
+  return n
+}
+const countCache = computed(() => {
+  const m = new Map<string, number>()
+  for (const b of trash.value) if (b.type === 'folder') m.set(b.id, subtreeCount(b.id))
+  return m
+})
+const countOf = (id: string) => countCache.value.get(id) ?? 0
+
+// breadcrumb: 回收站 / ... / current folder
+const breadcrumbs = computed(() => {
+  const chain: { id: string; title: string }[] = []
+  let p = currentFolder.value
+  let guard = 0
+  while (p && guard++ < 100) {
+    const row = trashById.value.get(p)
+    if (!row) break
+    chain.unshift({ id: row.id, title: row.title || '(未命名)' })
+    p = row.parentId
+  }
+  return [{ id: '', title: '回收站' }, ...chain]
+})
+function enterFolder(b: Bookmark) {
+  if (b.type !== 'folder') return
+  currentFolder.value = b.id
+  clearSelection()
+}
+function goUp() {
+  if (!currentFolder.value) return
+  currentFolder.value = trashById.value.get(currentFolder.value)?.parentId || ''
+  clearSelection()
+}
 
 // ---- filters ----
 const q = ref('')
@@ -44,16 +102,61 @@ if (!document.documentElement.getAttribute('data-gridsize')) {
   document.documentElement.setAttribute('data-gridsize', gridSize.value)
 }
 
-const moveDlg = ref<InstanceType<typeof BatchMoveDialog> | null>(null)
+const restoreDlg = ref<InstanceType<typeof RestoreDialog> | null>(null)
 const ctxMenu = ref<InstanceType<typeof ContextMenu> | null>(null)
 const editDlg = ref<InstanceType<typeof EditBookmarkDialog> | null>(null)
 
-// original parent names: live tree covers surviving parents, the trash list
-// itself covers folders deleted together with their children
-const nameMap = ref<Map<string, string>>(new Map())
-function origName(pid: string): string {
+// live tree names: an ancestor may already be restored (shell or whole tree)
+// while its children remain trashed — the 原位置 chain must keep resolving
+const liveNameMap = ref<Map<string, string>>(new Map())
+
+// original location: full relative path from the trash top, e.g. 大文件夹/嵌套
+// (trashed ancestors supply names; live ancestors too; purged ones can't —
+// show 已删除 marker)
+function origPath(pid: string): string {
   if (!pid) return '根目录'
-  return nameMap.value.get(pid) || '（原文件夹已删除）'
+  const chain: string[] = []
+  let p = pid
+  let guard = 0
+  while (p && guard++ < 100) {
+    const trow = trashById.value.get(p)
+    if (trow) {
+      chain.unshift(trow.title || '(未命名)')
+      p = trow.parentId
+      continue
+    }
+    // not in trash: live row (restored) or gone (purged / deleted elsewhere)
+    const lname = liveNameMap.value.get(p)
+    if (lname) {
+      chain.unshift(lname)
+      p = liveParentId(p)
+      continue
+    }
+    return chain.length ? chain.join(' / ') + ' / （已删除）' : '（原文件夹已删除）'
+  }
+  return chain.join(' / ') || '根目录'
+}
+// parent of a live row (from the live tree map, refreshed in load())
+const liveParent = ref<Map<string, string>>(new Map())
+function liveParentId(id: string): string {
+  return liveParent.value.get(id) || ''
+}
+// path relative to the browsed folder (for the 原位置 column inside a level)
+function relPath(pid: string): string {
+  if (pid === currentFolder.value) return '本层'
+  if (currentFolder.value === '') return origPath(pid)
+  // walk up to currentFolder; if pid is not a descendant, fall back to full path
+  const chain: string[] = []
+  let p = pid
+  let guard = 0
+  while (p && guard++ < 100) {
+    if (p === currentFolder.value) return chain.join(' / ') || '本层'
+    const row = trashById.value.get(p)
+    if (!row) break
+    chain.unshift(row.title || '(未命名)')
+    p = row.parentId
+  }
+  return origPath(pid)
 }
 
 async function load() {
@@ -61,14 +164,17 @@ async function load() {
   try {
     const [r, tree] = await Promise.all([bookmarksApi.trash(), bookmarksApi.tree()])
     trash.value = r.nodes || []
-    const m = new Map<string, string>()
-    for (const n of tree.nodes || []) m.set(n.id, n.title || '(未命名)')
-    for (const t of trash.value) m.set(t.id, t.title || '(未命名)')
-    nameMap.value = m
+    const rows = tree.nodes || []
+    liveNameMap.value = new Map(rows.map((b) => [b.id, b.title || '(未命名)']))
+    liveParent.value = new Map(rows.map((b) => [b.id, b.parentId]))
     // keep ids that still exist — a background revision mid-selection
     // shouldn't wipe the user's checked set
     const live = new Set(trash.value.map((b) => b.id))
     checked.value = new Set([...checked.value].filter((id) => live.has(id)))
+    // browsed folder vanished (restored/purged elsewhere): climb back up
+    if (currentFolder.value && !live.has(currentFolder.value)) {
+      currentFolder.value = ''
+    }
     lastIndex = -1
   } catch (e: any) {
     ElMessage.error('回收站加载失败: ' + e.message)
@@ -87,15 +193,17 @@ function onRevision() {
 onMounted(() => window.addEventListener('md:revision', onRevision))
 onBeforeUnmount(() => window.removeEventListener('md:revision', onRevision))
 
-// ---- filter pipeline ----
+// ---- filter pipeline (current level; search is global) ----
+const searching = computed(() => q.value.trim().length > 0)
 const now7 = computed(() => Date.now() / 1000 - 7 * 86400)
+const baseRows = computed(() => (searching.value ? trash.value : currentRows.value))
 const filtered = computed(() => {
-  let rows = trash.value
+  let rows = baseRows.value
   if (typeFilter.value === 'url') rows = rows.filter((b) => b.type === 'url')
   else if (typeFilter.value === 'folder') rows = rows.filter((b) => b.type === 'folder')
   if (timeFilter.value === '7d') rows = rows.filter((b) => (b.deletedAt || 0) >= now7.value)
   else if (timeFilter.value === 'older') rows = rows.filter((b) => (b.deletedAt || 0) < now7.value)
-  if (q.value) {
+  if (searching.value) {
     const k = q.value.toLowerCase()
     rows = rows.filter((b) => (b.title || '').toLowerCase().includes(k) || (b.url || '').toLowerCase().includes(k))
   }
@@ -112,7 +220,8 @@ const filtered = computed(() => {
 const counts = computed(() => {
   const week = now7.value
   return {
-    all: trash.value.length,
+    all: topRows.value.length,
+    total: trash.value.length,
     url: trash.value.filter((b) => b.type === 'url').length,
     folder: trash.value.filter((b) => b.type === 'folder').length,
     week: trash.value.filter((b) => (b.deletedAt || 0) >= week).length,
@@ -171,22 +280,10 @@ function fmtDate(ts?: number) {
   return ts ? new Date(ts * 1000).toLocaleString() : '—'
 }
 
-async function restoreOne(b: Bookmark) {
-  try {
-    await bookmarksApi.restore(b.id)
-    ElMessage.success('已恢复')
-    load()
-  } catch (e: any) { ElMessage.error('恢复失败: ' + e.message) }
-}
-
-// restore first, then let the user pick a folder — Restore re-attaches to
-// the original parent (or root when it's gone), the dialog overrides that
-async function restoreTo(b: Bookmark) {
-  try {
-    await bookmarksApi.restore(b.id)
-    load()
-    moveDlg.value?.open([b.id])
-  } catch (e: any) { ElMessage.error('恢复失败: ' + e.message) }
+// every restore goes through the dialog (default mechanism)
+function openRestore(items: Bookmark[]) {
+  if (!items.length) return
+  restoreDlg.value?.open(items, trash.value)
 }
 
 function confirmPurgeText(items: Bookmark[]): string {
@@ -217,22 +314,6 @@ async function purge(items: Bookmark[]) {
   }
 }
 
-async function batchRestore() {
-  const ids = [...checked.value]
-  if (!ids.length) return
-  busy.value = true
-  try {
-    await bookmarksApi.batch({ ids, action: 'restore' })
-    ElMessage.success(`已恢复 ${ids.length} 项`)
-    load()
-  } catch (e: any) {
-    ElMessage.error(e.message)
-    load()
-  } finally {
-    busy.value = false
-  }
-}
-
 async function emptyAll() {
   if (!trash.value.length) return
   try {
@@ -247,6 +328,7 @@ async function emptyAll() {
     }
     if (failed) ElMessage.warning(`已删除 ${ok} 项，${failed} 项失败`)
     else ElMessage.success('回收站已清空')
+    currentFolder.value = ''
     load()
   } finally {
     busy.value = false
@@ -268,21 +350,16 @@ function itemMenu(b: Bookmark, ev: MouseEvent) {
   const multi = ids.length > 1
   const items: (CtxMenuItem | 'divider')[] = []
   if (multi) {
-    if (counts.value.url) {
-      // mixed selection may still contain urls — open each in its own tab
-      const urls = filtered.value.filter((x) => checked.value.has(x.id) && x.url)
-      if (urls.length) items.push({ label: `打开 ${urls.length} 个链接`, icon: 'open', handler: () => urls.forEach(openUrl) })
-    }
     items.push(
-      { label: `恢复 ${ids.length} 项`, icon: 'restore', handler: batchRestore },
+      { label: `恢复 ${ids.length} 项…`, icon: 'restore', handler: () => openRestore(selectedItems()) },
       'divider',
-      { label: `彻底删除 ${ids.length} 项`, icon: 'trash', danger: true, handler: () => purge(filtered.value.filter((x) => checked.value.has(x.id))) },
+      { label: `彻底删除 ${ids.length} 项`, icon: 'trash', danger: true, handler: () => purge(selectedItems()) },
     )
   } else {
-    if (b.type === 'url') items.push({ label: '打开链接', icon: 'open', handler: () => openUrl(b) })
+    if (b.type === 'folder') items.push({ label: '打开', icon: 'folder', handler: () => enterFolder(b) })
+    else items.push({ label: '打开链接', icon: 'open', handler: () => openUrl(b) })
     items.push(
-      { label: '恢复', icon: 'restore', handler: () => restoreOne(b) },
-      { label: '恢复到指定文件夹…', icon: 'folder', handler: () => restoreTo(b) },
+      { label: '恢复…', icon: 'restore', handler: () => openRestore([b]) },
       'divider',
       { label: '查看详情', icon: 'edit', handler: () => viewInfo(b) },
       'divider',
@@ -300,17 +377,24 @@ function blankMenu(ev: MouseEvent) {
     { label: '刷新', icon: 'refresh', handler: load },
     { label: viewMode.value === 'list' ? '切换到图标视图' : '切换到列表视图', icon: viewMode.value === 'list' ? 'grid' : 'list', handler: toggleViewMode },
   ]
+  if (currentFolder.value) {
+    items.push('divider', { label: '返回上一级', icon: 'up', handler: goUp })
+  }
   if (trash.value.length) {
     items.push('divider', { label: '清空回收站', icon: 'trash', danger: true, handler: emptyAll })
   }
   ctxMenu.value?.open(ev.clientX, ev.clientY, items)
 }
 
+function selectedItems(): Bookmark[] {
+  return filtered.value.filter((b) => checked.value.has(b.id))
+}
+
 // ---- keyboard (scoped to the content pane) ----
 function onKeydown(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement)?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-  const selected = filtered.value.filter((b) => checked.value.has(b.id))
+  const selected = selectedItems()
   switch (true) {
     case (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a':
       e.preventDefault(); toggleAll(); break
@@ -323,12 +407,15 @@ function onKeydown(e: KeyboardEvent) {
       if (selected.length !== 1) break
       e.preventDefault()
       const b = selected[0]
-      if (b.type === 'url') openUrl(b)
-      else viewInfo(b)
+      if (b.type === 'folder') enterFolder(b)
+      else openRestore([b])
       break
     }
     case e.key === 'F2':
       if (selected.length === 1) { e.preventDefault(); viewInfo(selected[0]) }
+      break
+    case e.key === 'Backspace':
+      if (currentFolder.value) { e.preventDefault(); goUp() }
       break
     case e.key === 'F5':
       e.preventDefault(); load(); break
@@ -352,6 +439,7 @@ function onKeydown(e: KeyboardEvent) {
           :key="f.key"
           class="tr-link"
           :class="{ active: activeFilterKey === f.key }"
+          :title="f.key === 'all' ? `顶层 ${counts.all} 项 · 共 ${counts.total} 项` : ''"
           @click="pickFilter(f)"
         >
           <span class="tr-ico"><Icon :name="f.ico" :size="15" /></span>
@@ -359,8 +447,11 @@ function onKeydown(e: KeyboardEvent) {
           <span class="count">{{ f.count }}</span>
         </button>
       </div>
+      <button v-if="currentFolder" class="tr-up-btn" @click="goUp">
+        <Icon name="up" :size="13" /> 返回顶层
+      </button>
       <div class="tr-summary">
-        回收站内容不会自动清理，只有「彻底删除」才会真正移除数据。删除的文件夹会连同其中的书签一起入站，恢复时整体还原。
+        回收站内容不会自动清理，只有「彻底删除」才会真正移除数据。删除的文件夹可点开浏览，恢复时回到原位置（路径已删除会自动重建）。
       </div>
     </div>
 
@@ -375,13 +466,25 @@ function onKeydown(e: KeyboardEvent) {
       <div class="content-head">
         <div class="head-top">
           <div>
-            <h1 class="page-title">回收站</h1>
+            <nav class="crumbs" aria-label="回收站路径">
+              <template v-for="(c, i) in breadcrumbs" :key="c.id || '__top__'">
+                <span v-if="i > 0" class="crumb-sep">/</span>
+                <button
+                  class="crumb"
+                  :class="{ active: i === breadcrumbs.length - 1 }"
+                  :disabled="i === breadcrumbs.length - 1"
+                  @click="currentFolder = c.id; clearSelection()"
+                >{{ c.title }}</button>
+              </template>
+              <button v-if="currentFolder" class="icon-btn up-btn" title="返回上一级" @click="goUp">↑</button>
+            </nav>
+            <h1 class="page-title">{{ searching ? '搜索结果' : (breadcrumbs[breadcrumbs.length - 1].title) }}</h1>
             <div class="page-sub">
-              {{ filtered.length }} 项<template v-if="filtered.length !== trash.length">（共 {{ trash.length }} 项）</template><template v-if="checked.size"> · 已选 {{ checked.size }} 项</template>
+              {{ filtered.length }} 项<template v-if="!searching && currentFolder === '' && counts.total !== counts.all">（共 {{ counts.total }} 项）</template><template v-if="checked.size"> · 已选 {{ checked.size }} 项</template>
             </div>
           </div>
           <div class="head-actions">
-            <el-input v-model="q" placeholder="搜索标题 / URL" clearable style="width: 220px">
+            <el-input v-model="q" placeholder="搜索全部回收站" clearable style="width: 220px">
               <template #prefix><span style="display:inline-flex;color:var(--md-text-3)"><Icon name="search" :size="14" /></span></template>
             </el-input>
             <el-select v-model="sortBy" style="width: 130px">
@@ -409,8 +512,8 @@ function onKeydown(e: KeyboardEvent) {
         <div v-if="checked.size" class="batch-bar">
           已选择 <b>&nbsp;{{ checked.size }}&nbsp;</b> 项
           <span class="spacer" />
-          <el-button size="small" type="success" plain @click="batchRestore">恢复</el-button>
-          <el-button size="small" type="danger" plain :disabled="busy" @click="purge(filtered.filter((x) => checked.has(x.id)))">彻底删除</el-button>
+          <el-button size="small" type="success" plain @click="openRestore(selectedItems())">恢复…</el-button>
+          <el-button size="small" type="danger" plain :disabled="busy" @click="purge(selectedItems())">彻底删除</el-button>
           <el-button size="small" text @click="clearSelection">取消</el-button>
         </div>
       </div>
@@ -428,9 +531,9 @@ function onKeydown(e: KeyboardEvent) {
           v-for="(b, idx) in filtered"
           :key="b.id"
           class="bm-row"
-          :class="{ selected: checked.has(b.id) }"
+          :class="{ selected: checked.has(b.id), 'tr-folder': b.type === 'folder' }"
           @click="selectRow(b, $event, idx)"
-          @dblclick="b.type === 'url' ? openUrl(b) : viewInfo(b)"
+          @dblclick="b.type === 'folder' ? enterFolder(b) : openUrl(b)"
           @contextmenu.prevent.stop="itemMenu(b, $event)"
         >
           <el-checkbox
@@ -442,14 +545,16 @@ function onKeydown(e: KeyboardEvent) {
           <div class="bm-main">
             <div class="bm-title">
               <span>{{ b.title || b.url || '(未命名)' }}</span>
-              <span v-if="b.type === 'folder'" class="bm-tag">文件夹</span>
+              <span v-if="b.type === 'folder'" class="bm-tag">{{ countOf(b.id) }} 项</span>
+              <span v-if="b.type === 'folder' && countOf(b.id) === 0" class="bm-tag warn">空壳</span>
             </div>
             <div class="bm-url" v-if="b.type === 'url'">{{ b.url }}</div>
           </div>
-          <span class="tr-orig" :title="origName(b.parentId)">{{ origName(b.parentId) }}</span>
+          <span v-if="b.type === 'folder'" class="tr-enter-hint">›</span>
+          <span class="tr-orig" :title="origPath(b.parentId)">{{ relPath(b.parentId) }}</span>
           <span style="width: 110px; text-align: right; color: var(--md-text-3); font-size: 12.5px; flex-shrink: 0">{{ fmtDate(b.deletedAt) }}</span>
           <div class="bm-actions">
-            <button class="row-act success" title="恢复" @click.stop="restoreOne(b)">
+            <button class="row-act success" title="恢复…" @click.stop="openRestore([b])">
               <span style="display:inline-flex"><Icon name="restore" :size="14" /></span>
             </button>
             <button class="row-act danger" title="彻底删除" @click.stop="purge([b])">
@@ -482,7 +587,7 @@ function onKeydown(e: KeyboardEvent) {
           class="bm-card"
           :class="{ selected: checked.has(b.id) }"
           @click="selectRow(b, $event, idx)"
-          @dblclick="b.type === 'url' ? openUrl(b) : viewInfo(b)"
+          @dblclick="b.type === 'folder' ? enterFolder(b) : openUrl(b)"
           @contextmenu.prevent.stop="itemMenu(b, $event)"
         >
           <div class="card-icon-wrap">
@@ -490,7 +595,7 @@ function onKeydown(e: KeyboardEvent) {
           </div>
           <div class="card-title" :title="b.title || b.url">{{ b.title || b.url || '(未命名)' }}</div>
           <div class="card-sub">
-            {{ b.type === 'folder' ? '文件夹 · ' + origName(b.parentId) : origName(b.parentId) }}
+            {{ b.type === 'folder' ? `含 ${countOf(b.id)} 项 · ${relPath(b.parentId)}` : relPath(b.parentId) }}
           </div>
           <div class="card-sub" style="margin-top: 2px">删除于 {{ fmtDate(b.deletedAt) }}</div>
         </div>
@@ -514,6 +619,6 @@ function onKeydown(e: KeyboardEvent) {
 
     <ContextMenu ref="ctxMenu" />
     <EditBookmarkDialog ref="editDlg" />
-    <BatchMoveDialog ref="moveDlg" @done="load" />
+    <RestoreDialog ref="restoreDlg" @done="load" />
   </div>
 </template>

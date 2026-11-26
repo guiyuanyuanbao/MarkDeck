@@ -114,7 +114,10 @@ export const bookmarksApi = {
   update: (id: string, patch: Record<string, unknown>) =>
     api.put<Bookmark>(`/api/bookmarks/${id}`, patch),
   remove: (id: string) => api.del<{ deleted: string[] }>(`/api/bookmarks/${id}`),
-  restore: (id: string) => api.post<Bookmark>(`/api/bookmarks/${id}/restore`),
+  // restore: no args = original location with automatic path rebuild;
+  // parentId pins the target folder; includeChildren=false shells a folder
+  restore: (id: string, opts?: { parentId?: string; includeChildren?: boolean }) =>
+    api.post<Bookmark>(`/api/bookmarks/${id}/restore`, opts ?? {}),
   purge: (id: string) => api.post(`/api/bookmarks/${id}/purge`),
   batch: (payload: { ids: string[]; action: string; parentId?: string; tag?: string; value?: boolean }) =>
     api.post<{ affected: number }>('/api/bookmarks/batch', payload),
