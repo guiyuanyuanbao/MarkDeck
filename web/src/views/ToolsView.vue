@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { toolsApi, authApi, bookmarksApi, type Bookmark } from '@/api/client'
 import { Icon } from '@/components/icons'
@@ -72,13 +72,19 @@ function pollScan() {
   }, 3000)
   // the deadline must also reset `scanning` — previously a 10-minute cap
   // left the button loading forever on an over-long scan
-  setTimeout(() => {
+  const deadline = setTimeout(() => {
     clearInterval(t)
     if (scanning.value) {
       scanning.value = false
       ElMessage.warning('扫描超时（10 分钟），请稍后手动刷新查看结果')
     }
   }, 10 * 60 * 1000)
+  // leaving the page must stop both timers — the interval previously kept
+  // firing (and the deadline warning kept firing) after unmount
+  onUnmounted(() => {
+    clearInterval(t)
+    clearTimeout(deadline)
+  })
 }
 
 // ---- dead links quick actions ----

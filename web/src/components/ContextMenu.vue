@@ -2,7 +2,7 @@
 // Custom floating context menu (net-disk style). Items are plain objects;
 // the menu teleports to <body>, flips at viewport edges and closes on
 // click-away / Escape / scroll. One instance per view, driven via expose().
-import { nextTick, ref } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Icon } from './icons'
 
 export interface CtxMenuItem {
@@ -50,10 +50,21 @@ function onKey(e: KeyboardEvent) {
 function onScroll() {
   if (visible.value) close()
 }
-window.addEventListener('click', onDocClick, true)
-window.addEventListener('keydown', onKey)
-window.addEventListener('scroll', onScroll, true)
-window.addEventListener('resize', close)
+
+// register/unregister with the component lifecycle: these were bare setup()
+// calls once, leaking 4 window listeners per mount on every route change
+onMounted(() => {
+  window.addEventListener('click', onDocClick, true)
+  window.addEventListener('keydown', onKey)
+  window.addEventListener('scroll', onScroll, true)
+  window.addEventListener('resize', close)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('click', onDocClick, true)
+  window.removeEventListener('keydown', onKey)
+  window.removeEventListener('scroll', onScroll, true)
+  window.removeEventListener('resize', close)
+})
 
 defineExpose({ open, close })
 </script>

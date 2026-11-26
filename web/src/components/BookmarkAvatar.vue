@@ -2,7 +2,7 @@
 // Shared bookmark avatar: favicon with per-host fallback to the letter
 // gradient. Extracted from BookmarksView so list rows and grid cards
 // render identically without duplicating the fallback logic.
-import { ref, watch, onBeforeUnmount } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import type { Bookmark } from '../api/client'
 
 const props = withDefaults(defineProps<{
@@ -16,18 +16,20 @@ const failed = ref(false)
 // so updated icons bust the browser cache instantly instead of sticking
 // for the CDN lifetime.
 //
-// ONE module-level listener instead of one per instance: a 100-row list
-// used to register 100 window listeners (and write localStorage 100×),
-// none of them ever removed. `failed` also resets on the bump — previously
-// an icon that failed once kept showing the letter fallback forever even
-// after the server got the real icon.
+// This is a PER-INSTANCE listener (setup scope), not module-level: a
+// 100-row list registers 100 window listeners, each removed on unmount.
+// An earlier audit comment claimed module-level single-listener semantics
+// that this code never had — fixed so the comment matches reality.
+// `failed` also resets on the bump — previously an icon that failed once
+// kept showing the letter fallback forever even after the server got the
+// real icon.
 const iconVer = ref(Number(localStorage.getItem('md-icon-ver') || 0))
 function onRevision() {
   iconVer.value++
   failed.value = false
   localStorage.setItem('md-icon-ver', String(iconVer.value))
 }
-window.addEventListener('md:revision', onRevision)
+onMounted(() => window.addEventListener('md:revision', onRevision))
 onBeforeUnmount(() => window.removeEventListener('md:revision', onRevision))
 
 watch(() => props.b.url, () => { failed.value = false })
