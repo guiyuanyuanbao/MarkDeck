@@ -3,7 +3,7 @@
 // The side panel is a filter list (type / age buckets) instead of a folder
 // tree — the trash is flat, but the two-column rhythm stays consistent.
 // Right-click menus mirror the bookmark menus with trash-specific actions.
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
@@ -29,6 +29,19 @@ const viewMode = ref<'list' | 'grid'>((localStorage.getItem('md-trash-view-mode'
 function toggleViewMode() {
   viewMode.value = viewMode.value === 'list' ? 'grid' : 'list'
   localStorage.setItem('md-trash-view-mode', viewMode.value)
+}
+
+// grid density: shares the bookmarks view's global data-gridsize attribute and
+// md-grid-size key, so both grids stay in sync (same --grid-min variable)
+const gridSize = ref<'small' | 'medium' | 'large'>((localStorage.getItem('md-grid-size') as 'small' | 'medium' | 'large') || 'medium')
+watch(gridSize, (v) => {
+  localStorage.setItem('md-grid-size', v)
+  document.documentElement.setAttribute('data-gridsize', v)
+})
+// entering trash directly (deep link / refresh) — apply the stored density,
+// the attribute only carries over when BookmarksView set it earlier
+if (!document.documentElement.getAttribute('data-gridsize')) {
+  document.documentElement.setAttribute('data-gridsize', gridSize.value)
 }
 
 const moveDlg = ref<InstanceType<typeof BatchMoveDialog> | null>(null)
@@ -383,6 +396,11 @@ function onKeydown(e: KeyboardEvent) {
               <button class="view-btn" :class="{ active: viewMode === 'grid' }" title="图标视图" @click="viewMode = 'grid'">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
               </button>
+            </div>
+            <div v-if="viewMode === 'grid'" class="grid-size-switch" role="group" aria-label="图标大小">
+              <button class="gs-btn" :class="{ active: gridSize === 'small' }" title="小图标" @click="gridSize = 'small'"><Icon name="grid" :size="11" /></button>
+              <button class="gs-btn" :class="{ active: gridSize === 'medium' }" title="中图标" @click="gridSize = 'medium'"><Icon name="grid" :size="14" /></button>
+              <button class="gs-btn" :class="{ active: gridSize === 'large' }" title="大图标" @click="gridSize = 'large'"><Icon name="grid" :size="17" /></button>
             </div>
             <el-button v-if="trash.length" type="danger" plain :disabled="busy" @click="emptyAll">清空回收站</el-button>
           </div>
