@@ -519,9 +519,15 @@ func esc(s string) string {
 	return s
 }
 
-// normURL canonicalizes for duplicate detection: strips tracking params,
-// lowercases scheme+host, drops trailing slash on empty path.
-func normURL(raw string) string {
+// normURL is the internal alias for CanonicalURL (import merge paths).
+func normURL(raw string) string { return CanonicalURL(raw) }
+
+// CanonicalURL canonicalizes a URL for duplicate detection everywhere
+// (import merge dedupe AND tools.FindDuplicates): lowercases scheme+host,
+// drops "www.", strips common tracking params, drops the trailing slash on
+// an empty path. The extension's normBookmarkUrl is a JS counterpart kept
+// in sync by the wire contract tests (best-effort — see docs/protocol.md).
+func CanonicalURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -571,6 +577,8 @@ func normURL(raw string) string {
 	return scheme + host + path
 }
 
+// trackingParams: query keys that identify a share/redirect rather than the
+// destination resource. Single source of truth for all URL dedupe.
 var trackingParams = map[string]bool{
 	"utm_source": true, "utm_medium": true, "utm_campaign": true,
 	"utm_term": true, "utm_content": true, "utm_id": true,

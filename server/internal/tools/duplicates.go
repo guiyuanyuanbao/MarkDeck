@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/importexport"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
 )
 
@@ -147,10 +148,10 @@ func (c *Chain) ValidateDuplicateGroup(keepID string, removeIDs []string) error 
 	if !ok || keep.Type != "url" {
 		return fmt.Errorf("keepId %s is not a live url bookmark", keepID)
 	}
-	key := normalizeForDup(keep.URL)
+	key := importexport.CanonicalURL(keep.URL)
 	for _, rid := range removeIDs {
 		rm, ok := byID[rid]
-		if !ok || rm.Type != "url" || normalizeForDup(rm.URL) != key {
+		if !ok || rm.Type != "url" || importexport.CanonicalURL(rm.URL) != key {
 			return fmt.Errorf("removeId %s is not a duplicate of the keep bookmark", rid)
 		}
 	}
@@ -192,7 +193,7 @@ func (c *Chain) FindDuplicates() ([]DupGroup, error) {
 		if n.Type != "url" || n.URL == "" {
 			continue
 		}
-		key := normalizeForDup(n.URL)
+		key := importexport.CanonicalURL(n.URL)
 		groups[key] = append(groups[key], withFilteredTags(n))
 	}
 	var out []DupGroup
@@ -204,66 +205,6 @@ func (c *Chain) FindDuplicates() ([]DupGroup, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
-}
-
-// normalizeForDup mirrors importexport.normURL but without the import
-// package dependency (kept in lockstep by test).
-func normalizeForDup(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	i := strings.Index(raw, "://")
-	scheme, rest := "", raw
-	if i > 0 {
-		scheme = strings.ToLower(raw[:i+3])
-		rest = raw[i+3:]
-	}
-	host := rest
-	path := "/"
-	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
-		host = rest[:j]
-		path = rest[j:]
-	}
-	host = strings.ToLower(host)
-	host = strings.TrimPrefix(host, "www.")
-	if q := strings.Index(path, "?"); q >= 0 {
-		query := path[q+1:]
-		frag := ""
-		if f := strings.Index(query, "#"); f >= 0 {
-			frag = query[f:]
-			query = query[:f]
-		}
-		var keep []string
-		for _, kv := range strings.Split(query, "&") {
-			k := strings.ToLower(kv)
-			if idx := strings.Index(k, "="); idx >= 0 {
-				k = k[:idx]
-			}
-			if trackingParam(k) {
-				continue
-			}
-			keep = append(keep, kv)
-		}
-		path = path[:q]
-		if len(keep) > 0 {
-			path += "?" + strings.Join(keep, "&")
-		}
-		path += frag
-	}
-	if path == "/" {
-		path = ""
-	}
-	return scheme + host + path
-}
-
-func trackingParam(k string) bool {
-	switch k {
-	case "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-		"utm_id", "fbclid", "gclid", "ref", "ref_src", "spm", "share_token", "share_source":
-		return true
-	}
-	return false
 }
 
 // MergeDuplicate keeps the preferred bookmark (first by createdAt) and moves
