@@ -3,9 +3,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -81,94 +79,7 @@ func main() {
 	mux := http.NewServeMux()
 	a.Register(mux)
 	a.RegisterToolsRoutes(mux, chain)
-	mux.HandleFunc("GET /api/favicon/{host}", func(w http.ResponseWriter, r *http.Request) {
-		fetcher.ServeHTTP(w, r, r.PathValue("host"))
-	})
-	// serves the extension zip shipped next to the binary (release layout)
-	// so the extension's options page can offer a one-click upgrade
-	mux.HandleFunc("GET /api/extension/download", func(w http.ResponseWriter, r *http.Request) {
-		if a.Auth.DeviceFromRequest(r) == nil && a.Auth.SessionFromRequest(r) == nil {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		data, err := os.ReadFile("markdeck-extension.zip")
-		if err != nil {
-			// fallback: the versioned release file name
-			data, err = os.ReadFile("markdeck-extension-" + extensionVersion + ".zip")
-		}
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", `attachment; filename="markdeck-extension-`+extensionVersion+`.zip"`)
-		w.Write(data)
-	})
-	// admin clears stored favicons (whole cache or one host) so devices
-	// re-push, or the fetcher retries — recovers from placeholder garbage
-	mux.HandleFunc("POST /api/favicon/clear", func(w http.ResponseWriter, r *http.Request) {
-		if a.Auth.SessionFromRequest(r) == nil {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		var body struct {
-			Host string `json:"host"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Host == "" {
-			if _, err := st.DB.Exec(`DELETE FROM favicons`); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			json.NewEncoder(w).Encode(map[string]string{"ok": "1", "cleared": "all"})
-			return
-		}
-		if _, err := st.DB.Exec(`DELETE FROM favicons WHERE host=?`, body.Host); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"ok": "1", "cleared": body.Host})
-	})
-	// devices push browser-resolved favicons (MV3 _favicon/ endpoint yields
-	// the same icon chrome shows, including its Google fallback) so every
-	// client shares accurate icons without the server guessing per-site
-	mux.HandleFunc("PUT /api/favicon/{host}", func(w http.ResponseWriter, r *http.Request) {
-		if a.Auth.DeviceFromRequest(r) == nil && a.Auth.SessionFromRequest(r) == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "auth required"})
-			return
-		}
-		host := favicon.SanitizeHost(r.PathValue("host"))
-		if host == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "bad host"})
-			return
-		}
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256<<10))
-		if err != nil || len(data) == 0 {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "bad body"})
-			return
-		}
-		ctype := r.Header.Get("Content-Type")
-		if ctype == "" || !strings.HasPrefix(ctype, "image/") {
-			ctype = "image/png"
-		}
-		// stored bytes are served back verbatim by GET /api/favicon/{host}:
-		// only real image payloads may enter the store (SVG/script rejected)
-		if !favicon.LooksLikeImage(data) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "not an image payload"})
-			return
-		}
-		if err := st.FaviconPut(host, ctype, data); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"ok": "1"})
-	})
+	a.RegisterFaviconRoutes(mux, fetcher, extensionVersion)
 	mux.Handle("/", securityHeaders(webapp.Handler()))
 	// The API routes serve user-controlled bytes too (favicon store), so
 	// every handler runs behind the same security headers: without nosniff
