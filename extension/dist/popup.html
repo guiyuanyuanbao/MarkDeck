@@ -202,14 +202,13 @@
   <div class="banner warn" id="conflictBar" style="display:none">
     <div class="banner-title">
       <span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg></span>
-      检测到重复书签
+      检测到重复书签 — 浏览器自带同步可能未关闭
     </div>
-    <div class="banner-desc">可能同时开启了浏览器自带书签同步，两者会互相冲突。</div>
   </div>
 
   <div class="banner warn" id="offlineBanner" style="display:none">
     <div class="banner-title" id="offlineTitle">与服务器断联</div>
-    <div class="banner-desc">你的改动已保存在本地，恢复连接后会自动同步，书签的查看与搜索不受影响。</div>
+    <div class="banner-desc">改动已保存本地，联网后自动同步</div>
     <div class="banner-queue" id="offlineQueue"></div>
   </div>
 
@@ -230,7 +229,7 @@
   <div class="card">
     <div class="card-label">
       <span class="icon"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg></span>
-      本地搜索书签（离线可用）
+      本地搜索
     </div>
     <input id="localSearch" placeholder="输入关键词…" />
     <div class="search-results" id="searchResults"></div>
@@ -242,7 +241,7 @@
     </div>
     <div class="u-text">
       <div class="u-title">浏览器书签同步</div>
-      <div class="u-sub">与自带账号同步冲突时在此关闭</div>
+      <div class="u-sub">与 MarkDeck 冲突时关闭「书签」项</div>
     </div>
     <button id="openSyncSettings">打开设置</button>
   </div>

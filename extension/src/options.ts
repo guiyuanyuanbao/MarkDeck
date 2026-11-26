@@ -31,7 +31,7 @@ $('pairBtn').onclick = async () => {
     if (!st.ok) throw new Error('服务器响应异常 HTTP ' + st.status)
   } catch (e: any) {
     msg.className = 'msg err'
-    msg.textContent = '① 无法连接服务器: ' + (e?.message || '网络错误') + '（检查地址与端口）'
+    msg.textContent = '无法连接服务器: ' + (e?.message || '网络错误')
     return
   }
   msg.textContent = '② 正在交换配对码…'
@@ -40,10 +40,10 @@ $('pairBtn').onclick = async () => {
     name: browserDisplayName(),
   })
   if (resp?.ok) {
-    msg.className = 'msg ok'; msg.textContent = '✓ 配对成功，首次同步已开始（书签栏内容将出现在管理页）'
+    msg.className = 'msg ok'; msg.textContent = '配对成功，首次同步已开始'
   } else {
     msg.className = 'msg err'; msg.textContent = '配对失败: ' + (resp?.error || '未知错误') +
-      (String(resp?.error || '').includes('pairing code') ? '（配对码已过期或已使用，请重新生成）' : '')
+      (String(resp?.error || '').includes('pairing code') ? '（配对码已过期，请重新生成）' : '')
   }
 }
 
@@ -100,27 +100,27 @@ async function refreshConnStatus() {
     const title = document.getElementById('connTitle')!
     const desc = document.getElementById('connDesc')!
     card.style.display = 'block'
-    const q = resp.queued > 0 ? `，本地已保存 ${resp.queued} 条待同步` : ''
+    const q = resp.queued > 0 ? `，待同步 ${resp.queued} 条` : ''
     switch (resp.status) {
       case 'online':
         dot.className = 'dot online'
-        title.textContent = '✓ 已连接服务器'
+        title.textContent = '已连接'
         desc.textContent = '书签双向实时同步中' + q
         break
       case 'disconnected':
         dot.className = 'dot off'
         title.textContent = '与服务器断联'
-        desc.textContent = '改动已保存在本地（' + (resp.queued || 0) + ' 条待同步），恢复连接后自动同步；书签查看与搜索不受影响。'
+        desc.textContent = '改动已保存在本地，恢复连接后自动同步' + (resp.queued ? `（${resp.queued} 条）` : '')
         break
       case 'unauthorized':
         dot.className = 'dot err'
         title.textContent = '设备令牌已失效'
-        desc.textContent = '请在下方重新配对以恢复同步。'
+        desc.textContent = '请在下方重新配对'
         break
       default:
         dot.className = 'dot none'
         title.textContent = '尚未配对'
-        desc.textContent = '填写上方服务器地址与配对码完成连接。'
+        desc.textContent = '填写上方地址与配对码完成连接'
     }
   } catch { /* ignore */ }
 }
@@ -151,7 +151,6 @@ async function runDiagnostics() {
   const card = document.getElementById('diagCard')!
   const rows = document.getElementById('diagRows')!
   const summary = document.getElementById('diagSummary')!
-  const hint = document.getElementById('diagHint')!
   card.style.display = 'block'
   rows.innerHTML = ''
   const CHECK_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>'
@@ -189,8 +188,8 @@ async function runDiagnostics() {
     } catch { /* malformed url */ }
     if (granted) row(true, '站点访问权限')
     else {
-      row(false, '站点访问权限', '未授权 — fetch 将全部失败')
-      fail('未授予服务器站点的访问权限（配对时应有弹窗授权）')
+      row(false, '站点访问权限', '未授权')
+      fail('未授予服务器站点访问权限')
     }
   }
 
@@ -240,7 +239,7 @@ async function runDiagnostics() {
     if (st === 'online') row(true, '实时通道 (WebSocket)')
     else if (st === 'disconnected') {
       row(false, '实时通道 (WebSocket)', '未连接')
-      fail('WebSocket 未连上（服务器可达时通常是 token 失效前兆或网络抖动）')
+      fail('WebSocket 未连接')
     } else if (st === 'unauthorized') {
       row(false, '实时通道 (WebSocket)', '令牌失效')
       fail('设备令牌已失效，需要重新配对')
@@ -254,14 +253,14 @@ async function runDiagnostics() {
     if (!deep?.ok) {
       // SW may be asleep and the message channel unavailable; the hook
       // path exists for tests, so surface the failure plainly either way
-      row(false, '内容对比', deep?.error || '查询失败（service worker 未响应）')
+      row(false, '内容对比', deep?.error || '查询失败')
     } else {
       row(null, '内容对比', `服务端 ${deep.serverUrls} 条 URL / 浏览器 ${deep.localUrls} 条`)
       if ((deep.missingCount ?? 0) === 0) {
-        row(true, '书签一致性', '浏览器已包含服务端全部 URL')
+        row(true, '书签一致性', '一致')
       } else {
         row(false, '书签一致性', `服务端有 ${deep.missingCount} 条 URL 浏览器没有（示例: ${(deep.missingLocally || []).slice(0, 3).join(', ')}）`)
-        fail('拉取已完成但应用环节没有写入浏览器 — 点下方「强制重建同步」')
+        fail('内容未写入浏览器 — 点「强制重建同步」')
         // expose the rebuild action next to the failed row
         const card = document.getElementById('diagCard')!
         if (!document.getElementById('rebuildBtn')) {
@@ -269,7 +268,7 @@ async function runDiagnostics() {
           const btn = document.createElement('button')
           btn.id = 'rebuildBtn'
           btn.className = 'btn-primary'
-          btn.textContent = '⚡ 强制重建同步（清空快照并重新全量对账）'
+          btn.textContent = '⚡ 强制重建同步'
           btn.onclick = async () => {
             btn.disabled = true
             btn.textContent = '重建中…'
@@ -277,8 +276,7 @@ async function runDiagnostics() {
               const resp = await chrome.runtime.sendMessage({ type: 'forceResync' })
               if (resp?.ok) {
                 summary.textContent =
-                  `重建完成 — 计划 ${resp.planned ?? '?'} | 新建 ${resp.created ?? '?'} | ` +
-                  `采纳 ${resp.adopted ?? '?'} | 更新 ${resp.updated ?? '?'} | 失败 ${resp.failed ?? '?'}。点「重新检测」确认`
+                  `重建完成：新建 ${resp.created ?? '?'}，失败 ${resp.failed ?? '?'}。点「重新检测」确认`
                 if ((resp.errors || []).length) {
                   summary.textContent += ' | 失败样例: ' + resp.errors.slice(0, 2).join(' / ')
                 }
@@ -287,7 +285,7 @@ async function runDiagnostics() {
               }
             } finally {
               btn.disabled = false
-              btn.textContent = '⚡ 强制重建同步（清空映射并重新全量拉取）'
+              btn.textContent = '⚡ 强制重建同步'
             }
           }
           actions.appendChild(btn)
@@ -299,10 +297,7 @@ async function runDiagnostics() {
 
   summary.textContent = broken
     ? '发现问题：' + broken
-    : '各项正常 — 若服务端书签仍未出现在浏览器，点击「手动全量同步」并确认浏览器书签栏'
-  hint.textContent = broken
-    ? '按上面第一个标错项处理后点「重新检测」。'
-    : '浏览器书签同步范围 = 书签栏 + 其他书签；远端文件夹会原样出现在这两处。'
+    : '各项正常'
 }
 $('diagRefresh').onclick = runDiagnostics
 runDiagnostics()

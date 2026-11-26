@@ -177,7 +177,7 @@
     <div class="logo-mark"><img src="icons/icon128.png" alt="MarkDeck"></div>
     <div>
       <div class="brand-name">MarkDeck 同步设置</div>
-      <div class="brand-sub">自托管书签同步服务 · 浏览器插件</div>
+      
     </div>
     <span class="topbar-badge" id="versionBadge">v—</span>
   </div>
@@ -204,7 +204,6 @@
           重新检测
         </button>
       </div>
-      <p class="hint" id="diagHint" style="margin-top:10px"></p>
     </div>
 
     <div class="card conflict-card" id="conflictCard" style="display:none">
@@ -213,11 +212,10 @@
         检测到重复书签
       </div>
       <p class="hint" id="conflictDesc" style="margin-bottom:10px"></p>
-      <p class="hint">
-        这通常说明浏览器自带的书签同步（Chrome Sync / Edge 同步）仍处于开启状态，
-        两套同步会互相覆盖、产生副本。建议在浏览器设置中关闭「书签」这一项的同步
-        （密码、历史记录等其他数据不受影响），让 MarkDeck 独占书签同步。
-      </p>
+      <p class="hint">浏览器自带书签同步（Chrome Sync / Edge 同步）与 MarkDeck 冲突，建议在浏览器同步设置中关闭「书签」一项。</p>
+      <button id="openSyncSettings" class="btn-ghost" style="margin-top:10px">
+        打开浏览器同步设置
+      </button>
     </div>
 
     <div class="card">
@@ -226,8 +224,8 @@
         连接服务器
       </div>
       <ol class="steps">
-        <li><span class="n">1</span><span>在 MarkDeck 管理页面「设置 → 设备同步」生成 6 位配对码</span></li>
-        <li><span class="n">2</span><span>填写服务器地址与配对码，点击「配对」</span></li>
+        <li><span class="n">1</span><span>在管理页「设置 → 设备同步」生成配对码</span></li>
+        <li><span class="n">2</span><span>填写地址与配对码，点击「配对」</span></li>
       </ol>
       <div class="field">
         <label for="server">服务器地址</label>
@@ -245,32 +243,6 @@
         <button id="resyncBtn" class="btn-ghost">手动全量同步</button>
       </div>
       <div class="msg" id="pairMsg"></div>
-      <hr class="divider" />
-      <p class="hint" style="margin-bottom: 12px">
-        如果同时开启了浏览器自带的账号书签同步（Chrome Sync / Edge 同步），
-        建议关闭其中的「书签」一项，让 MarkDeck 独占书签同步，避免两套同步互相冲突。
-      </p>
-      <button id="openSyncSettings" class="btn-ghost">
-        <span class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
-        打开浏览器同步设置
-      </button>
-    </div>
-
-    <div class="card">
-      <div class="card-title">
-        <span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
-        离线与安全
-      </div>
-      <p class="hint">
-        与服务器失联时，插件会在本地记录所有改动（新增、删除、移动、改标签），
-        联网后自动按顺序重放合并。浏览器书签栏本身始终可用 —
-        MarkDeck 不会破坏或接管它，卸载插件即恢复纯本地使用。
-      </p>
-      <hr class="divider" />
-      <p class="hint">
-        安全说明：设备令牌只保存在本机，服务端仅存哈希；
-        可在管理页面「设置 → 设备同步」随时吊销本设备。
-      </p>
     </div>
   </div>
 

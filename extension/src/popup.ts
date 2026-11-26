@@ -43,8 +43,8 @@ async function refreshStatus() {
     dot.className = 'dot ' + (resp.status === 'online' ? 'online' : resp.status === 'unconfigured' ? 'unconfigured' : resp.status === 'unauthorized' ? 'unauthorized' : 'off')
     text.textContent =
       resp.status === 'online' ? '已连接' :
-      resp.status === 'unconfigured' ? '未配置 — 打开设置完成配对' :
-      resp.status === 'unauthorized' ? '令牌失效，请重新配对' : '离线（改动将自动排队同步）'
+      resp.status === 'unconfigured' ? '未配置，请先配对' :
+      resp.status === 'unauthorized' ? '令牌失效，请重新配对' : '离线中'
     if (resp.queued > 0) $('queueInfo').textContent = `待同步 ${resp.queued}`
     else $('queueInfo').textContent = ''
     updateOfflineBanner(resp.status, resp.queued)
@@ -61,7 +61,7 @@ function updateOfflineBanner(status: string, queued: number) {
     banner.style.display = 'block'
     banner.className = 'offline-banner' + (status === 'unauthorized' ? ' revoked' : '')
     title.textContent = status === 'unauthorized' ? '设备令牌已失效' : '与服务器断联'
-    queue.textContent = queued > 0 ? `本地已保存 ${queued} 条改动，恢复连接后自动同步` : ''
+    queue.textContent = queued > 0 ? `待同步 ${queued} 条` : ''
   } else {
     banner.style.display = 'none'
   }
