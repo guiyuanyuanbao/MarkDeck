@@ -12,6 +12,25 @@ export class ApiError extends Error {
   }
 }
 
+// parseBody reads the response once and tolerates non-JSON bodies.
+async function parseBody(resp: Response): Promise<any> {
+  const text = await resp.text()
+  if (!text) return null
+  try { return JSON.parse(text) } catch { return { raw: text } }
+}
+
+// handleAuthFailure centralizes the 401 semantics. onLoginPath callers
+// (login/setup) surface their own error text — a wrong password must NOT
+// broadcast md:unauthorized ("登录已过期" + redirect loop). Authenticated
+// pages treat 401 as session expiry.
+function throwApiError(resp: Response, data: any, treat401AsExpiry: boolean): never {
+  if (resp.status === 401 && treat401AsExpiry) {
+    window.dispatchEvent(new CustomEvent('md:unauthorized'))
+    throw new ApiError(401, '登录已过期')
+  }
+  throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -23,44 +42,29 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     credentials: 'same-origin',
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const text = await resp.text()
-  let data: any = null
-  if (text) {
-    try { data = JSON.parse(text) } catch { data = { raw: text } }
-  }
-  if (resp.status === 401) {
+  const data = await parseBody(resp)
+  if (!resp.ok) {
     // login/setup 401 = wrong credentials, NOT an expired session: broadcasting
     // md:unauthorized here showed "登录已过期" on a wrong password and bounced
     // the login page into a redirect loop. The auth endpoints surface their own
     // error text; only the authenticated API surface treats 401 as expiry.
-    if (data && typeof data.error === 'string' && !window.location.pathname.startsWith('/login')) {
-      window.dispatchEvent(new CustomEvent('md:unauthorized'))
-      throw new ApiError(401, '登录已过期')
-    }
-    throw new ApiError(401, (data && data.error) || `HTTP ${resp.status}`)
-  }
-  if (!resp.ok) {
-    throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
+    throwApiError(resp, data, !window.location.pathname.startsWith('/login'))
   }
   return data as T
 }
 
-export async function uploadFile<T = any>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
+export async function uploadFile<T = unknown>(path: string, file: File, fields: Record<string, string> = {}): Promise<T> {
   const fd = new FormData()
   fd.append('file', file)
   for (const [k, v] of Object.entries(fields)) fd.append(k, v)
   const headers: Record<string, string> = {}
   if (csrfToken) headers['X-CSRF'] = csrfToken
   const resp = await fetch(BASE + path, { method: 'POST', headers, credentials: 'same-origin', body: fd })
-  const text = await resp.text()
-  let data: any = null
-  if (text) { try { data = JSON.parse(text) } catch { data = { raw: text } } }
-  if (resp.status === 401) {
+  const data = await parseBody(resp)
+  if (!resp.ok) {
     // import runs on an authenticated page: 401 here IS session expiry
-    window.dispatchEvent(new CustomEvent('md:unauthorized'))
-    throw new ApiError(401, '登录已过期')
+    throwApiError(resp, data, true)
   }
-  if (!resp.ok) throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
   return data as T
 }
 
@@ -74,11 +78,10 @@ export const api = {
     const headers: Record<string, string> = {}
     if (csrfToken) headers['X-CSRF'] = csrfToken
     const resp = await fetch(BASE + path, { headers, credentials: 'same-origin' })
-    if (resp.status === 401) {
-      window.dispatchEvent(new CustomEvent('md:unauthorized'))
-      throw new ApiError(401, '登录已过期')
+    if (!resp.ok) {
+      // downloads only happen on authenticated pages: 401 IS session expiry
+      throwApiError(resp, null, true)
     }
-    if (!resp.ok) throw new ApiError(resp.status, `HTTP ${resp.status}`)
     return resp.blob()
   },
 }
