@@ -36,7 +36,6 @@ const LEGACY_KEYS = ['md_queue', 'md_local_nodes', 'md_id_map', 'md_l2s']
 let reconciling = false
 let ws: WebSocket | null = null
 let wsAttempt = 0
-let deviceIdCached = 'unknown'
 
 // per-reconcile audit counters (the lesson from nine releases: when a sync
 // layer swallows per-row errors, statuses stay green while apply fails —
@@ -225,10 +224,6 @@ async function applyChromeOps(ops: SyncPlan['chromeOps'], resolveParent: (sid: s
           stats.chromeRemoves++
           break
         }
-        case 'bind':
-          // pure binding change — the adapter records it via newBase; nothing
-          // to execute in the browser
-          break
       }
     } catch (e: any) {
       stats.failed++
@@ -254,7 +249,6 @@ async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: str
   try {
     const cfg = await getConfig()
     if (!cfg?.token) return { ok: false, error: 'not paired' }
-    deviceIdCached = cfg.deviceId
 
     // 1. fetch the full server state
     const resp = await apiFetch(cfg, '/api/sync/tree')
@@ -401,7 +395,7 @@ function faviconHash(buf: ArrayBuffer): string {
   }
   return `${b.length}:${h1.toString(16)}${h2.toString(16)}`
 }
-async function placeholderFingerprint(cfg: Config): Promise<string | null> {
+async function placeholderFingerprint(): Promise<string | null> {
   if (placeholderHash) return placeholderHash
   try {
     // an RFC 2606 .test domain is guaranteed unvisited/unresolvable —
@@ -427,7 +421,7 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
       try { hosts.add(new URL(n.url).hostname) } catch { /* malformed */ }
     }
     if (!hosts.size) return
-    const ph = await placeholderFingerprint(cfg)
+    const ph = await placeholderFingerprint()
     let pushed = 0
     let skippedPlaceholder = 0
     for (const host of hosts) {
@@ -580,6 +574,16 @@ chrome.bookmarks.onChildrenReordered.addListener((id) => { void journalTouch(id)
 
 // ---- lifecycle ----
 
+// wipe base and re-run the adoption pass. Shared by the popup's
+// forceResync message and the E2E hook: base only — the touch journal
+// carries pending offline edits that the adoption pass must push, never
+// wipe. cachedRoots resets in case the browser's root ids changed.
+async function forceResync(reason: string): Promise<{ ok: boolean; error?: string }> {
+  await chrome.storage.local.remove([BASE_KEY])
+  cachedRoots = null
+  return reconcileOnce(reason)
+}
+
 async function fullSync() {
   const cfg = await getConfig()
   if (!cfg?.token) return
@@ -632,7 +636,6 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         // silently discarded edits that never reached the server.
         await chrome.storage.local.remove([BASE_KEY])
         await saveConfigPatch({ server, token: data.token, deviceId: data.deviceId, rev: 0 })
-        deviceIdCached = data.deviceId
         // first reconcile against an empty base = full adoption/import,
         // identical mechanics to a re-pair — no special initialImport
         const r = await reconcileOnce('pair')
@@ -665,9 +668,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
       // adoption pass overwrite those edits with server content (the
       // user's offline rename silently reverted by the very tool meant
       // to fix sync).
-      await chrome.storage.local.remove([BASE_KEY])
-      cachedRoots = null
-      const r = await reconcileOnce('forceResync')
+      const r = await forceResync('forceResync')
       sendResponse({ ok: r.ok, error: r.error, ...flattenStats() })
       return
     } else if (msg.type === 'applyStats') {
@@ -790,11 +791,5 @@ async function deepDiag() {
 ;(globalThis as unknown as Record<string, unknown>).__markdeckResync = fullSync
 ;(globalThis as unknown as Record<string, unknown>).__markdeckWsDiag = wsDiag
 ;(globalThis as unknown as Record<string, unknown>).__markdeckDeepDiag = deepDiag
-;(globalThis as unknown as Record<string, unknown>).__markdeckForceResync = async () => {
-  // base only — the touch journal carries pending offline edits that the
-  // adoption pass must push, never wipe
-  await chrome.storage.local.remove([BASE_KEY])
-  cachedRoots = null
-  return reconcileOnce('forceResync-hook')
-}
+;(globalThis as unknown as Record<string, unknown>).__markdeckForceResync = () => forceResync('forceResync-hook')
 ;(globalThis as unknown as Record<string, unknown>).__markdeckReconcileStats = flattenStats

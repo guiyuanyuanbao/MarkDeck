@@ -73,7 +73,6 @@ export type ChromeOp =
   | { kind: 'update'; serverId: string; localId: string; title: string; url?: string }
   | { kind: 'move'; serverId: string; localId: string; parentServerId: string; index: number }
   | { kind: 'remove'; serverId: string; localId: string }
-  | { kind: 'bind'; serverId: string; localId: string } // adopt an existing browser node
 
 export type ServerOp =
   | { op: 'create'; id: string; parentId: string; type: 'folder' | 'url'; title: string; url?: string; position: number; updatedAt: number; deviceId: string }
@@ -122,7 +121,7 @@ function touchAt(touch: TouchJournal, localId: string | undefined): number {
   return touch[localId]?.at || 0
 }
 
-// ---- the engine ----
+// ---- per-reconcile context ----
 
 export interface PlanInput {
   server: ServerNode[]
@@ -139,11 +138,35 @@ export interface PlanInput {
   othersId: string // from the server response (authoritative)
 }
 
+// Shared state threaded through the planning helpers: the maps the passes
+// build (bindings, children, ranks, adoption index) plus the op/stats
+// accumulators. One ctx replaces the former 7-11-argument helper
+// signatures, which re-plumbed the same values at every call site.
+interface Ctx {
+  chromeOps: ChromeOp[]
+  serverOps: ServerOp[]
+  stats: SyncPlan['stats']
+  binding: Map<string, string | null> // serverId -> localId as the plan leaves it
+  reverse: Map<string, string> // localId -> serverId
+  serverById: Map<string, ServerNode>
+  localById: Map<string, LocalNode>
+  localChildren: Map<string, LocalNode[]>
+  serverRank: Map<string, number>
+  unboundByUrl: Map<string, LocalNode[]>
+  touch: TouchJournal
+  deviceId: string
+  othersId: string
+  barRootLid?: string
+  otherRootLid?: string
+}
+
+// ---- the engine ----
+
 export function planSync(input: PlanInput): SyncPlan {
-  const { server, local, touch, deviceId } = input
+  const { server, touch, deviceId } = input
   const base = input.base && input.base.head > 0 ? input.base : null
   const serverById = new Map(server.map((n) => [n.id, n]))
-  const localById = new Map(local.map((n) => [n.id, n]))
+  const localById = new Map(input.local.map((n) => [n.id, n]))
 
   const chromeOps: ChromeOp[] = []
   const serverOps: ServerOp[] = []
@@ -162,7 +185,7 @@ export function planSync(input: PlanInput): SyncPlan {
   // invariant) and passed with parentId '' + marker `isOtherRoot`. Its
   // server counterpart is input.othersId, structurally — never stored in
   // any mapping table, recomputed every reconcile.
-  const otherRootLocal = local.find((n) => (n as LocalNode & { isOtherRoot?: boolean }).isOtherRoot)
+  const otherRootLocal = input.local.find((n) => (n as LocalNode & { isOtherRoot?: boolean }).isOtherRoot)
   if (otherRootLocal) {
     binding.set(input.othersId, otherRootLocal.id)
     reverse.set(otherRootLocal.id, input.othersId)
@@ -175,11 +198,11 @@ export function planSync(input: PlanInput): SyncPlan {
   // synthetic/unit tree is a top-level bookmark, NOT a bucket — requiring
   // type folder keeps parent-matching from mistaking the bookmark under
   // test for its own root (which planned spurious moves).
-  const barRootLocal = local.find((n) => n.parentId === '' && n.type === 'folder' && n !== otherRootLocal)
+  const barRootLocal = input.local.find((n) => n.parentId === '' && n.type === 'folder' && n !== otherRootLocal)
 
   // index local children by parent for move/position planning
   const localChildren = new Map<string, LocalNode[]>()
-  for (const n of local) {
+  for (const n of input.local) {
     const arr = localChildren.get(n.parentId) || []
     arr.push(n)
     localChildren.set(n.parentId, arr)
@@ -212,13 +235,22 @@ export function planSync(input: PlanInput): SyncPlan {
 
   // ---- URL adoption index: unbound local url nodes by normalized url ----
   const unboundByUrl = new Map<string, LocalNode[]>()
-  for (const n of local) {
+  for (const n of input.local) {
     if (n.type !== 'url') continue
     if (reverse.has(n.id)) continue // already bound via base
     const key = normBookmarkUrl(n.url)
     const arr = unboundByUrl.get(key) || []
     arr.push(n)
     unboundByUrl.set(key, arr)
+  }
+
+  const ctx: Ctx = {
+    chromeOps, serverOps, stats, binding, reverse,
+    serverById, localById, localChildren, serverRank, unboundByUrl,
+    touch, deviceId,
+    othersId: input.othersId,
+    barRootLid: barRootLocal?.id,
+    otherRootLid: otherRootLocal?.id,
   }
 
   // ---- Pass 1: server-side rows ----
@@ -253,10 +285,7 @@ export function planSync(input: PlanInput): SyncPlan {
       if (sn.type === 'url') {
         const cand = unboundByUrl.get(normBookmarkUrl(sn.url))?.[0]
         if (cand) {
-          binding.set(sn.id, cand.id)
-          reverse.set(cand.id, sn.id)
-          unboundByUrl.delete(normBookmarkUrl(sn.url))
-          stats.adopted++
+          adoptBinding(ctx, sn.id, cand, normBookmarkUrl(sn.url))
           // Title divergence on adoption: a journaled local edit that is
           // NEWER than the server row must PUSH (the pending edit survives
           // forceResync — the touch journal is the adoption pass's only
@@ -265,7 +294,7 @@ export function planSync(input: PlanInput): SyncPlan {
           if (cand.title !== sn.title) {
             const tt = touchAt(touch, cand.id)
             if (tt > sn.updatedAt) {
-              pushLocalState(sn, cand, cand.id, serverOps, deviceId, touch, stats, binding, reverse)
+              pushLocalState(ctx, sn, cand, cand.id)
             } else if (!touch[cand.id]) {
               chromeOps.push({ kind: 'update', serverId: sn.id, localId: cand.id, title: sn.title, url: sn.url })
             }
@@ -298,18 +327,12 @@ export function planSync(input: PlanInput): SyncPlan {
           const serverNewer = sn.updatedAt > candTouch
           const pendingOwnCreate = base !== null && cand !== undefined && !!touch[cand.id] && !serverNewer
           if (cand && !pendingOwnCreate) {
-            binding.set(sn.id, cand.id)
-            reverse.set(cand.id, sn.id)
-            unboundByUrl.delete(normBookmarkUrl(cand.url))
-            stats.adopted++
+            adoptBinding(ctx, sn.id, cand, normBookmarkUrl(cand.url))
             continue
           }
         }
       }
-      chromeOps.push({
-        kind: 'create', serverId: sn.id, parentServerId: sn.parentId,
-        type: sn.type, title: sn.title, url: sn.url, index: Math.max(0, Math.round(sn.position) - 1),
-      })
+      chromeOps.push(createOpFromServerRow(sn))
       continue
     }
 
@@ -339,27 +362,18 @@ export function planSync(input: PlanInput): SyncPlan {
       }
       if (serverChanged || !localId) {
         // server moved on, or the row was never placed here: recreate
-        chromeOps.push({
-          kind: 'create', serverId: sn.id, parentServerId: sn.parentId,
-          type: sn.type, title: sn.title, url: sn.url, index: Math.max(0, Math.round(sn.position) - 1),
-        })
+        chromeOps.push(createOpFromServerRow(sn))
       } else {
         // unchanged row whose local node vanished without a journal entry
         // (profile reset, manual storage wipe): adopt by URL or recreate
         if (sn.type === 'url') {
           const cand = unboundByUrl.get(normBookmarkUrl(sn.url))?.[0]
           if (cand) {
-            binding.set(sn.id, cand.id)
-            reverse.set(cand.id, sn.id)
-            unboundByUrl.delete(normBookmarkUrl(sn.url))
-            stats.adopted++
+            adoptBinding(ctx, sn.id, cand, normBookmarkUrl(sn.url))
             continue
           }
         }
-        chromeOps.push({
-          kind: 'create', serverId: sn.id, parentServerId: sn.parentId,
-          type: sn.type, title: sn.title, url: sn.url, index: Math.max(0, Math.round(sn.position) - 1),
-        })
+        chromeOps.push(createOpFromServerRow(sn))
       }
       continue
     }
@@ -386,13 +400,13 @@ export function planSync(input: PlanInput): SyncPlan {
       const t = touchAt(touch, localId ?? undefined)
       if (t > sn.updatedAt) {
         // local edit is newer: push local state
-        pushLocalState(sn, ln, localId as string, serverOps, deviceId, touch, stats, binding, reverse)
+        pushLocalState(ctx, sn, ln, localId as string)
       } else {
         // server is newer (or tie): apply server state to the browser
-        planServerToLocal(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0, reverse, input.othersId, barRootLocal?.id, otherRootLocal?.id)
+        planServerToLocal(ctx, sn, ln, localId as string, serverRank.get(sn.id) ?? 0)
       }
     } else if (serverChanged) {
-      planServerToLocal(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0, reverse, input.othersId, barRootLocal?.id, otherRootLocal?.id)
+      planServerToLocal(ctx, sn, ln, localId as string, serverRank.get(sn.id) ?? 0)
     } else if (localChanged) {
       // Guard against re-pushing DOOMED updates: a previous round may have
       // pushed this edit and lost the LWW race (base advanced past the
@@ -406,16 +420,16 @@ export function planSync(input: PlanInput): SyncPlan {
       // `<=` here would eat genuine fresh edits.
       const t = touchAt(touch, localId ?? undefined)
       if (t < sn.updatedAt) {
-        planServerToLocal(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0, reverse, input.othersId, barRootLocal?.id, otherRootLocal?.id)
+        planServerToLocal(ctx, sn, ln, localId as string, serverRank.get(sn.id) ?? 0)
       } else {
-        pushLocalState(sn, ln, localId as string, serverOps, deviceId, touch, stats, binding, reverse)
+        pushLocalState(ctx, sn, ln, localId as string)
       }
     } else {
       // convergence check: positions may still drift (e.g. index churn on
       // one side). Structurally bound rows (other-bookmarks root) never
       // move — their browser position is the root bucket's own.
       if (sn.id !== input.othersId) {
-        planPositionOnly(sn, ln, localId as string, chromeOps, stats, serverRank.get(sn.id) ?? 0, reverse, input.othersId, barRootLocal?.id, otherRootLocal?.id, sn.parentId)
+        planPositionOnly(ctx, sn, ln, localId as string, serverRank.get(sn.id) ?? 0)
       }
     }
   }
@@ -500,15 +514,13 @@ export function planSync(input: PlanInput): SyncPlan {
       // row was deleted (or PURGED — undelete refuses purged rows, the
       // rejection is silent) with a timestamp at or after the local edit.
       // Re-pushing every reconcile would loop forever. Deletion wins:
-      // plan the local remove (pass 2's normal path below handles it —
-      // fall through with the touch treated as consumed so pass 3 does
-      // not resurrect the same node as a fresh local-only create, which
-      // would ping-pong remove/create against the server's delete).
+      // plan the local remove (the ln branch below handles it — with the
+      // touch treated as consumed so pass 3 does not resurrect the same
+      // node as a fresh local-only create, which would ping-pong
+      // remove/create against the server's delete).
       if (ln && localId) {
-        // mark consumed locally: remove is planned below via the ln branch
         chromeOps.push({ kind: 'remove', serverId: sid, localId: ln.id })
         stats.chromeRemoves++
-        stats.planned++
         binding.delete(sid)
         continue
       }
@@ -522,11 +534,8 @@ export function planSync(input: PlanInput): SyncPlan {
       if (entry.server.type === 'url') {
         const cand = unboundByUrl.get(normBookmarkUrl(entry.server.url))
         if (cand && cand.length) {
-          binding.set(sid, cand[0].id)
-          reverse.set(cand[0].id, sid)
-          unboundByUrl.delete(normBookmarkUrl(entry.server.url))
+          adoptBinding(ctx, sid, cand[0], normBookmarkUrl(entry.server.url))
           rebindingEntries[sid] = { server: entry.server, localId: cand[0].id } // rebind into next base
-          stats.adopted++
           continue
         }
       }
@@ -534,7 +543,6 @@ export function planSync(input: PlanInput): SyncPlan {
       if (ln) {
         chromeOps.push({ kind: 'remove', serverId: sid, localId: ln.id })
         stats.chromeRemoves++
-        stats.planned++
       } else if (localId) {
         // chrome node already gone (user deleted locally before we saw the
         // server delete): nothing to remove, binding just dissolves
@@ -552,8 +560,8 @@ export function planSync(input: PlanInput): SyncPlan {
   const excluded = new Set<string>()
   if (otherRootLocal) excluded.add(otherRootLocal.id)
   const barRootId = barRootLocal?.id
-  for (const n of local) {
-    if (n.parentId === '' ) continue // root buckets
+  for (const n of input.local) {
+    if (n.parentId === '') continue // root buckets
     if (excluded.has(n.id)) continue
     if (reverse.has(n.id)) continue // bound: handled in pass 1/2
     // parent must resolve to an in-scope ancestor: bar root directly, any
@@ -628,7 +636,7 @@ export function planSync(input: PlanInput): SyncPlan {
   }
 
   // ---- topology: chrome creates must be parent-first ----
-  const orderedChrome = topoSortChrome(chromeOps, binding)
+  const orderedChrome = topoSortChrome(chromeOps)
 
   // ---- new base: server tree as-is + bindings established by this plan ----
   const newBaseEntries: Record<string, { server: ServerNode; localId: string | null }> = {}
@@ -674,9 +682,6 @@ function localDiffers(ln: LocalNode, baseServer: ServerNode, touch: TouchJournal
   if (touch[localId]?.at) return true // any journaled local edit counts
   if (ln.title !== baseServer.title) return true
   if (normBookmarkUrl(ln.url) !== normBookmarkUrl(baseServer.url)) return true
-  // structural: parent binding + position
-  const parentKey = ln.parentId // adapter maps root buckets to '' already
-  void parentKey
   return false // title/url equal and no touch: treat as unchanged (position drift handled by planPositionOnly)
 }
 
@@ -691,24 +696,47 @@ function localDiffers(ln: LocalNode, baseServer: ServerNode, touch: TouchJournal
 // buckets, e.g. synthetic unit trees), the check abstains — abstaining
 // never plans a move (pre-fix behavior), so no churn can regress.
 function localParentMatchesServer(
-  ln: LocalNode, snParentId: string,
-  reverse: Map<string, string>, othersId: string,
-  barRootLocalId: string | undefined, otherRootLocalId: string | undefined,
+  ln: LocalNode, snParentId: string, ctx: Ctx,
 ): boolean | null {
   const lp = ln.parentId
-  if (snParentId === '' && barRootLocalId !== undefined) return lp === barRootLocalId
-  if (snParentId === othersId && otherRootLocalId !== undefined) return lp === otherRootLocalId
-  const bound = reverse.get(lp)
+  if (snParentId === '' && ctx.barRootLid !== undefined) return lp === ctx.barRootLid
+  if (snParentId === ctx.othersId && ctx.otherRootLid !== undefined) return lp === ctx.otherRootLid
+  const bound = ctx.reverse.get(lp)
   if (bound !== undefined) return bound === snParentId
   // the local parent is a root bucket but the server parent is a REAL row
   // (or vice versa): the node moved between a root and a folder — that is
   // a definite mismatch, never an abstention (a swap-reparent batch left
   // the inner folder stranded at top level when this returned null).
-  if ((lp === barRootLocalId || lp === otherRootLocalId) && snParentId !== '' && snParentId !== othersId) {
+  if ((lp === ctx.barRootLid || lp === ctx.otherRootLid) && snParentId !== '' && snParentId !== ctx.othersId) {
     return false
   }
   // binding unknown AND no structural root: abstain
   return null
+}
+
+// ---- planning helpers ----
+
+// chrome create op materializing a server row: the raw server position is
+// 1-based and may be scattered (MaxPosition+1 from web creates), so convert
+// to a 0-based index and clamp. Order converges later through rank-based
+// move ops.
+function createOpFromServerRow(sn: ServerNode): ChromeOp {
+  return {
+    kind: 'create', serverId: sn.id, parentServerId: sn.parentId,
+    type: sn.type, title: sn.title, url: sn.url,
+    index: Math.max(0, Math.round(sn.position) - 1),
+  }
+}
+
+// bind an unbound browser node to a server row (adoption/rebind): record it
+// in both binding directions, retire the node from the URL adoption index,
+// count it. Callers pass the normalized URL key of the SERVER row — a
+// folder has no URL, and its key ('') can never collide with real entries.
+function adoptBinding(ctx: Ctx, sid: string, cand: LocalNode, urlKey: string) {
+  ctx.binding.set(sid, cand.id)
+  ctx.reverse.set(cand.id, sid)
+  ctx.unboundByUrl.delete(urlKey)
+  ctx.stats.adopted++
 }
 
 // apply server state to the browser (update/move/remove-and-recreate).
@@ -717,24 +745,20 @@ function localParentMatchesServer(
 // forever while every reconcile churned. A URL-differing row is therefore
 // re-materialized: remove the bound node, recreate with the new URL (the
 // binding re-forms in this same plan via createdBindings).
-function planServerToLocal(
-  sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats'], rank: number,
-  reverse: Map<string, string>, othersId: string,
-  barRootLid?: string, otherRootLid?: string,
-) {
+function planServerToLocal(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: string, rank: number) {
   const urlChanged = sn.type === 'url' && normBookmarkUrl(ln.url) !== normBookmarkUrl(sn.url)
   if (urlChanged) {
-    chromeOps.push({ kind: 'remove', serverId: sn.id, localId })
-    stats.chromeRemoves++
-    chromeOps.push({ kind: 'create', serverId: sn.id, parentServerId: sn.parentId, type: 'url', title: sn.title, url: sn.url, index: rank })
-    stats.chromeCreates++
+    ctx.chromeOps.push({ kind: 'remove', serverId: sn.id, localId })
+    ctx.stats.chromeRemoves++
+    ctx.chromeOps.push({ kind: 'create', serverId: sn.id, parentServerId: sn.parentId, type: 'url', title: sn.title, url: sn.url, index: rank })
+    ctx.stats.chromeCreates++
     return
   }
   if (ln.title !== sn.title) {
-    chromeOps.push({ kind: 'update', serverId: sn.id, localId, title: sn.title, url: sn.url })
-    stats.chromeUpdates++
+    ctx.chromeOps.push({ kind: 'update', serverId: sn.id, localId, title: sn.title, url: sn.url })
+    ctx.stats.chromeUpdates++
   }
-  planPositionOnly(sn, ln, localId, chromeOps, stats, rank, reverse, othersId, barRootLid, otherRootLid, sn.parentId)
+  planPositionOnly(ctx, sn, ln, localId, rank)
 }
 
 // position-only drift: rebind parent/order without touching content.
@@ -747,51 +771,40 @@ function planServerToLocal(
 // node moved between roots (holder ↔ bar, index 0 → rank 0) shares the
 // rank but sits under the WRONG parent — comparing index alone made every
 // cross-root server move silently never reach the browser.
-function planPositionOnly(
-  sn: ServerNode, ln: LocalNode, localId: string, chromeOps: ChromeOp[], stats: SyncPlan['stats'], rank: number,
-  reverse: Map<string, string>, othersId: string,
-  barRootLid?: string, otherRootLid?: string, expectedParentSid?: string,
-) {
-  void localId
-  const parentCheck = expectedParentSid === undefined
-    ? null
-    : localParentMatchesServer(ln, expectedParentSid, reverse, othersId, barRootLid, otherRootLid)
+function planPositionOnly(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: string, rank: number) {
+  const parentCheck = localParentMatchesServer(ln, sn.parentId, ctx)
   // null = undecidable → abstain (no move from the parent axis alone)
   const parentMismatch = parentCheck === false
   if (ln.index !== rank || parentMismatch) {
-    chromeOps.push({ kind: 'move', serverId: sn.id, localId, parentServerId: sn.parentId, index: rank })
-    stats.chromeMoves++
+    ctx.chromeOps.push({ kind: 'move', serverId: sn.id, localId, parentServerId: sn.parentId, index: rank })
+    ctx.stats.chromeMoves++
   }
 }
 
-  // push the local node's content to the server. A local MOVE must carry
-  // the new parent's server id (the browser-only parentId → server id
-  // translation runs through the binding maps); quick-save TAGS ride the
-  // touch journal onto the op.
-  function pushLocalState(
-    sn: ServerNode, ln: LocalNode, localId: string,
-    serverOps: ServerOp[], deviceId: string, touch: TouchJournal, stats: SyncPlan['stats'],
-    binding: Map<string, string | null>, reverse: Map<string, string>,
-  ) {
-    const t = touchAt(touch, localId) || Math.floor((ln.dateAdded || Date.now()) / 1000)
-    const localParentSid = reverse.get(ln.parentId)
-    const parentChanged = localParentSid !== undefined && localParentSid !== sn.parentId
-    const tags = touch[localId]?.tags
-    serverOps.push({
-      op: 'update', id: sn.id,
-      title: ln.title,
-      ...(ln.url !== undefined ? { url: ln.url } : {}),
-      ...(parentChanged ? { parentId: localParentSid } : {}),
-      ...(tags?.length ? { tags } : {}),
-      updatedAt: t, deviceId,
-      observedRevision: sn.revision,
-    })
-    stats.pushed++
-  }
+// push the local node's content to the server. A local MOVE must carry
+// the new parent's server id (the browser-only parentId → server id
+// translation runs through the binding maps); quick-save TAGS ride the
+// touch journal onto the op.
+function pushLocalState(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: string) {
+  const t = touchAt(ctx.touch, localId) || Math.floor((ln.dateAdded || Date.now()) / 1000)
+  const localParentSid = ctx.reverse.get(ln.parentId)
+  const parentChanged = localParentSid !== undefined && localParentSid !== sn.parentId
+  const tags = ctx.touch[localId]?.tags
+  ctx.serverOps.push({
+    op: 'update', id: sn.id,
+    title: ln.title,
+    ...(ln.url !== undefined ? { url: ln.url } : {}),
+    ...(parentChanged ? { parentId: localParentSid } : {}),
+    ...(tags?.length ? { tags } : {}),
+    updatedAt: t, deviceId: ctx.deviceId,
+    observedRevision: sn.revision,
+  })
+  ctx.stats.pushed++
+}
 
 // ---- topology: parents before children (chrome creates) ----
 
-function topoSortChrome(ops: ChromeOp[], binding: Map<string, string | null>): ChromeOp[] {
+function topoSortChrome(ops: ChromeOp[]): ChromeOp[] {
   // creates reference parents by server id; a parent's own create must
   // precede them. Everything else keeps its original relative order.
   const creates = ops.filter((o): o is Extract<ChromeOp, { kind: 'create' }> => o.kind === 'create')
