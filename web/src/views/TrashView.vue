@@ -75,6 +75,11 @@ const breadcrumbs = computed(() => {
 })
 function enterFolder(b: Bookmark) {
   if (b.type !== 'folder') return
+  // folder contents are always browsed in the 全部 hierarchy — entering from
+  // a flat scope (文件夹/最近7天…) switches scope so the children are never
+  // hidden by a leftover filter (user feedback: entering 数据 with the
+  // 文件夹 filter active showed "没有匹配的条目" for a folder holding URLs)
+  scope.value = 'all'
   currentFolder.value = b.id
   clearSelection()
 }
@@ -84,10 +89,15 @@ function goUp() {
   clearSelection()
 }
 
+// ---- scopes: each sidebar entry is a self-contained scope whose badge
+// count always equals the content it shows. 'all' keeps hierarchical folder
+// browsing; the other four are flat global lists over the whole trash (the
+// old type×time filter pair produced count/content mismatches — the
+// 网址书签 badge said 8 while the level-scoped list showed 1).
+const scope = ref<'all' | 'url' | 'folder' | '7d' | 'older'>('all')
+
 // ---- filters ----
 const q = ref('')
-const typeFilter = ref<'all' | 'url' | 'folder'>('all')
-const timeFilter = ref<'all' | '7d' | 'older'>('all')
 const sortBy = ref<'deletedDesc' | 'deletedAsc' | 'title'>('deletedDesc')
 
 // view mode (list | grid), persisted separately from the bookmarks view
@@ -151,6 +161,10 @@ function liveParentId(id: string): string {
 }
 // path relative to the browsed folder (for the 原位置 column inside a level)
 function relPath(pid: string): string {
+  // flat scopes (网址书签/文件夹/时间) have no "current level" concept —
+  // everything is global, so always the full original path (check FIRST:
+  // pid===''===currentFolder at trash top would otherwise say 本层)
+  if (scope.value !== 'all') return origPath(pid)
   // during global search the browsed folder itself can appear in results —
   // show its real parent path, not a misleading 本层
   if (pid === currentFolder.value && !searching.value) return '本层'
@@ -208,16 +222,25 @@ onMounted(load)
 // background deletes (extension sync) refresh the trash too, coalesced
 useRevRefresh(load)
 
-// ---- filter pipeline (current level; search is global) ----
+// ---- scope pipeline ----
+// 'all': current hierarchy level (search lifts it to the whole trash);
+// flat scopes (url/folder/7d/older): always the WHOLE trash, so the sidebar
+// badge count always matches what's listed — and items inside deleted
+// folders are findable without clicking into each folder.
 const searching = computed(() => q.value.trim().length > 0)
 const now7 = computed(() => Date.now() / 1000 - 7 * 86400)
-const baseRows = computed(() => (searching.value ? trash.value : currentRows.value))
+const baseRows = computed<Bookmark[]>(() => {
+  if (scope.value !== 'all') return trash.value // flat scopes are global
+  return searching.value ? trash.value : currentRows.value
+})
 const filtered = computed(() => {
   let rows = baseRows.value
-  if (typeFilter.value === 'url') rows = rows.filter((b) => b.type === 'url')
-  else if (typeFilter.value === 'folder') rows = rows.filter((b) => b.type === 'folder')
-  if (timeFilter.value === '7d') rows = rows.filter((b) => (b.deletedAt || 0) >= now7.value)
-  else if (timeFilter.value === 'older') rows = rows.filter((b) => (b.deletedAt || 0) < now7.value)
+  switch (scope.value) {
+    case 'url': rows = rows.filter((b) => b.type === 'url'); break
+    case 'folder': rows = rows.filter((b) => b.type === 'folder'); break
+    case '7d': rows = rows.filter((b) => (b.deletedAt || 0) >= now7.value); break
+    case 'older': rows = rows.filter((b) => (b.deletedAt || 0) < now7.value); break
+  }
   if (searching.value) {
     const k = q.value.toLowerCase()
     rows = rows.filter((b) => (b.title || '').toLowerCase().includes(k) || (b.url || '').toLowerCase().includes(k))
@@ -231,7 +254,10 @@ const filtered = computed(() => {
   return rows
 })
 
-// sidebar counts (always over the full trash, ignoring the active filter)
+// sidebar scope entries. badge counts describe the CONTENT the entry shows:
+// for 'all' that's the current hierarchy level (topRows at top level), for
+// the flat scopes the global filtered total — never two different numbers
+// for one entry (old design showed 网址书签 8 but listed the level's 1).
 const counts = computed(() => {
   const week = now7.value
   return {
@@ -243,25 +269,25 @@ const counts = computed(() => {
     older: trash.value.filter((b) => (b.deletedAt || 0) < week).length,
   }
 })
-type SideFilter = { key: string; label: string; ico: string; count: number; kind: 'type' | 'time' | 'all'; value: string }
+type SideFilter = { key: 'all' | 'url' | 'folder' | '7d' | 'older'; label: string; ico: string; count: number; hint: string }
 const sideFilters = computed<SideFilter[]>(() => [
-  { key: 'all', label: '全部', ico: 'trash', count: counts.value.all, kind: 'all', value: 'all' },
-  { key: 'url', label: '网址书签', ico: 'bookmark', count: counts.value.url, kind: 'type', value: 'url' },
-  { key: 'folder', label: '文件夹', ico: 'folder', count: counts.value.folder, kind: 'type', value: 'folder' },
-  { key: '7d', label: '最近 7 天', ico: 'refresh', count: counts.value.week, kind: 'time', value: '7d' },
-  { key: 'older', label: '7 天前', ico: 'stack', count: counts.value.older, kind: 'time', value: 'older' },
+  { key: 'all', label: '全部', ico: 'trash', count: counts.value.all, hint: `按层级浏览 · 顶层 ${counts.value.all} 项 / 共 ${counts.value.total} 项` },
+  { key: 'url', label: '网址书签', ico: 'bookmark', count: counts.value.url, hint: '全部网址书签（含文件夹内的）' },
+  { key: 'folder', label: '文件夹', ico: 'folder', count: counts.value.folder, hint: '全部已删除文件夹' },
+  { key: '7d', label: '最近 7 天', ico: 'refresh', count: counts.value.week, hint: '最近 7 天删除的所有内容' },
+  { key: 'older', label: '7 天前', ico: 'stack', count: counts.value.older, hint: '更早删除的所有内容' },
 ])
 function pickFilter(f: SideFilter) {
-  if (f.kind === 'all') { typeFilter.value = 'all'; timeFilter.value = 'all' }
-  else if (f.kind === 'type') typeFilter.value = f.value as 'url' | 'folder'
-  else timeFilter.value = f.value as '7d' | 'older'
+  scope.value = f.key
+  // hierarchy browsing only exists in 'all'; leaving it drops the folder
+  if (f.key !== 'all') currentFolder.value = ''
 }
-const activeFilterKey = computed(() => {
-  if (typeFilter.value === 'url') return 'url'
-  if (typeFilter.value === 'folder') return 'folder'
-  if (timeFilter.value === '7d') return '7d'
-  if (timeFilter.value === 'older') return 'older'
-  return 'all'
+// content-pane title: matches the picked scope (search overrides)
+const scopeTitle = computed(() => {
+  if (searching.value) return '搜索结果'
+  const s = sideFilters.value.find((f) => f.key === scope.value)
+  if (scope.value !== 'all') return s?.label || '回收站'
+  return breadcrumbs.value[breadcrumbs.value.length - 1].title
 })
 
 // ---- selection (composable, file-manager semantics) ----
@@ -384,8 +410,8 @@ function selectedItems(): Bookmark[] {
 // later filter/search change would be silently dropped, so count what the
 // buttons actually touch
 const actionableCount = computed(() => selectedItems().length)
-// a filter/search change that hides rows should drop those stale selections
-watch([searching, typeFilter, timeFilter, currentFolder], () => {
+// a scope/search change that hides rows should drop those stale selections
+watch([searching, scope, currentFolder], () => {
   const visible = new Set(filtered.value.map((b) => b.id))
   const clipped = new Set([...checked.value].filter((id) => visible.has(id)))
   if (clipped.size !== checked.value.size) checked.value = clipped
@@ -439,8 +465,8 @@ function onKeydown(e: KeyboardEvent) {
           v-for="f in sideFilters"
           :key="f.key"
           class="tr-link"
-          :class="{ active: activeFilterKey === f.key }"
-          :title="f.key === 'all' ? `顶层 ${counts.all} 项 · 共 ${counts.total} 项` : ''"
+          :class="{ active: scope === f.key }"
+          :title="f.hint"
           @click="pickFilter(f)"
         >
           <span class="tr-ico"><Icon :name="f.ico" :size="15" /></span>
@@ -448,7 +474,7 @@ function onKeydown(e: KeyboardEvent) {
           <span class="count">{{ f.count }}</span>
         </button>
       </div>
-      <button v-if="currentFolder" class="tr-up-btn" @click="goUp">
+      <button v-if="scope === 'all' && currentFolder" class="tr-up-btn" @click="goUp">
         <Icon name="up" :size="13" /> 返回顶层
       </button>
       <div class="tr-summary">
@@ -467,7 +493,7 @@ function onKeydown(e: KeyboardEvent) {
       <div class="content-head">
         <div class="head-top">
           <div>
-            <nav class="crumbs" aria-label="回收站路径">
+            <nav v-if="scope === 'all'" class="crumbs" aria-label="回收站路径">
               <template v-for="(c, i) in breadcrumbs" :key="c.id || '__top__'">
                 <span v-if="i > 0" class="crumb-sep">/</span>
                 <button
@@ -479,9 +505,9 @@ function onKeydown(e: KeyboardEvent) {
               </template>
               <button v-if="currentFolder" class="icon-btn up-btn" title="返回上一级" @click="goUp">↑</button>
             </nav>
-            <h1 class="page-title">{{ searching ? '搜索结果' : (breadcrumbs[breadcrumbs.length - 1].title) }}</h1>
+            <h1 class="page-title">{{ searching ? '搜索结果' : (scopeTitle) }}</h1>
             <div class="page-sub">
-              {{ filtered.length }} 项<template v-if="!searching && currentFolder === '' && counts.total !== counts.all">（共 {{ counts.total }} 项）</template><template v-if="actionableCount"> · 已选 {{ actionableCount }} 项</template>
+              {{ filtered.length }} 项<template v-if="!searching && scope === 'all' && currentFolder === '' && counts.total !== counts.all">（共 {{ counts.total }} 项）</template><template v-if="actionableCount"> · 已选 {{ actionableCount }} 项</template>
             </div>
           </div>
           <div class="head-actions">
