@@ -77,10 +77,9 @@ for (let i = 0; i < 30; i++) {
 }
 console.log("pair msg: " + JSON.stringify(pairMsg))
 // wait for the chip to flip (immediate-refresh loop, max ~4s)
-let chipAfter = ''
 for (let i = 0; i < 12; i++) {
-  chipAfter = await page.textContent('#pairChipText')
-  if (chipAfter !== '未配对') break
+  const chip = await page.textContent('#pairChipText')
+  if (chip !== '未配对') break
   await new Promise((r) => setTimeout(r, 500))
 }
 await page.waitForTimeout(1500) // let first reconcile settle + diag rerun
