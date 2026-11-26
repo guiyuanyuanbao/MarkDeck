@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -28,8 +30,42 @@ func (a *API) RegisterToolsRoutes(mux *http.ServeMux, chain *tools.Chain) {
 
 	mux.HandleFunc("GET /api/snapshots", a.requireAny(a.handleListSnapshots))
 	mux.HandleFunc("POST /api/snapshots", a.requireAny(a.handleCreateSnapshot))
+	mux.HandleFunc("POST /api/snapshots/upload", a.requireAny(a.handleUploadSnapshot))
 	mux.HandleFunc("POST /api/snapshots/{id}/restore", a.requireAny(a.handleRestoreSnapshot))
 	mux.HandleFunc("GET /api/snapshots/{id}/download", a.requireAny(a.handleDownloadSnapshot))
+}
+
+// handleUploadSnapshot accepts a previously downloaded snapshot file
+// (.json.gz) and restores it. Completes the download half of the backup
+// story: cold copies / cross-instance moves can come back without shell
+// access. A protective snapshot of the current state is taken first.
+func (a *API) handleUploadSnapshot(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(64 << 20); err != nil { // 64 MiB upload cap
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart required"})
+		return
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field required"})
+		return
+	}
+	defer file.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, io.LimitReader(file, 64<<20+1)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read failed"})
+		return
+	}
+	if buf.Len() > 64<<20 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file too large"})
+		return
+	}
+	row, err := a.chain.RestoreSnapshotFile(buf.Bytes(), "import")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	a.broadcastRevision()
+	writeJSON(w, http.StatusOK, row)
 }
 
 func (a *API) handleImportHTML(w http.ResponseWriter, r *http.Request) {

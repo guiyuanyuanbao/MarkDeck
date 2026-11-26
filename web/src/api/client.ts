@@ -171,4 +171,7 @@ export const toolsApi = {
   snapshots: () => api.get<{ snapshots: Snapshot[] }>('/api/snapshots'),
   createSnapshot: () => api.post<Snapshot>('/api/snapshots'),
   restoreSnapshot: (id: string) => api.post(`/api/snapshots/${id}/restore`),
+  // upload a previously downloaded snapshot file (.json.gz) and restore it;
+  // a protective snapshot of the current state is taken server-side first
+  uploadSnapshot: (file: File) => uploadFile<Snapshot>('/api/snapshots/upload', file),
 }

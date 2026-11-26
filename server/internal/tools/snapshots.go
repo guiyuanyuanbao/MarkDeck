@@ -96,6 +96,64 @@ func (c *Chain) RestoreSnapshot(id string, deviceID string) error {
 	if err != nil {
 		return err
 	}
+	return c.restoreSnapshotBytes(data, deviceID)
+}
+
+// RestoreSnapshotFile registers an externally provided snapshot dump (e.g.
+// a previously downloaded one, moved from another instance) and restores
+// it. Same protective-snapshot-first contract as RestoreSnapshot.
+func (c *Chain) RestoreSnapshotFile(data []byte, deviceID string) (*store.SnapshotRow, error) {
+	row, err := c.registerSnapshotFile(data, "imported")
+	if err != nil {
+		return nil, err
+	}
+	if err := c.restoreSnapshotBytes(data, deviceID); err != nil {
+		// don't leave a registered row for data that failed to restore
+		_ = os.Remove(filepath.Join(c.SnapshotDir, row.File))
+		_ = c.Store.DeleteSnapshot(row.ID)
+		return nil, err
+	}
+	return row, nil
+}
+
+// registerSnapshotFile validates a snapshot dump and stores it in the
+// snapshot dir + table so imported files participate in listing/retention.
+func (c *Chain) registerSnapshotFile(data []byte, cause string) (*store.SnapshotRow, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty snapshot payload")
+	}
+	// validate before storing: same decode rules as restoreSnapshotBytes
+	gz, err := gzip.NewReader(strings.NewReader(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("snapshot corrupt: %w", err)
+	}
+	defer gz.Close()
+	var probe struct {
+		Bookmarks []*store.Bookmark `json:"bookmarks"`
+	}
+	if err := json.NewDecoder(gz).Decode(&probe); err != nil {
+		return nil, fmt.Errorf("snapshot decode: %w", err)
+	}
+
+	id, err := store.NewUUID()
+	if err != nil {
+		return nil, err
+	}
+	name := fmt.Sprintf("snapshot-%s-%s.json.gz", time.Now().Format("20060102-150405"), id[:8])
+	if err := os.WriteFile(filepath.Join(c.SnapshotDir, name), data, 0o600); err != nil {
+		return nil, err
+	}
+	row := &store.SnapshotRow{ID: id, CreatedAt: store.Now(), Size: int64(len(data)), File: name, Cause: cause}
+	if err := c.Store.InsertSnapshot(row); err != nil {
+		_ = os.Remove(filepath.Join(c.SnapshotDir, name))
+		return nil, err
+	}
+	return row, nil
+}
+
+// restoreSnapshotBytes gunzips + applies a snapshot dump (shared by
+// RestoreSnapshot and RestoreSnapshotFile).
+func (c *Chain) restoreSnapshotBytes(data []byte, deviceID string) error {
 	gz, err := gzip.NewReader(strings.NewReader(string(data)))
 	if err != nil {
 		return fmt.Errorf("snapshot corrupt: %w", err)

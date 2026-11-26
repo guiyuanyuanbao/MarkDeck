@@ -235,6 +235,7 @@ async function takeSnapshot() {
 }
 
 const restoring = ref(false)
+const snapUploadEl = ref<HTMLInputElement | null>(null)
 async function restoreSnap(s: Snapshot) {
   if (restoring.value) return
   restoring.value = true
@@ -249,6 +250,35 @@ async function restoreSnap(s: Snapshot) {
     if (e !== 'cancel' && e?.message) ElMessage.error('恢复失败: ' + e.message)
   } finally {
     restoring.value = false
+  }
+}
+
+// upload a previously downloaded snapshot file (.json.gz) and restore it
+async function uploadSnapshotFile(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!file.name.endsWith('.json.gz') && !file.name.endsWith('.gz')) {
+    ElMessage.error('请选择快照文件（.json.gz）')
+    input.value = ''
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `导入并恢复快照「${file.name}」？\n当前状态会先自动备份（pre-restore 快照）。`,
+      '导入快照', { type: 'warning' })
+  } catch {
+    input.value = ''
+    return
+  }
+  try {
+    await toolsApi.uploadSnapshot(file)
+    ElMessage.success('快照已导入并恢复，所有设备将自动同步')
+    loadAll()
+  } catch (e: any) {
+    ElMessage.error('导入失败: ' + (e?.message || '文件无法解析'))
+  } finally {
+    input.value = ''
   }
 }
 </script>
@@ -409,7 +439,17 @@ async function restoreSnap(s: Snapshot) {
           备份快照
           <span class="section-card-sub">每天自动快照，保留最近 30 份</span>
         </h2>
-        <el-button type="primary" @click="takeSnapshot">立即创建快照</el-button>
+        <div class="inline-row">
+          <el-button type="primary" @click="takeSnapshot">立即创建快照</el-button>
+          <el-button @click="snapUploadEl?.click()">导入快照文件…</el-button>
+          <input
+            ref="snapUploadEl"
+            type="file"
+            accept=".gz"
+            style="display: none"
+            @change="uploadSnapshotFile"
+          >
+        </div>
       </div>
       <div v-if="snapshots.length" class="data-list">
         <div v-for="s in snapshots" :key="s.id" class="data-row">
