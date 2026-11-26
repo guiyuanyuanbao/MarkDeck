@@ -10,7 +10,6 @@ import (
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/auth"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
-	"github.com/guiyuanyuanbao/MarkDeck/server/internal/sync"
 )
 
 // Register mounts all routes on mux, including the WebSocket endpoint.
@@ -403,5 +402,3 @@ func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
-
-var _ = sync.NewHub

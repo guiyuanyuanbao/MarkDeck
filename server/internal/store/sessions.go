@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"strings"
 )
 
@@ -211,5 +210,3 @@ func s2i(s string) int64 {
 	}
 	return n
 }
-
-var _ = sql.ErrNoRows

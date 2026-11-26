@@ -98,9 +98,8 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 					stack = stack[:len(stack)-1]
 				}
 			case "h3":
-				txt := pendingText(tk)
 				if len(stack) > 0 {
-					f := &Node{Title: firstNonEmpty(pendingH3, txt), AddDate: pendingAdd, toolbarFolderAttr: h3Toolbar}
+					f := &Node{Title: firstNonEmpty(pendingH3, ""), AddDate: pendingAdd, toolbarFolderAttr: h3Toolbar}
 					h3Toolbar = false
 					// folder node: attach to current parent, push as new context
 					parent := stack[len(stack)-1]
@@ -109,16 +108,15 @@ func ParseNetscapeHTML(data []byte) (*Node, error) {
 				}
 			}
 		case html.TextToken:
-			// h3 text arrives here before </h3>; stash it
+			// h3 text arrives here before </h3>; stash it. Parser-local (was a
+			// package global — concurrent imports raced on it).
 			trimmed := strings.TrimSpace(tk.Token().Data)
 			if trimmed != "" && pendingH3 == "" {
 				// only meaningful inside h3; nextText path covers <a> text
-				h3Pending = trimmed
+				pendingH3 = trimmed
 			}
 		}
 	}
-	// close: any folders pushed but never popped still counted in root
-	_ = depthDL
 	unwrapBrowserRoots(root)
 	return root, nil
 }
@@ -199,14 +197,6 @@ func isBrowserOtherWrapper(n *Node) bool {
 		return true
 	}
 	return false
-}
-
-var h3Pending string
-
-func pendingText(tk *html.Tokenizer) string {
-	txt := h3Pending
-	h3Pending = ""
-	return txt
 }
 
 func nextText(tk *html.Tokenizer) string {

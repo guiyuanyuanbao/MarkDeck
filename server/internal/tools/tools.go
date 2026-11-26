@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -162,12 +163,15 @@ func statusStr(code int) string {
 
 // recordDeadLink writes the check outcome to the dead_links table (replaces
 // the old _dead:/_checked: pseudo-tags that polluted the user's tag list).
+// Write failures are intentionally non-fatal — a scan must not abort because
+// one row could not be recorded — but they are logged for diagnosis.
 func recordDeadLink(s *store.Store, bookmarkID, status string) {
-	_, err := s.DB.Exec(`INSERT INTO dead_links(bookmark_id, status, checked_at)
+	if _, err := s.DB.Exec(`INSERT INTO dead_links(bookmark_id, status, checked_at)
 		VALUES(?,?,?)
 		ON CONFLICT(bookmark_id) DO UPDATE SET status=excluded.status, checked_at=excluded.checked_at`,
-		bookmarkID, status, store.Now())
-	_ = err
+		bookmarkID, status, store.Now()); err != nil {
+		log.Printf("recordDeadLink %s: %v", bookmarkID, err)
+	}
 }
 
 // PurgeLegacyDeadTags strips the old _dead:/_checked: pseudo-tags from every
@@ -580,7 +584,6 @@ func (c *Chain) MergeDuplicate(keepID string, removeIDs []string) error {
 	if c.Broadcast != nil {
 		c.Broadcast(0)
 	}
-	_ = keep
 	return nil
 }
 

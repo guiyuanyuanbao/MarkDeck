@@ -1,7 +1,6 @@
 package store
 
 import (
-	"os"
 	"path/filepath"
 )
 
@@ -138,5 +137,3 @@ func (s *Store) RestoreFromDump(rows []*Bookmark, deviceID string) error {
 	}
 	return tx.Commit()
 }
-
-var _ = os.Getenv

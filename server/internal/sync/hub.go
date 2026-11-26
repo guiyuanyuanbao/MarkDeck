@@ -4,7 +4,6 @@
 package sync
 
 import (
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -134,5 +133,3 @@ func itoa(v int64) string {
 	}
 	return string(buf[i:])
 }
-
-var _ = log.Println

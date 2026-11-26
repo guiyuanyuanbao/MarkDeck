@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -316,5 +315,3 @@ func normMigrateURL(raw string) string {
 	raw = strings.TrimSpace(strings.ToLower(raw))
 	return strings.TrimRight(raw, "/")
 }
-
-var _ = sql.ErrNoRows // keep import if helpers change
