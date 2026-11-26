@@ -323,8 +323,11 @@ type RestoreOpts struct {
 // live ancestors become the anchor; tombstoned ancestors are revived as empty
 // shells (their own subtrees stay tombstoned); purged ancestors — whose title
 // and parent were wiped by Purge — are unrecoverable, so the chain re-roots
-// at the top level. When the anchor folder already has a live folder with the
-// same name, the item merges into it (folders only; URLs may share a name).
+// at the top level. When a live folder with the same name already exists at
+// the anchor — for the restored item itself as well as for shell-revived
+// ancestors — the folder merges into it: the twin's id becomes the subtree
+// root's parent and the original folder row stays tombstoned (URLs may share
+// a name, so they never merge).
 //
 // Revived rows keep their ids: restoring siblings whose shared ancestors were
 // shell-revived reuses the same rows, so no duplicate folders can appear.
@@ -353,9 +356,22 @@ func (s *Store) RestoreWithPath(id string, at int64, deviceID string, opts Resto
 		}
 		anchor = *opts.ParentID
 	} else if cur.ParentID != "" {
-		anchor, err = s.ensureLiveAncestor(cur.ParentID, cur.Type, at, deviceID)
+		anchor, err = s.ensureLiveAncestor(cur.ParentID, at, deviceID)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	// same-name merge for the restored item itself: a live twin folder under
+	// the anchor absorbs the subtree and the original row stays tombstoned
+	// (both for pinned and rebuilt anchors; a live parent can never hold a
+	// live same-name twin of a trashed child, so the in-place case is
+	// unaffected in practice)
+	if cur.Type == "folder" {
+		if twin, err := s.findSameNameFolder(anchor, cur.Title, cur.ID); err != nil {
+			return nil, err
+		} else if twin != "" {
+			return s.mergeIntoTwin(id, twin, at, deviceID)
 		}
 	}
 
@@ -386,8 +402,17 @@ func (s *Store) RestoreWithPath(id string, at int64, deviceID string, opts Resto
 			}
 		}
 	} else {
-		// single row (or folder shell): revive just this row
+		// single row (or folder shell): revive just this row, appended after
+		// the anchor's current children (a merged/re-rooted stale position
+		// would collide with foreign siblings)
+		pos, err := maxPositionTx(tx, anchor)
+		if err != nil {
+			return nil, err
+		}
 		if err := reviveRow(tx, id, anchor, at, deviceID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`UPDATE bookmarks SET position=? WHERE id=?`, pos+1, id); err != nil {
 			return nil, err
 		}
 	}
@@ -397,58 +422,131 @@ func (s *Store) RestoreWithPath(id string, at int64, deviceID string, opts Resto
 	return s.Get(id)
 }
 
+// mergeIntoTwin revives the tombstoned subtree of folder id under the live
+// twin folder, re-rooting the subtree's TOP-LEVEL tombstoned children to the
+// twin while leaving the original folder row itself tombstoned (it stays in
+// the trash as an empty shell and can be purged later). Rows that are already
+// live — e.g. individually restored siblings — are left untouched.
+func (s *Store) mergeIntoTwin(id, twinID string, at int64, deviceID string) (*Bookmark, error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	kids, err := childrenTx(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	for i, k := range kids {
+		// direct children re-attach to the twin; deeper descendants keep
+		// their own parents. Live children (restored earlier) are NOT moved.
+		if k.DeletedAt == 0 {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, parent_id=?, position=?, updated_at=?, device_id=? WHERE id=? AND deleted_at > 0`,
+			twinID, float64(i)+1, at, deviceID, k.ID); err != nil {
+			return nil, err
+		}
+		// deeper descendants: revive the whole sub-tree under this child
+		ids, err := subtreeIDsTx(tx, k.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, bid := range ids[1:] { // [0] is k itself, already revived
+			if _, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, updated_at=?, device_id=? WHERE id=? AND deleted_at > 0`,
+				at, deviceID, bid); err != nil {
+				return nil, err
+			}
+		}
+		if _, err := bumpChange(tx, k.ID); err != nil {
+			return nil, err
+		}
+	}
+	// the original folder row stays tombstoned — bump it so devices learn
+	// its children moved
+	if _, err := tx.Exec(`UPDATE bookmarks SET updated_at=?, device_id=? WHERE id=?`, at, deviceID, id); err != nil {
+		return nil, err
+	}
+	if _, err := bumpChange(tx, id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.Get(twinID)
+}
+
+// childrenTx returns all rows (live and tombstoned) whose parent is id,
+// ordered like Children does.
+func childrenTx(tx *sql.Tx, parentID string) ([]*Bookmark, error) {
+	return queryListTx(tx, `SELECT `+scanCols+` FROM bookmarks
+		WHERE parent_id = ? ORDER BY position, created_at`, parentID)
+}
+
 // ensureLiveAncestor walks the parent chain upward from pid and returns the
 // id of the live row the caller should re-attach under ("" = root). Tombstoned
 // ancestors are shell-revived in place (their own subtrees stay tombstoned);
 // purged ancestors — whose title and parent Purge wiped — break the chain and
-// re-root it at the top level. Must run OUTSIDE a tx (uses MaxPosition).
-func (s *Store) ensureLiveAncestor(pid, childType string, at int64, deviceID string) (string, error) {
-	for guard := 0; pid != "" && guard < 100; guard++ {
-		p, err := s.Get(pid)
-		if err != nil || p.Purged {
-			// chain broken beyond recovery — anchor at the top level
-			return "", nil
-		}
-		if p.DeletedAt == 0 {
-			return pid, nil // live ancestor: anchor found
-		}
-		// tombstoned ancestor. Its own parent decides where it re-attaches;
-		// resolve that first (recursion is depth-bounded by the chain length).
-		grandAnchor, err := s.ensureLiveAncestor(p.ParentID, "folder", at, deviceID)
-		if err != nil {
-			return "", err
-		}
-		// same-name merge: if the grand anchor already holds a live folder
-		// with this name (and it isn't the row itself), merge into it and
-		// leave the original row tombstoned
+// re-root it at the top level. depth caps pathological chains (corrupted
+// parent cycles) at 100 levels, re-rooting at the top instead of looping.
+// Must run OUTSIDE a tx (uses MaxPosition).
+func (s *Store) ensureLiveAncestor(pid string, at int64, deviceID string) (string, error) {
+	return s.ensureLiveAncestorDepth(pid, at, deviceID, 0)
+}
+
+func (s *Store) ensureLiveAncestorDepth(pid string, at int64, deviceID string, depth int) (string, error) {
+	if depth > 100 {
+		// pathological chain (cycle or absurd depth) — re-root at the top
+		return "", nil
+	}
+	if pid == "" {
+		return "", nil
+	}
+	p, err := s.Get(pid)
+	if err != nil || p.Purged {
+		// chain broken beyond recovery — anchor at the top level
+		return "", nil
+	}
+	if p.DeletedAt == 0 {
+		return pid, nil // live ancestor: anchor found
+	}
+	// tombstoned ancestor. Its own parent decides where it re-attaches;
+	// resolve that first (recursion is depth-capped above).
+	grandAnchor, err := s.ensureLiveAncestorDepth(p.ParentID, at, deviceID, depth+1)
+	if err != nil {
+		return "", err
+	}
+	// same-name merge: if the grand anchor already holds a live folder
+	// with this name (and it isn't the row itself), merge into it and
+	// leave the original row tombstoned
+	if p.Title != "" {
 		if twin, err := s.findSameNameFolder(grandAnchor, p.Title, p.ID); err != nil {
 			return "", err
 		} else if twin != "" {
 			return twin, nil
 		}
-		// shell-revive p under grandAnchor — p becomes the caller's anchor
-		pos, err := s.MaxPosition(grandAnchor)
-		if err != nil {
-			return "", err
-		}
-		tx, err := s.DB.Begin()
-		if err != nil {
-			return "", err
-		}
-		if err := reviveRow(tx, p.ID, grandAnchor, at, deviceID); err != nil {
-			tx.Rollback()
-			return "", err
-		}
-		if _, err := tx.Exec(`UPDATE bookmarks SET position=? WHERE id=?`, pos+1, p.ID); err != nil {
-			tx.Rollback()
-			return "", err
-		}
-		if err := tx.Commit(); err != nil {
-			return "", err
-		}
-		return p.ID, nil
 	}
-	return pid, nil
+	// shell-revive p under grandAnchor — p becomes the caller's anchor
+	pos, err := s.MaxPosition(grandAnchor)
+	if err != nil {
+		return "", err
+	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return "", err
+	}
+	if err := reviveRow(tx, p.ID, grandAnchor, at, deviceID); err != nil {
+		tx.Rollback()
+		return "", err
+	}
+	if _, err := tx.Exec(`UPDATE bookmarks SET position=? WHERE id=?`, pos+1, p.ID); err != nil {
+		tx.Rollback()
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return p.ID, nil
 }
 
 // findSameNameFolder returns the id of a live folder named title directly
@@ -473,6 +571,8 @@ func (s *Store) findSameNameFolder(parentID, title, excludeID string) (string, e
 
 // reviveRow clears the tombstone of one row and re-parents it. Position is
 // assigned by the caller when needed (maxPositionTx/MaxPosition + 1).
+// Rows already revived by a concurrent restore are a no-op success (batch
+// idempotency); purged rows still fail.
 func reviveRow(tx *sql.Tx, id, parentID string, at int64, deviceID string) error {
 	res, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, parent_id=?, updated_at=?, device_id=? WHERE id=? AND deleted_at > 0`,
 		parentID, at, deviceID, id)
@@ -480,7 +580,18 @@ func reviveRow(tx *sql.Tx, id, parentID string, at int64, deviceID string) error
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("row %s is not restorable (live or purged)", id)
+		// lost a race to a concurrent restore, or the row is purged:
+		// re-read and classify. Already-live = success (idempotent no-op,
+		// no change-log bump); purged = real failure.
+		row := tx.QueryRow(`SELECT purged FROM bookmarks WHERE id = ?`, id)
+		var purged bool
+		if err := row.Scan(&purged); err != nil {
+			return err
+		}
+		if purged {
+			return fmt.Errorf("row %s is not restorable (purged)", id)
+		}
+		return nil // already live — nothing to do
 	}
 	_, err = bumpChange(tx, id)
 	return err

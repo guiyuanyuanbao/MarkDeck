@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // rp restores via RestoreWithPath with default opts (original path, whole tree).
@@ -409,4 +410,155 @@ func TestRestoreWithPathGuardDepth(t *testing.T) {
 		t.Fatalf("url not restored: %+v", b)
 	}
 	// chain beyond guard re-roots; no hang, no panic
+}
+
+// ---- audit-fix tests (round 2) ----
+
+// P0 fix: restoring a FOLDER whose anchor already holds a same-name live
+// twin must merge into the twin, not duplicate it.
+func TestRestoreWithPathFolderSelfMerge(t *testing.T) {
+	s := newTestStore(t)
+	orig := seed(s, "", "folder", "Work", "")
+	_ = seed(s, orig.ID, "url", "Go", "https://go.dev")
+	trashTree(s, orig.ID)
+
+	twin := seed(s, "", "folder", "Work", "")
+	_ = seed(s, twin.ID, "url", "Rust", "https://rust.example")
+
+	_ = rp(s, orig.ID) // folder restore with children — merges into twin
+	// the original row must stay tombstoned (empty shell in trash)
+	row, _ := s.Get(orig.ID)
+	if row.DeletedAt == 0 {
+		t.Fatal("original folder row should stay tombstoned after merge")
+	}
+	// twin absorbed the tombstoned child
+	kids, _ := s.Children(twin.ID)
+	titles := map[string]int{}
+	for _, k := range kids {
+		titles[k.Title]++
+	}
+	if titles["Go"] != 1 || titles["Rust"] != 1 {
+		t.Fatalf("twin children wrong: %v", titles)
+	}
+	// exactly ONE live Work at the top level
+	top := liveTitles(s, "")
+	n := 0
+	for _, title := range top {
+		if title == "Work" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("top-level Work folders = %d, want 1", n)
+	}
+	if got := trashCount(s); got != 1 {
+		t.Fatalf("trash = %d, want 1 (the shell)", got)
+	}
+}
+
+// P0 corollary: after an ancestor MERGED into a twin (its row still
+// tombstoned), restoring that ancestor row directly must also merge into
+// the twin instead of duplicating it.
+func TestRestoreWithPathMergedAncestorRowAlsoMerges(t *testing.T) {
+	s := newTestStore(t)
+	orig := seed(s, "", "folder", "Work", "")
+	child := seed(s, orig.ID, "url", "Go", "https://go.dev")
+	trashTree(s, orig.ID)
+	twin := seed(s, "", "folder", "Work", "")
+
+	// child merges into twin (ancestor merge path in ensureLiveAncestor)
+	if b := rp(s, child.ID); b.ParentID != twin.ID {
+		t.Fatalf("child parent = %q, want twin", b.ParentID)
+	}
+	// now restore the ancestor row itself — must merge into the twin (its
+	// children already live there, so it revives nothing) instead of
+	// duplicating. mergeIntoTwin returns the twin row.
+	b2 := rp(s, orig.ID)
+	if b2.ID != twin.ID {
+		t.Fatalf("ancestor restore returned %q, want the twin row", b2.ID)
+	}
+	top := liveTitles(s, "")
+	n := 0
+	for _, title := range top {
+		if title == "Work" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("top-level Work folders = %d, want 1", n)
+	}
+}
+
+// P1 fix: single-row restore assigns a fresh position instead of keeping a
+// stale one. Trash a child, add live siblings to the parent, then pin the
+// child back to the parent — its old position (1) must not collide.
+func TestRestoreWithPathSingleRowGetsFreshPosition(t *testing.T) {
+	s := newTestStore(t)
+	f := seed(s, "", "folder", "Work", "")
+	child := seed(s, f.ID, "url", "Go", "https://go.dev")
+	trashTree(s, child.ID)
+	// the parent stays live; fill it with fresh siblings (positions 2..3)
+	_ = seed(s, f.ID, "url", "New1", "https://n1.example")
+	_ = seed(s, f.ID, "url", "New2", "https://n2.example")
+
+	// raw store.Create keeps Position 0 unless set; give siblings 2 and 3
+	if _, err := s.DB.Exec(`UPDATE bookmarks SET position=3 WHERE title='New1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`UPDATE bookmarks SET position=2 WHERE title='New2'`); err != nil {
+		t.Fatal(err)
+	}
+
+	target := f.ID
+	b, err := s.RestoreWithPath(child.ID, Now(), "test", RestoreOpts{ParentID: &target, IncludeChildren: true})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if b.Position <= 3 {
+		t.Fatalf("restored row kept stale position %v, want > existing max (3)", b.Position)
+	}
+}
+
+// P1 fix: restoring the same id twice concurrently (or in immediate
+// sequence) is a no-op success — the loser of the race must not fail.
+func TestRestoreWithPathRaceLoserSucceeds(t *testing.T) {
+	s := newTestStore(t)
+	b := seed(s, "", "url", "Go", "https://go.dev")
+	trashTree(s, b.ID)
+	_ = rp(s, b.ID)
+	// second restore after the row is live: no error (idempotent)
+	b2, err := s.RestoreWithPath(b.ID, Now(), "test", RestoreOpts{IncludeChildren: true})
+	if err != nil {
+		t.Fatalf("second restore should be a no-op success, got %v", err)
+	}
+	if b2.ID != b.ID {
+		t.Fatal("second restore returned a different row")
+	}
+}
+
+// P1 fix: the depth guard is real — a corrupted parent cycle re-roots at
+// the top level instead of looping forever or anchoring under a tombstone.
+func TestRestoreWithPathCycleReRoots(t *testing.T) {
+	s := newTestStore(t)
+	f1 := seed(s, "", "folder", "A", "")
+	f2 := seed(s, f1.ID, "folder", "B", "")
+	url := seed(s, f2.ID, "url", "Deep", "https://deep.example")
+	trashTree(s, f1.ID)
+	// corrupt: make B's parent point back to itself (cycle)
+	if _, err := s.DB.Exec(`UPDATE bookmarks SET parent_id=? WHERE id=?`, f2.ID, f2.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.RestoreWithPath(url.ID, Now(), "test", RestoreOpts{IncludeChildren: true})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("cycle restore errored: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restore hung on a corrupted parent cycle")
+	}
 }

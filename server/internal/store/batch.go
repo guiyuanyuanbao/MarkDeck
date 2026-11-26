@@ -251,6 +251,47 @@ func getBookmarkTx(tx *sql.Tx, id string) (*Bookmark, error) {
 	return scanBookmark(row.Scan)
 }
 
+// queryListTx is queryList bound to an open transaction (tags included).
+func queryListTx(tx *sql.Tx, q string, args ...any) ([]*Bookmark, error) {
+	rows, err := tx.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Bookmark
+	for rows.Next() {
+		b, err := scanBookmark(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, b := range out {
+		b.Tags = loadTagsTx(tx, b.ID)
+	}
+	return out, nil
+}
+
+// loadTagsTx is loadTags bound to an open transaction.
+func loadTagsTx(tx *sql.Tx, id string) []string {
+	rows, err := tx.Query(`SELECT tag FROM bookmark_tags WHERE bookmark_id = ? ORDER BY tag`, id)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if rows.Scan(&t) == nil {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func insertBookmarkTx(tx *sql.Tx, b *Bookmark) error {
 	_, err := tx.Exec(`INSERT INTO bookmarks
 		(id, parent_id, type, title, url, note, favorite, archived, position,
