@@ -18,3 +18,4 @@ data/
 *.log
 .zcode/
 extension/tests/e2e/fixtures/user-bookmarks.html
+extension/dist/background.test.mjs
