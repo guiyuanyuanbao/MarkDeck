@@ -29,8 +29,7 @@ const trashById = ref<Map<string, Bookmark>>(new Map())
 // live folder ids, to detect "original parent is trashed" (needs path rebuild)
 const liveIds = ref<Set<string>>(new Set())
 
-const single = computed(() => pending.value.length === 1 ? pending.value[0] : null)
-const isFolder = computed(() => pending.value.length === 1 && pending.value[0].type === 'folder')
+const hasFolder = computed(() => pending.value.some((b) => b.type === 'folder'))
 
 // path label of the original parent, e.g. 大文件夹/嵌套 — resolved from
 // trash rows + live tree names (trashMap covers trashed ancestors)
@@ -54,7 +53,7 @@ const origPaths = computed(() => {
       chain.unshift(row.title || '(未命名)')
       p = row.parentId
     }
-    if (!p) chain.unshift('根目录')
+    if (!p && !chain.length) chain.unshift('根目录')
     out.push({
       id: item.parentId,
       label: chain.join(' / '),
@@ -67,11 +66,11 @@ const origPaths = computed(() => {
 const origLabel = computed(() => origPaths.value[0]?.label || '根目录')
 const needsRebuild = computed(() => origPaths.value.some((o) => o.needsRebuild))
 const subtreeCount = computed(() => {
-  const item = single.value
-  if (!item || item.type !== 'folder') return 0
-  // count tombstoned descendants from the trash rows
+  // count tombstoned descendants of every pending folder (batch: sum)
+  const roots = pending.value.filter((b) => b.type === 'folder').map((b) => b.id)
+  if (!roots.length) return 0
   let n = 0
-  let frontier = [item.id]
+  let frontier = roots
   let guard = 0
   while (frontier.length && guard++ < 10000) {
     const next: string[] = []
@@ -111,7 +110,12 @@ async function open(items: Bookmark[], trashRows: Bookmark[]) {
   // target null = "original location" (server rebuilds deleted paths);
   // '' = pinned root; a folder id = pinned folder. Default to original.
   target.value = null
-  await loadFolders()
+  try {
+    await loadFolders()
+  } catch (e: any) {
+    ElMessage.error('恢复目标加载失败: ' + e.message)
+    return
+  }
   // preselect the original location ONLY when it is a live folder
   if (items.length === 1 && items[0].parentId && liveIds.value.has(items[0].parentId)) {
     target.value = items[0].parentId
@@ -198,7 +202,7 @@ defineExpose({ open })
     </div>
 
     <!-- include-children (folders only) -->
-    <div v-if="isFolder && subtreeCount > 0" class="rd-children">
+    <div v-if="hasFolder" class="rd-children">
       <el-checkbox v-model="includeChildren">
         同时恢复其子项（{{ subtreeCount }} 项）
       </el-checkbox>

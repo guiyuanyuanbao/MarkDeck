@@ -31,23 +31,30 @@ const currentRows = computed(() =>
     : trash.value.filter((b) => b.parentId === currentFolder.value)
 )
 
-// direct + subtree tombstone counts per folder row (含 N 项 badge)
-function subtreeCount(id: string): number {
-  let n = 0
-  let frontier = [id]
-  let guard = 0
-  while (frontier.length && guard++ < 10000) {
-    const next: string[] = []
-    for (const row of trash.value) {
-      if (frontier.includes(row.parentId)) { n++; next.push(row.id) }
-    }
-    frontier = next
-  }
-  return n
-}
+// subtree tombstone counts per folder row (含 N 项 badge): one children-map
+// build + a reverse accumulation pass instead of a BFS per folder
 const countCache = computed(() => {
+  const kidsOf = new Map<string, string[]>()
+  for (const b of trash.value) {
+    if (!kidsOf.has(b.parentId)) kidsOf.set(b.parentId, [])
+    kidsOf.get(b.parentId)!.push(b.id)
+  }
   const m = new Map<string, number>()
-  for (const b of trash.value) if (b.type === 'folder') m.set(b.id, subtreeCount(b.id))
+  // deepest-first isn't known without depths; recursive memoized count
+  const count = (id: string, stack: Set<string>): number => {
+    const cached = m.get(id)
+    if (cached !== undefined) return cached
+    if (stack.has(id)) return 0 // corrupted cycle guard
+    stack.add(id)
+    let n = 0
+    for (const cid of kidsOf.get(id) || []) {
+      n += 1 + count(cid, stack)
+    }
+    stack.delete(id)
+    m.set(id, n)
+    return n
+  }
+  for (const b of trash.value) if (b.type === 'folder') count(b.id, new Set())
   return m
 })
 const countOf = (id: string) => countCache.value.get(id) ?? 0
@@ -143,7 +150,9 @@ function liveParentId(id: string): string {
 }
 // path relative to the browsed folder (for the 原位置 column inside a level)
 function relPath(pid: string): string {
-  if (pid === currentFolder.value) return '本层'
+  // during global search the browsed folder itself can appear in results —
+  // show its real parent path, not a misleading 本层
+  if (pid === currentFolder.value && !searching.value) return '本层'
   if (currentFolder.value === '') return origPath(pid)
   // walk up to currentFolder; if pid is not a descendant, fall back to full path
   const chain: string[] = []
@@ -171,9 +180,20 @@ async function load() {
     // shouldn't wipe the user's checked set
     const live = new Set(trash.value.map((b) => b.id))
     checked.value = new Set([...checked.value].filter((id) => live.has(id)))
-    // browsed folder vanished (restored/purged elsewhere): climb back up
+    // browsed folder vanished (restored/purged elsewhere): climb back up to
+    // the nearest ancestor that is still in the trash (browsable), else top.
+    // The vanished row itself is gone from trashById, so its old parent comes
+    // from the live tree hint — usable only if that parent is still trashed.
     if (currentFolder.value && !live.has(currentFolder.value)) {
-      currentFolder.value = ''
+      let p = trashById.value.get(currentFolder.value)?.parentId
+        || liveParentId(currentFolder.value) || ''
+      const seen = new Set([currentFolder.value])
+      while (p && !live.has(p) && !seen.has(p)) {
+        seen.add(p)
+        p = trashById.value.get(p)?.parentId || ''
+      }
+      // p is browsable only while it is still a tombstoned folder
+      currentFolder.value = p && live.has(p) ? p : ''
     }
     lastIndex = -1
   } catch (e: any) {
@@ -389,6 +409,16 @@ function blankMenu(ev: MouseEvent) {
 function selectedItems(): Bookmark[] {
   return filtered.value.filter((b) => checked.value.has(b.id))
 }
+// the batch bar acts on VISIBLE selected rows only — selections hidden by a
+// later filter/search change would be silently dropped, so count what the
+// buttons actually touch
+const actionableCount = computed(() => selectedItems().length)
+// a filter/search change that hides rows should drop those stale selections
+watch([searching, typeFilter, timeFilter, currentFolder], () => {
+  const visible = new Set(filtered.value.map((b) => b.id))
+  const clipped = new Set([...checked.value].filter((id) => visible.has(id)))
+  if (clipped.size !== checked.value.size) checked.value = clipped
+})
 
 // ---- keyboard (scoped to the content pane) ----
 function onKeydown(e: KeyboardEvent) {
@@ -480,7 +510,7 @@ function onKeydown(e: KeyboardEvent) {
             </nav>
             <h1 class="page-title">{{ searching ? '搜索结果' : (breadcrumbs[breadcrumbs.length - 1].title) }}</h1>
             <div class="page-sub">
-              {{ filtered.length }} 项<template v-if="!searching && currentFolder === '' && counts.total !== counts.all">（共 {{ counts.total }} 项）</template><template v-if="checked.size"> · 已选 {{ checked.size }} 项</template>
+              {{ filtered.length }} 项<template v-if="!searching && currentFolder === '' && counts.total !== counts.all">（共 {{ counts.total }} 项）</template><template v-if="actionableCount"> · 已选 {{ actionableCount }} 项</template>
             </div>
           </div>
           <div class="head-actions">
@@ -509,8 +539,8 @@ function onKeydown(e: KeyboardEvent) {
           </div>
         </div>
 
-        <div v-if="checked.size" class="batch-bar">
-          已选择 <b>&nbsp;{{ checked.size }}&nbsp;</b> 项
+        <div v-if="actionableCount" class="batch-bar">
+          已选择 <b>&nbsp;{{ actionableCount }}&nbsp;</b> 项
           <span class="spacer" />
           <el-button size="small" type="success" plain @click="openRestore(selectedItems())">恢复…</el-button>
           <el-button size="small" type="danger" plain :disabled="busy" @click="purge(selectedItems())">彻底删除</el-button>
