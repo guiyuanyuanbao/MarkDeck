@@ -552,12 +552,23 @@ async function connectWS(cfg: Config) {
 // captured the resulting state already; journaling our echoes would make
 // every applied row look locally-edited and churn forever).
 
-async function journalTouch(localId: string, extra?: { removed?: boolean; title?: string; url?: string }) {
+// journal writes must serialize against reconcileOnce's read-clear-write
+// of the SAME key: a concurrent journalTouch finishing between the
+// reconciler's read and its setTouch would be silently overwritten (the
+// touch entry vanishes → the next reconcile ADOPTS the node as if it
+// were server content → the user's pending create is swallowed).
+// pullChain is the shared serialization channel (reconciles already run
+// through it); journal writes enter the same chain.
+function journalTouch(localId: string, extra?: { removed?: boolean; title?: string; url?: string }) {
   if (reconciling) return
-  const t = await getTouch()
-  const prev = t[localId]
-  t[localId] = { at: Math.floor(Date.now() / 1000), ...extra, ...(prev?.removed ? { removed: true } : {}) }
-  await setTouch(t)
+  pullChain = pullChain
+    .then(async () => {
+      const t = await getTouch()
+      const prev = t[localId]
+      t[localId] = { at: Math.floor(Date.now() / 1000), ...extra, ...(prev?.removed ? { removed: true } : {}) }
+      await setTouch(t)
+    })
+    .then(() => undefined, () => undefined)
   scheduleReconcile('edit', 1200)
 }
 
@@ -609,14 +620,17 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         })
         const data = await resp.json()
         if (!resp.ok) throw new Error(data.error || 'pair failed')
-        // CRITICAL: wipe base + touch on every pairing. md_base described
+        // CRITICAL: wipe base on every pairing. md_base described
         // the PREVIOUS pairing's server lineage; keeping it against a new
         // (possibly emptied) server makes the reconcile read every stale
         // base entry as 'server deleted this row' and mass-delete the
         // browser's bookmarks — the wipe bug. A fresh pairing is a fresh
         // three-way identity: empty base ⇒ first reconcile adopts the
         // browser tree and pushes it (nothing is deleted).
-        await chrome.storage.local.remove([BASE_KEY, TOUCH_KEY])
+        // The TOUCH JOURNAL SURVIVES: it is the only record of pending
+        // offline edits — wiping it (re-pair after a token revocation)
+        // silently discarded edits that never reached the server.
+        await chrome.storage.local.remove([BASE_KEY])
         await saveConfigPatch({ server, token: data.token, deviceId: data.deviceId, rev: 0 })
         deviceIdCached = data.deviceId
         // first reconcile against an empty base = full adoption/import,
@@ -643,10 +657,15 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
       const r = await reconcileOnce('resync')
       sendResponse({ ok: r.ok, error: r.error })
     } else if (msg.type === 'forceResync') {
-      // last-resort recovery: wipe base + touch; the next reconcile is a
-      // full-adopt pass (URL/folder adoption binds onto the existing tree —
-      // this is now the SAME code path as a first pair, not special recovery)
-      await chrome.storage.local.remove([BASE_KEY, TOUCH_KEY])
+      // last-resort recovery: wipe base; the next reconcile is a full-adopt
+      // pass (URL/folder adoption binds onto the existing tree — this is
+      // now the SAME code path as a first pair, not special recovery).
+      // The TOUCH JOURNAL MUST SURVIVE: it is the only record of pending
+      // local edits that never reached the server — wiping it made the
+      // adoption pass overwrite those edits with server content (the
+      // user's offline rename silently reverted by the very tool meant
+      // to fix sync).
+      await chrome.storage.local.remove([BASE_KEY])
       cachedRoots = null
       const r = await reconcileOnce('forceResync')
       sendResponse({ ok: r.ok, error: r.error, ...flattenStats() })
@@ -772,7 +791,9 @@ async function deepDiag() {
 ;(globalThis as unknown as Record<string, unknown>).__markdeckWsDiag = wsDiag
 ;(globalThis as unknown as Record<string, unknown>).__markdeckDeepDiag = deepDiag
 ;(globalThis as unknown as Record<string, unknown>).__markdeckForceResync = async () => {
-  await chrome.storage.local.remove([BASE_KEY, TOUCH_KEY])
+  // base only — the touch journal carries pending offline edits that the
+  // adoption pass must push, never wipe
+  await chrome.storage.local.remove([BASE_KEY])
   cachedRoots = null
   return reconcileOnce('forceResync-hook')
 }
