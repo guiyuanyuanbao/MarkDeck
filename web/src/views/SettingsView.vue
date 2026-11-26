@@ -28,6 +28,14 @@ const newPw = ref('')
 const newPw2 = ref('')
 
 const devices = ref<Device[]>([])
+// the API's `online` flag is a snapshot at fetch time — a device that stops
+// syncing would sit on "● 在线" forever if nothing refetches. Derive it live
+// from lastSeen + the 1s tick instead (same 120s window as the server).
+const ONLINE_WINDOW = 120
+const liveDevices = computed(() => {
+  const now = Math.floor(nowTick.value / 1000)
+  return devices.value.map(d => ({ ...d, online: d.lastSeen > 0 && now - d.lastSeen <= ONLINE_WINDOW }))
+})
 const pairCode = ref('')
 const pairDeviceName = ref('')
 const proxyUrl = ref('')
@@ -50,10 +58,12 @@ onMounted(() => {
   // any revision ping (incl. the one broadcast when a device pairs) refreshes
   // the device list — no manual reload needed
   window.addEventListener('md:revision', onRevision)
-  // while a pairing code is live, poll so a freshly paired device shows up
-  // within seconds even without a WS ping
+  // while a pairing code is live, poll fast so a freshly paired device shows
+  // up within seconds even without a WS ping; otherwise a slow poll keeps
+  // lastSeen fresh (the online badge itself derives from the 1s tick)
   pollTimer = window.setInterval(() => {
-    if (pairCode.value && Date.now() < pairExpiry.value) loadDevices()
+    const pairing = pairCode.value && Date.now() < pairExpiry.value
+    if (pairing || Date.now() - lastDevicesFetch >= 30000) loadDevices()
   }, 3000)
   loadProxy()
 })
@@ -63,8 +73,10 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
 })
 let lastDeviceSig = ''
+let lastDevicesFetch = 0
 function onRevision() { loadDevices() }
 async function loadDevices() {
+  lastDevicesFetch = Date.now()
   try {
     const d = await authApi.devices()
     const list = d.devices || []
@@ -335,10 +347,10 @@ async function restoreSnap(s: Snapshot) {
 
       <div class="section-head">
         <h2 class="section-head-title">已配对设备</h2>
-        <span class="section-head-sub" v-if="devices.length">{{ devices.length }} 台</span>
+        <span class="section-head-sub" v-if="liveDevices.length">{{ liveDevices.length }} 台</span>
       </div>
-      <div v-if="devices.length" class="data-list">
-        <div v-for="d in devices" :key="d.id" class="data-row">
+      <div v-if="liveDevices.length" class="data-list">
+        <div v-for="d in liveDevices" :key="d.id" class="data-row">
           <div class="device-ico">
             <Icon name="laptop" :size="17" />
           </div>
