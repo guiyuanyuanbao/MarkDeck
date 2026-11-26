@@ -13,22 +13,26 @@ function repoVersion(): string {
   }
 }
 
-// Extension build: plain ESM outputs copied next to manifest.json.
+const entry = process.env.MD_ENTRY || 'background' // background | popup | options
+
+// Extension build: one self-contained ESM file per entry, copied next to
+// manifest.json. Entries are built SEPARATELY (npm run build loops
+// MD_ENTRY=x vite build) with codeSplitting:false — each output is fully
+// self-contained with no chunks/. MV3 service workers are loaded as one
+// file, and the E2E device-worker sandbox copies background.js alone: a
+// shared chunks/constants.js broke that harness the moment constants.ts
+// started being imported by two entries (rolldown emitted the shared chunk
+// automatically on the old single multi-input build).
 export default defineConfig({
+  publicDir: false, // public/ copied by copy-static on the background pass only
   build: {
     outDir: 'dist',
-    emptyOutDir: true,
+    emptyOutDir: entry === 'background', // first entry wipes, others append
     rollupOptions: {
-      input: {
-        background: resolve(__dirname, 'src/background.ts'),
-        popup: resolve(__dirname, 'src/popup.ts'),
-        options: resolve(__dirname, 'src/options.ts'),
-      },
+      input: resolve(__dirname, `src/${entry}.ts`),
       output: {
-        // flat names matching manifest.json (background.js, popup.js, options.js)
-        entryFileNames: '[name].js',
-        chunkFileNames: 'chunks/[name].js',
-        assetFileNames: 'assets/[name]',
+        entryFileNames: `${entry}.js`,
+        codeSplitting: false,
       },
     },
   },
@@ -36,6 +40,7 @@ export default defineConfig({
     {
       name: 'copy-static',
       closeBundle() {
+        if (entry !== 'background') return // last-writer copies public assets
         cpSync('public', 'dist', { recursive: true })
         // simple icon fallback if none provided
         if (!existsSync('dist/icon.png')) {
