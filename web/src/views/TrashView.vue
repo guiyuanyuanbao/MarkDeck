@@ -477,9 +477,6 @@ function onKeydown(e: KeyboardEvent) {
       <button v-if="scope === 'all' && currentFolder" class="tr-up-btn" @click="goUp">
         <Icon name="up" :size="13" /> 返回顶层
       </button>
-      <div class="tr-summary">
-        回收站内容不会自动清理，只有「彻底删除」才会真正移除数据。删除的文件夹可点开浏览，恢复时回到原位置（路径已删除会自动重建）。
-      </div>
     </div>
 
     <!-- content -->
@@ -547,11 +544,17 @@ function onKeydown(e: KeyboardEvent) {
 
       <!-- ==================== LIST VIEW ==================== -->
       <div v-if="viewMode === 'list'" class="bm-list">
-        <div class="bm-row" style="opacity: .75; border: none; padding-top: 4px; padding-bottom: 2px">
+        <!-- header row: mirrors the data-row column structure exactly
+             (avatar slot + enter-hint slot + orig + date + actions slot)
+             so columns align across folder/url rows -->
+        <div class="bm-row bm-row-head">
           <el-checkbox :model-value="allChecked" @change="toggleAll" />
-          <span style="flex: 1; font-size: 12px; color: var(--md-text-3)">标题</span>
-          <span style="width: 150px; font-size: 12px; color: var(--md-text-3); text-align: right">原位置</span>
-          <span style="width: 110px; font-size: 12px; color: var(--md-text-3); text-align: right">删除时间</span>
+          <div class="bm-avatar bm-avatar-head" />
+          <span class="bm-main bm-col-head">标题</span>
+          <span class="tr-enter-slot" />
+          <span class="tr-orig bm-col-head">原位置</span>
+          <span class="bm-date bm-col-head bm-date-wide">删除时间</span>
+          <div class="bm-actions bm-actions-head" />
         </div>
 
         <div
@@ -577,9 +580,9 @@ function onKeydown(e: KeyboardEvent) {
             </div>
             <div class="bm-url" v-if="b.type === 'url'">{{ b.url }}</div>
           </div>
-          <span v-if="b.type === 'folder'" class="tr-enter-hint">›</span>
+          <span class="tr-enter-slot">{{ b.type === 'folder' ? '›' : '' }}</span>
           <span class="tr-orig" :title="origPath(b.parentId)">{{ relPath(b.parentId) }}</span>
-          <span style="width: 110px; text-align: right; color: var(--md-text-3); font-size: 12.5px; flex-shrink: 0">{{ fmtDate(b.deletedAt) }}</span>
+          <span class="bm-date bm-date-wide">{{ fmtDate(b.deletedAt) }}</span>
           <div class="bm-actions">
             <button class="row-act success" title="恢复…" @click.stop="openRestore([b])">
               <span style="display:inline-flex"><Icon name="restore" :size="14" /></span>

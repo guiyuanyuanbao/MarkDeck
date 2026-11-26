@@ -137,6 +137,9 @@ func backgroundJobs(ctx context.Context, st *store.Store, chain *tools.Chain, am
 				log.Printf("session cleanup: %v", err)
 			}
 			chain.CleanupSnapshots()
+			// trash retention: purge rows past the configured window (no-op
+			// when retention is 0/never)
+			chain.EnforceTrashRetention(now)
 			// daily-ish snapshot: run when local hour is 3
 			if time.Now().Hour() == 3 {
 				if _, err := chain.TakeSnapshot("daily"); err != nil {

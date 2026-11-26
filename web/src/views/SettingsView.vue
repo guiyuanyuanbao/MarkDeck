@@ -234,6 +234,61 @@ async function takeSnapshot() {
   }
 }
 
+// ---- trash auto-purge retention ----
+// 0 = never; presets 1/7/30/90; custom value goes in the number input
+const retentionDays = ref(0)
+const retentionPreset = ref<'never' | '1' | '7' | '30' | '90' | 'custom'>('never')
+const retentionCustom = ref<number | null>(null)
+const retentionSaving = ref(false)
+const retentionPresets = [
+  { key: 'never', label: '永不', days: 0 },
+  { key: '1', label: '1 天', days: 1 },
+  { key: '7', label: '7 天', days: 7 },
+  { key: '30', label: '1 个月', days: 30 },
+  { key: '90', label: '3 个月', days: 90 },
+] as const
+
+async function loadRetention() {
+  try {
+    const r = await toolsApi.trashRetention()
+    retentionDays.value = r.days
+    const preset = retentionPresets.find((p) => p.days === r.days)
+    if (preset) {
+      retentionPreset.value = preset.key
+      retentionCustom.value = null
+    } else {
+      retentionPreset.value = 'custom'
+      retentionCustom.value = r.days
+    }
+  } catch { /* settings tab may not load on first paint */ }
+}
+
+async function saveRetention() {
+  let days: number
+  if (retentionPreset.value === 'custom') {
+    days = retentionCustom.value ?? 0
+    if (!Number.isFinite(days) || days < 0 || days > 3650 || (days !== 0 && days < 1)) {
+      ElMessage.error('自定义天数需为 1–3650 的整数（0/预设=永不）')
+      return
+    }
+  } else {
+    days = retentionPresets.find((p) => p.key === retentionPreset.value)!.days
+  }
+  retentionSaving.value = true
+  try {
+    const r = await toolsApi.setTrashRetention(days)
+    retentionDays.value = r.days
+    if (days === 0) ElMessage.success('已关闭自动清理')
+    else if (r.purged > 0) ElMessage.success(`已保存：自动清理 ${days} 天前的回收站内容（本次清理 ${r.purged} 项）`)
+    else ElMessage.success(`已保存：自动清理 ${days} 天前的回收站内容`)
+  } catch (e: any) {
+    ElMessage.error('保存失败: ' + (e?.message || '未知错误'))
+  } finally {
+    retentionSaving.value = false
+  }
+}
+loadRetention()
+
 const restoring = ref(false)
 const snapUploadEl = ref<HTMLInputElement | null>(null)
 async function restoreSnap(s: Snapshot) {
@@ -450,6 +505,48 @@ async function uploadSnapshotFile(ev: Event) {
             @change="uploadSnapshotFile"
           >
         </div>
+        <p class="field-hint">下载的快照文件可随时通过「导入快照文件」恢复（先自动备份当前状态）。</p>
+      </div>
+
+      <div class="section-card">
+        <h2 class="section-card-title">
+          <span class="sec-ico"><Icon name="trash" :size="16" /></span>
+          回收站自动清理
+          <span class="section-card-sub">超过保留期的回收站内容将被彻底删除（逐项清理，文件夹连同其内容）</span>
+        </h2>
+        <div class="retention-row">
+          <button
+            v-for="p in retentionPresets"
+            :key="p.key"
+            class="retention-opt"
+            :class="{ active: retentionPreset === p.key }"
+            @click="retentionPreset = p.key"
+          >{{ p.label }}</button>
+          <span
+            class="retention-opt"
+            :class="{ active: retentionPreset === 'custom' }"
+            role="button"
+            tabindex="0"
+            @click="retentionPreset = 'custom'"
+          >
+            自定义
+            <input
+              v-if="retentionPreset === 'custom'"
+              v-model.number="retentionCustom"
+              type="number"
+              min="1"
+              max="3650"
+              class="retention-input"
+              @click.stop
+            > 天
+          </span>
+        </div>
+        <div class="inline-row" style="margin-top: 12px">
+          <el-button type="primary" :loading="retentionSaving" @click="saveRetention">保存设置</el-button>
+          <span class="field-hint" style="margin: 0">
+            当前：{{ retentionDays === 0 ? '永不自动清理' : `自动清理 ${retentionDays} 天前的内容` }}。服务端每小时检查一次，保存后立即执行一轮。
+          </span>
+        </div>
       </div>
       <div v-if="snapshots.length" class="data-list">
         <div v-for="s in snapshots" :key="s.id" class="data-row">
@@ -477,6 +574,33 @@ async function uploadSnapshotFile(ev: Event) {
 .form-stack { display: flex; flex-direction: column; gap: 10px; max-width: 380px; }
 .inline-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .field-hint { color: var(--md-text-3); font-size: 12px; margin: 10px 0 0; line-height: 1.6; }
+/* trash retention: preset chips + inline custom-days input */
+.retention-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.retention-opt {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 16px;
+  border: 1px solid var(--md-border);
+  border-radius: 999px;
+  background: var(--md-surface);
+  color: var(--md-text-2);
+  font-size: 13px; font-family: inherit; font-weight: 600;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+  user-select: none;
+}
+.retention-opt:hover { color: var(--md-primary); border-color: var(--md-primary); }
+.retention-opt.active { background: var(--md-primary-soft); border-color: var(--md-primary); color: var(--md-primary); }
+.retention-input {
+  width: 64px;
+  padding: 2px 8px;
+  border: 1px solid var(--md-primary);
+  border-radius: 8px;
+  font-family: inherit; font-size: 13px;
+  color: var(--md-text);
+  background: #fff;
+  outline: none;
+}
+.retention-input:focus { box-shadow: 0 0 0 3px var(--md-primary-soft); }
 .status-pill { padding: 3px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
 .status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
 

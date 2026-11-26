@@ -174,4 +174,9 @@ export const toolsApi = {
   // upload a previously downloaded snapshot file (.json.gz) and restore it;
   // a protective snapshot of the current state is taken server-side first
   uploadSnapshot: (file: File) => uploadFile<Snapshot>('/api/snapshots/upload', file),
+  // trash auto-purge retention (0 = never): the hourly server job purges
+  // each tombstone past the window (folders take their whole subtree)
+  trashRetention: () => api.get<{ days: number }>('/api/trash/retention'),
+  setTrashRetention: (days: number) =>
+    api.post<{ days: number; purged: number }>('/api/trash/retention', { days }),
 }

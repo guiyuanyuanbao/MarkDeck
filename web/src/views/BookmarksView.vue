@@ -549,12 +549,14 @@ function goUp() {
         @drop="onListDrop"
         @dragover="dragging && browsing && $event.preventDefault()"
       >
-        <!-- header row -->
-        <div class="bm-row" style="opacity: .75; border: none; padding-top: 4px; padding-bottom: 2px">
+        <!-- header row: mirrors the data-row column structure exactly
+             (avatar slot + tags + date) so columns align -->
+        <div class="bm-row bm-row-head">
           <el-checkbox :model-value="allChecked" @change="toggleAll" />
-          <span style="flex: 1; font-size: 12px; color: var(--md-text-3)">标题</span>
-          <span style="width: 200px; font-size: 12px; color: var(--md-text-3); text-align: right">标签</span>
-          <span style="width: 96px; font-size: 12px; color: var(--md-text-3); text-align: right">添加日期</span>
+          <div class="bm-avatar bm-avatar-head" />
+          <span class="bm-main bm-col-head">标题</span>
+          <div class="bm-tags bm-tags-head"><span style="visibility:hidden">.</span></div>
+          <span class="bm-date bm-col-head">添加日期</span>
         </div>
 
         <template v-for="(b, idx) in list" :key="b.id">
@@ -595,7 +597,7 @@ function goUp() {
             <div class="bm-tags">
               <span v-for="t in (b.tags || [])" :key="t" class="bm-tag">{{ t }}</span>
             </div>
-            <span style="width: 96px; text-align: right; color: var(--md-text-3); font-size: 12.5px; flex-shrink: 0">{{ fmtDate(b.createdAt) }}</span>
+            <span class="bm-date">{{ fmtDate(b.createdAt) }}</span>
           </div>
         </template>
         <div v-if="dropLineIdx === list.length && list.length" class="drop-line" />
