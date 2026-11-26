@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MarkDeck 同步",
-  "version": "0.1.15",
+  "version": "0.1.17",
   "description": "MarkDeck 自托管书签同步服务配套插件：双向同步、离线可用、快速收藏。",
   "permissions": [
     "bookmarks",
@@ -31,9 +31,5 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  },
-  "host_permissions": [
-    "http://*/*",
-    "https://*/*"
-  ]
+  }
 }
