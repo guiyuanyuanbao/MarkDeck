@@ -1,8 +1,9 @@
 // Options page: server pairing + manual resync.
+import { CONFIG_KEY, TOUCH_KEY, STATUS_KEY, TIMEOUTS, apiBase, browserDisplayName } from './constants'
 
 const $ = ((id: string) => document.getElementById(id)!) as (id: string) => HTMLElement
 
-chrome.storage.local.get('md_config').then((st: any) => { const { md_config } = st;
+chrome.storage.local.get(CONFIG_KEY).then((st: any) => { const md_config = st[CONFIG_KEY];
   if (md_config?.server) ($('server') as HTMLInputElement).value = md_config.server
 })
 
@@ -26,7 +27,7 @@ $('pairBtn').onclick = async () => {
   msg.className = 'msg'
   msg.textContent = '① 正在连接服务器…'
   try {
-    const st = await fetch(server + '/api/auth/state', { signal: AbortSignal.timeout(8000) })
+    const st = await fetch(server + '/api/auth/state', { signal: AbortSignal.timeout(TIMEOUTS.stateProbe) })
     if (!st.ok) throw new Error('服务器响应异常 HTTP ' + st.status)
   } catch (e: any) {
     msg.className = 'msg err'
@@ -36,7 +37,7 @@ $('pairBtn').onclick = async () => {
   msg.textContent = '② 正在交换配对码…'
   const resp = await chrome.runtime.sendMessage({
     type: 'pair', server, code,
-    name: navigator.userAgent.includes('Edg') ? 'Edge 浏览器' : 'Chrome 浏览器',
+    name: browserDisplayName(),
   })
   if (resp?.ok) {
     msg.className = 'msg ok'; msg.textContent = '✓ 配对成功，首次同步已开始（书签栏内容将出现在管理页）'
@@ -62,11 +63,11 @@ $('resyncBtn').onclick = async () => {
   const badge = document.getElementById('versionBadge')
   if (badge) badge.textContent = 'v' + mine
 
-  const st: any = await chrome.storage.local.get('md_config')
-  const server = st.md_config?.server
+  const st: any = await chrome.storage.local.get(CONFIG_KEY)
+  const server = st[CONFIG_KEY]?.server
   if (!server) return
   try {
-    const r = await fetch(server.replace(/\/+$/, '') + '/api/extension/update', { signal: AbortSignal.timeout(8000) })
+    const r = await fetch(apiBase(server) + '/api/extension/update', { signal: AbortSignal.timeout(TIMEOUTS.stateProbe) })
     if (!r.ok) return
     const d = await r.json()
     if (!d.version || d.version === mine) return
@@ -169,7 +170,7 @@ async function runDiagnostics() {
   const fail = (why: string) => { if (!broken) broken = why }
 
   // 1. config exists?
-  const cfg = (await chrome.storage.local.get('md_config')).md_config as {
+  const cfg = (await chrome.storage.local.get(CONFIG_KEY))[CONFIG_KEY] as {
     server?: string; token?: string; rev?: number
   } | undefined
   if (!cfg?.token) {
@@ -198,13 +199,13 @@ async function runDiagnostics() {
     let reachable = false
     let serverRev = -1
     try {
-      const r = await fetch(cfg.server.replace(/\/+$/, '') + '/api/auth/state', { signal: AbortSignal.timeout(6000) })
+      const r = await fetch(cfg.server.replace(/\/+$/, '') + '/api/auth/state', { signal: AbortSignal.timeout(TIMEOUTS.stateProbe) })
       reachable = r.ok
     } catch { /* offline */ }
     if (reachable) {
       try {
         const pr = await fetch(cfg.server.replace(/\/+$/, '') + '/api/sync/status', {
-          headers: { Authorization: 'Bearer ' + cfg.token }, signal: AbortSignal.timeout(6000),
+          headers: { Authorization: 'Bearer ' + cfg.token }, signal: AbortSignal.timeout(TIMEOUTS.stateProbe),
         })
         if (pr.ok) serverRev = (await pr.json()).head
         row(true, '服务器可达')
@@ -229,13 +230,13 @@ async function runDiagnostics() {
     }
 
     // 5. pending local edits (touch journal replaces the old offline queue)
-    const tRaw = (await chrome.storage.local.get('md_touch')).md_touch || {}
+    const tRaw = (await chrome.storage.local.get(TOUCH_KEY))[TOUCH_KEY] || {}
     const q = Object.keys(tRaw).length
     if (q === 0) row(true, '待同步改动', '无')
     else row(null, '待同步改动', `${q} 条待对账`)
 
     // 6. WS realtime channel
-    const st = (await chrome.storage.local.get('md_status')).md_status
+    const st = (await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY]
     if (st === 'online') row(true, '实时通道 (WebSocket)')
     else if (st === 'disconnected') {
       row(false, '实时通道 (WebSocket)', '未连接')

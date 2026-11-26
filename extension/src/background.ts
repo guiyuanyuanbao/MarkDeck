@@ -15,9 +15,10 @@
 //   is the convergence guarantee when the MV3 service worker dies.
 
 import {
-  planSync, normBookmarkUrl, backoffDelay, detectDuplicateGroups,
+  planSync, normBookmarkUrl, backoffDelay, detectDuplicateGroups, resolveRootsFromTree,
   type ServerNode, type LocalNode, type Base, type TouchJournal, type SyncPlan,
 } from './reconcile'
+import { CONFIG_KEY, BASE_KEY, TOUCH_KEY, STATUS_KEY, LEGACY_KEYS, SYNC_ALARM } from './constants'
 
 interface Config {
   server: string
@@ -26,12 +27,7 @@ interface Config {
   rev: number
 }
 
-const CONFIG_KEY = 'md_config'
-const BASE_KEY = 'md_base'
-const TOUCH_KEY = 'md_touch'
-const ALARM = 'md-poll'
-// pre-0.1.0 keys — removed once on upgrade
-const LEGACY_KEYS = ['md_queue', 'md_local_nodes', 'md_id_map', 'md_l2s']
+const ALARM = SYNC_ALARM
 
 let reconciling = false
 let ws: WebSocket | null = null
@@ -75,18 +71,13 @@ async function setTouch(t: TouchJournal) {
 
 interface ResolvedRoots { barId: string; otherId: string }
 
-// Chromium invariant (Chrome AND Edge): root children[0] = bookmarks bar,
-// children[1] = other bookmarks (children[2] is Mobile bookmarks when
-// present — taking the last child once grabbed Mobile on Edge and silently
-// excluded 94 bookmarks). Titles are localized; never match on them.
-// Root ids are NOT fixed '1'/'2' — newer profiles assign GUID permanent ids.
+// Positional identification rules live in resolveRootsFromTree (reconcile.ts,
+// pure + unit-tested); this wrapper adds caching and the chrome.bookmarks IO.
 let cachedRoots: ResolvedRoots | null = null
 async function resolveRoots(): Promise<ResolvedRoots> {
   if (cachedRoots) return cachedRoots
   const tree = await chrome.bookmarks.getTree()
-  const kids = tree[0]?.children ?? []
-  if (kids.length < 2) throw new Error('bookmark tree has no bar/other roots')
-  cachedRoots = { barId: kids[0].id, otherId: kids[1].id }
+  cachedRoots = resolveRootsFromTree(tree)
   return cachedRoots
 }
 async function barRootId(): Promise<string> {
@@ -472,13 +463,13 @@ async function syncFavicons(nodes: ServerNode[], cfg: Config) {
 let statusCache: string | null = null
 async function setSyncStatus(status: string) {
   if (statusCache === null) {
-    statusCache = ((await chrome.storage.local.get('md_status')).md_status as string) || ''
+    statusCache = ((await chrome.storage.local.get(STATUS_KEY))[STATUS_KEY] as string) || ''
   }
   // 'unauthorized' (revoked token) must stay visible: the WS reconnect loop
   // keeps failing and its onclose would otherwise mask the real problem.
   if (status === 'disconnected' && statusCache === 'unauthorized') return
   statusCache = status
-  await chrome.storage.local.set({ md_status: status })
+  await chrome.storage.local.set({ [STATUS_KEY]: status })
   const badges: Record<string, { text: string; color: string }> = {
     online: { text: '', color: '#2e7d32' },
     disconnected: { text: '!', color: '#f5a623' },
@@ -650,9 +641,9 @@ chrome.runtime.onMessage.addListener((msg: any, _sender, sendResponse) => {
         sendResponse({ ok: false, error: e.message })
       }
     } else if (msg.type === 'status') {
-      const st = await chrome.storage.local.get(['md_status', CONFIG_KEY, TOUCH_KEY]) as any
+      const st = await chrome.storage.local.get([STATUS_KEY, CONFIG_KEY, TOUCH_KEY]) as any
       sendResponse({
-        status: st.md_status || 'unconfigured',
+        status: st[STATUS_KEY] || 'unconfigured',
         server: st[CONFIG_KEY]?.server || '',
         queued: Object.keys(st[TOUCH_KEY] || {}).length,
       })

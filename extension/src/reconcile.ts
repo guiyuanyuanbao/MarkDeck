@@ -911,3 +911,29 @@ export function detectDuplicateGroups(nodes: { id: string; title: string; url?: 
   for (const g of byKey.values()) if (g.count >= 2) out.push(g)
   return out.sort((a, b) => b.count - a.count)
 }
+
+// ---- root-id resolution (chrome adapter helper, kept pure for tests) ----
+
+export interface ResolvedRoots {
+  barId: string
+  otherId: string
+}
+
+/**
+ * Chromium invariant (Chrome AND Edge): root children[0] = bookmarks bar,
+ * children[1] = other bookmarks (children[2] is Mobile bookmarks when
+ * present — taking the last child once grabbed Mobile on Edge and silently
+ * excluded 94 bookmarks). Titles are localized; never match on them.
+ * Root ids are NOT fixed '1'/'2' — newer profiles assign GUID permanent ids.
+ * Throws when the profile exposes fewer than two roots (single-root or
+ * malformed tree): callers surface the error instead of syncing the wrong
+ * scope. Extracted from background.ts so the TESTS drive the real logic
+ * (roots.test.ts previously re-implemented these rules and could drift).
+ */
+export function resolveRootsFromTree(
+  tree: Array<{ id?: string; children?: Array<{ id: string; title?: string }> | null }>
+): ResolvedRoots {
+  const kids = tree[0]?.children ?? []
+  if (kids.length < 2) throw new Error('bookmark tree has no bar/other roots')
+  return { barId: kids[0].id, otherId: kids[1].id }
+}
