@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -129,8 +130,10 @@ func (a *API) handleDeadScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	go func() {
 		defer cancel()
+		// ScanDeadLinks does not log failures itself; surface them here so an
+		// aborted scan is diagnosable instead of silently disappearing
 		if _, err := a.chain.ScanDeadLinks(ctx); err != nil {
-			// logged inside chain; nothing else to do
+			log.Printf("dead-link scan: %v", err)
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started"})

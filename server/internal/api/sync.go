@@ -39,16 +39,6 @@ func (a *API) handleSyncTree(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// syncApplyOp accepts the extension's reconciled mutations. Only fields the
-// reconciler actually changed are set (pointers); UpdatedAt is the local
-// edit time — the server clamps and applies LWW against it.
-type syncApplyOp struct {
-	store.BatchOp
-	// DeletedAt carries the trashed timestamp on delete ops (informational;
-	// the server stamps its own clock on the tombstone).
-	DeletedAt int64 `json:"deletedAt,omitempty"`
-}
-
 // SyncApply runs the batch and broadcasts once when anything won.
 func (a *API) handleSyncApply(w http.ResponseWriter, r *http.Request) {
 	var ops []store.BatchOp

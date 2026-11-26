@@ -820,7 +820,6 @@ func boolInt(b bool) int {
 	return 0
 }
 
-
 // normalizeTag trims, collapses internal whitespace and lowercases the tag
 // so "Go Lang" and "go lang" share one entry.
 func normalizeTag(t string) string {

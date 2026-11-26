@@ -3,13 +3,13 @@
 package tools
 
 import (
-	"net/url"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -497,9 +497,7 @@ func normalizeForDup(raw string) string {
 		path = rest[j:]
 	}
 	host = strings.ToLower(host)
-	if strings.HasPrefix(host, "www.") {
-		host = host[4:]
-	}
+	host = strings.TrimPrefix(host, "www.")
 	if q := strings.Index(path, "?"); q >= 0 {
 		query := path[q+1:]
 		frag := ""
@@ -686,29 +684,4 @@ func (c *Chain) RestoreSnapshot(id string, deviceID string) error {
 		c.Broadcast(0)
 	}
 	return nil
-}
-
-func i64s(v int64) string {
-	if v == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for v > 0 {
-		i--
-		b[i] = byte('0' + v%10)
-		v /= 10
-	}
-	return string(b[i:])
-}
-
-func s2i64(s string) int64 {
-	var n int64
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return 0
-		}
-		n = n*10 + int64(s[i]-'0')
-	}
-	return n
 }

@@ -3,10 +3,10 @@
 package importexport
 
 import (
-	"net/url"
 	"encoding/base64"
 	"fmt"
 	html "golang.org/x/net/html"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -178,7 +178,7 @@ func unwrapBrowserRoots(root *Node) {
 
 // otherHolderReservedName marks the synthetic folder that carries
 // other-bookmarks content out of unwrapBrowserRoots.
-const otherHolderReservedName = "其他书签" 
+const otherHolderReservedName = "其他书签"
 
 // browser-root wrapper names across locales (title match restricted to the
 // two known Chromium root names in the user's locales; attribute match is
@@ -300,12 +300,10 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 		}
 	}
 
-	var importFolder func(parentID string, n *Node, depth int) (string, error)
-	var findExistingFolder func(parentID, title string) (string, bool)
 	// findExistingFolder: same-title live folder under the same parent —
 	// re-running an import must MERGE into the existing tree, not grow
 	// empty same-named shells every run.
-	findExistingFolder = func(parentID, title string) (string, bool) {
+	var findExistingFolder = func(parentID, title string) (string, bool) {
 		kids, err := s.Children(parentID)
 		if err != nil {
 			return "", false
@@ -317,6 +315,7 @@ func Import(s *store.Store, root *Node, opts ImportOptions) (*ImportResult, erro
 		}
 		return "", false
 	}
+	var importFolder func(parentID string, n *Node, depth int) (string, error)
 	importFolder = func(parentID string, n *Node, depth int) (string, error) {
 		// merge mode reuses an existing same-named folder under the same
 		// parent (dedupe by URL still applies to its children); newfolder
@@ -550,9 +549,7 @@ func normURL(raw string) string {
 		path = rest[j:]
 	}
 	host = strings.ToLower(host)
-	if strings.HasPrefix(host, "www.") {
-		host = host[4:]
-	}
+	host = strings.TrimPrefix(host, "www.")
 	// strip common tracking params from query
 	if q := strings.Index(path, "?"); q >= 0 {
 		query := path[q+1:]
@@ -590,7 +587,6 @@ var trackingParams = map[string]bool{
 	"fbclid": true, "gclid": true, "ref": true, "ref_src": true,
 	"spm": true, "share_token": true, "share_source": true,
 }
-
 
 // decodeDataURI decodes a data: URI payload (ICON attributes carry base64
 // images). Returns nil for anything non-image or undecodable — icon data is

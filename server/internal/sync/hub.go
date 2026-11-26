@@ -46,7 +46,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, authenticate func
 		// origin that can never match the server host, and auth is done via
 		// the device token (or session cookie) below the upgrade — so the
 		// default same-origin Origin check must be disabled.
-		OriginPatterns: []string{"*"},
+		OriginPatterns:  []string{"*"},
 		CompressionMode: websocket.CompressionNoContextTakeover,
 	})
 	if err != nil {

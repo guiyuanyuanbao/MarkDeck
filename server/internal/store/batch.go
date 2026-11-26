@@ -19,25 +19,25 @@ import (
 // follow-up edit from a stale op racing a concurrent write the client never
 // saw — same rule the old per-op push protocol used with BaseRevision.
 type BatchOp struct {
-	ID               string   `json:"id"`
-	Op               string   `json:"op"`
-	Type             string   `json:"type,omitempty"`
-	ParentID         *string  `json:"parentId,omitempty"`
-	Title            *string  `json:"title,omitempty"`
-	URL              *string  `json:"url,omitempty"`
-	Note             *string  `json:"note,omitempty"`
-	Favorite         *bool    `json:"favorite,omitempty"`
-	Archived         *bool    `json:"archived,omitempty"`
-	Position         *float64 `json:"position,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
+	ID       string   `json:"id"`
+	Op       string   `json:"op"`
+	Type     string   `json:"type,omitempty"`
+	ParentID *string  `json:"parentId,omitempty"`
+	Title    *string  `json:"title,omitempty"`
+	URL      *string  `json:"url,omitempty"`
+	Note     *string  `json:"note,omitempty"`
+	Favorite *bool    `json:"favorite,omitempty"`
+	Archived *bool    `json:"archived,omitempty"`
+	Position *float64 `json:"position,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
 	// Undelete revives a tombstoned row (the reconciler's "local edit wins
 	// against a server delete" path — the edit is newer, the row must come
 	// back). Without it a batch update keeps cur's tombstone and the row
 	// stays invisible in every tree.
-	Undelete         bool     `json:"undelete,omitempty"`
-	UpdatedAt        int64    `json:"updatedAt"`
-	DeviceID         string   `json:"deviceId"`
-	ObservedRevision int64    `json:"observedRevision,omitempty"`
+	Undelete         bool   `json:"undelete,omitempty"`
+	UpdatedAt        int64  `json:"updatedAt"`
+	DeviceID         string `json:"deviceId"`
+	ObservedRevision int64  `json:"observedRevision,omitempty"`
 }
 
 // BatchResult reports the post-merge authoritative row per op.

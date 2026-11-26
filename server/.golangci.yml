@@ -1,0 +1,25 @@
+# golangci-lint config for the MarkDeck server. Deliberately conservative:
+# the linter is a regression gate for the refactor program, not a style
+# enforcer — gofmt handles formatting, go vet + these linters catch real
+# defects. Existing code was grandfathered where a stricter check would
+# demand mass rewrites that drown real diffs.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # errcheck deliberately NOT enabled: some handlers ignore error returns
+  # (documented at each site); enabling it would need ~100 annotations with
+  # no behavioral gain.
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+
+issues:
+  # Show everything; do not cap output.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -27,7 +27,9 @@ func TestSnapshotRestoreRoundtrip(t *testing.T) {
 	f1 := &store.Bookmark{Type: "folder", Title: "根目录A"}
 	f1, _ = s.Create(f1, nil)
 	b1 := &store.Bookmark{ParentID: f1.ID, Type: "url", Title: "书签一", URL: "https://one.test", Note: "备注1", Favorite: true}
-	b1, _ = s.Create(b1, []string{"tag1", "tag2"})
+	if _, err := s.Create(b1, []string{"tag1", "tag2"}); err != nil {
+		t.Fatal(err)
+	}
 	b2 := &store.Bookmark{ParentID: f1.ID, Type: "url", Title: "书签二", URL: "https://two.test", Archived: true}
 	b2, _ = s.Create(b2, nil)
 	// tombstone one

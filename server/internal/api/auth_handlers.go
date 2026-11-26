@@ -276,7 +276,7 @@ func (a *API) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		Proxy string `json:"proxy"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	transport := &http.Transport{ Proxy: nil }
+	transport := &http.Transport{Proxy: nil}
 	if p := strings.TrimSpace(body.Proxy); p != "" {
 		u, err := url.Parse(p)
 		if err != nil {
@@ -285,7 +285,7 @@ func (a *API) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		transport.Proxy = http.ProxyURL(u)
 	}
-	client := &http.Client{ Timeout: 8 * time.Second, Transport: transport }
+	client := &http.Client{Timeout: 8 * time.Second, Transport: transport}
 	start := time.Now()
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://www.google.com/generate_204", nil)
 	resp, err := client.Do(req)

@@ -46,7 +46,7 @@ func TestOthersMigrationMergeDedupe(t *testing.T) {
 		return b
 	}
 	mk(holderA.ID, "go.dev", "https://go.dev/")
-	mk(holderB.ID, "go.dev", "https://go.dev") // same URL, slash-divergent
+	mk(holderB.ID, "go.dev", "https://go.dev")   // same URL, slash-divergent
 	mk(holderB.ID, "go.dev", "https://go.dev/x") // different URL: survives
 	folderA := mkf(holderA.ID, "Docs")
 	mk(folderA.ID, "spec", "https://spec.test")
