@@ -66,7 +66,7 @@ docker compose up -d
 
 ## 源码构建
 
-依赖：Go 1.23+、Node 22+
+依赖：Go 1.26+、Node 22+
 
 ```bash
 cd web && npm ci && npm run build          # 管理页面 → 嵌入二进制
@@ -100,14 +100,14 @@ server/
   internal/
     store/          SQLite（WAL）、全局修订号变更日志、FTS5
     sync/           WebSocket hub（修订号广播）
-    api/            REST + 同步 pull/push（LWW 裁决）
+    api/            REST + 快照式对账同步（LWW 裁决）
     auth/           argon2id、会话/CSRF、TOTP、设备令牌、限速
     favicon/        站点图标抓取缓存（单飞、正负缓存）
     importexport/   Netscape HTML 导入导出、URL 规范化去重
     tools/          死链扫描、重复发现、快照
 ```
 
-**同步协议**：服务端为唯一事实源，全局单调修订号。客户端 `GET /api/sync/pull?since=N` 增量拉取，`POST /api/sync/push` 提交本地操作（服务端 LWW 裁决后返回权威状态）。WebSocket 广播 `{"t":"rev","rev":M}`，插件收到后拉取增量；5 分钟 alarm 兜底轮询。多设备端到端同步（双向、删除传播、冲突收敛、离线重放、设备吊销）有自动化测试覆盖（17 项断言）。
+**同步协议**：服务端为唯一事实源，全局单调修订号。插件对账引擎按三份树（base 快照 / 服务端树 / 本地树）计算差异，一次 `GET /api/sync/tree` 拉取全量状态、一次 `POST /api/sync/apply` 批量提交变更（单事务，服务端 LWW 裁决后返回权威状态）。WebSocket 广播 `{"t":"rev","rev":M}` 触发对账，1 分钟 alarm 兜底轮询。协议细节见 [docs/protocol.md](docs/protocol.md)。多设备端到端同步（双向、删除传播、冲突收敛、离线重放、设备吊销）有自动化测试覆盖。
 
 ## 版本与发布
 
@@ -116,9 +116,9 @@ CI 全自动：push 到 `main` → 测试通过 → 补丁版本自动 +1 → �
 ## 开发
 
 ```bash
-cd server && go test ./...                     # 后端测试
-cd web && npm run typecheck && npm run build    # 前端
-cd extension && npm test && npm run build       # 插件
+cd server && go test ./... && golangci-lint run   # 后端（lint 门禁见 .golangci.yml）
+cd web && npm run lint && npm run typecheck && npm run build       # 前端
+cd extension && npm run lint && npm test && npm run build          # 插件
 ```
 
 ## License
