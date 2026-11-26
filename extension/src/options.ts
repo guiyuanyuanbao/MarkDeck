@@ -41,6 +41,15 @@ $('pairBtn').onclick = async () => {
   })
   if (resp?.ok) {
     msg.className = 'msg ok'; msg.textContent = '配对成功，首次同步已开始'
+    // update the status card / topbar chip immediately — the SW status
+    // flips to 'online' on the first successful reconcile, and waiting
+    // for the 5s poll made success feel unverifiable
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 300))
+      await refreshConnStatus()
+      if (document.getElementById('pairChipText')!.textContent !== '未配对') break
+    }
+    runDiagnostics()
   } else {
     msg.className = 'msg err'; msg.textContent = '配对失败: ' + (resp?.error || '未知错误') +
       (String(resp?.error || '').includes('pairing code') ? '（配对码已过期，请重新生成）' : '')
@@ -91,7 +100,28 @@ $('resyncBtn').onclick = async () => {
   } catch { /* server older than this feature: silence */ }
 })()
 
-// live connection status card (always visible)
+// live connection status card (always visible) + topbar pairing chip.
+// The chip answers "did it pair?" at a glance; the steps/how-to block is
+// hidden once paired so the page reads as "connected" instead of as a
+// setup wizard. Pairing success refreshes immediately (no 10s wait).
+function applyChip(status: string) {
+  const chip = document.getElementById('pairChip')!
+  const dot = document.getElementById('pairChipDot')!
+  const text = document.getElementById('pairChipText')!
+  const stateLabel = document.getElementById('connStateLabel')!
+  const steps = document.getElementById('pairSteps')!
+  const paired = status === 'online'
+  const known = status === 'online' || status === 'disconnected' || status === 'unauthorized'
+  chip.className = 'pair-chip ' + (status === 'online' ? 'paired' : status === 'unauthorized' ? 'broken' : known ? 'offline' : '')
+  dot.className = 'dot ' + (status === 'online' ? 'online' : status === 'unauthorized' ? 'err' : known ? 'off' : 'none')
+  text.textContent =
+    status === 'online' ? '已配对' :
+    status === 'unauthorized' ? '令牌失效' :
+    status === 'disconnected' ? '已配对 · 离线' : '未配对'
+  stateLabel.textContent = paired ? '已配对' : ''
+  steps.style.display = paired ? 'none' : ''
+}
+
 async function refreshConnStatus() {
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'status' })
@@ -100,16 +130,17 @@ async function refreshConnStatus() {
     const title = document.getElementById('connTitle')!
     const desc = document.getElementById('connDesc')!
     card.style.display = 'block'
+    applyChip(resp.status)
     const q = resp.queued > 0 ? `，待同步 ${resp.queued} 条` : ''
     switch (resp.status) {
       case 'online':
         dot.className = 'dot online'
-        title.textContent = '已连接'
+        title.textContent = '已配对，同步正常'
         desc.textContent = '书签双向实时同步中' + q
         break
       case 'disconnected':
         dot.className = 'dot off'
-        title.textContent = '与服务器断联'
+        title.textContent = '已配对，当前离线'
         desc.textContent = '改动已保存在本地，恢复连接后自动同步' + (resp.queued ? `（${resp.queued} 条）` : '')
         break
       case 'unauthorized':
@@ -125,7 +156,7 @@ async function refreshConnStatus() {
   } catch { /* ignore */ }
 }
 refreshConnStatus()
-setInterval(refreshConnStatus, 10000)
+setInterval(refreshConnStatus, 5000)
 
 // conflict detection: duplicated bookmarks hint at double-sync
 async function checkConflict() {

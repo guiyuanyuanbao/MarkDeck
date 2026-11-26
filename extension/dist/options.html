@@ -50,7 +50,6 @@
     }
     .logo-mark img { width: 100%; height: 100%; display: block; border-radius: inherit; }
     .brand-name { font-size: 16px; font-weight: 700; letter-spacing: .2px; }
-    .brand-sub { color: var(--text3); font-size: 12px; margin-top: 1px; }
     .topbar-badge {
       margin-left: auto;
       padding: 4px 12px;
@@ -59,6 +58,20 @@
       color: var(--primary);
       font-size: 11.5px; font-weight: 700;
     }
+    /* persistent pairing state chip — answers "did it pair?" at a glance */
+    .pair-chip {
+      margin-left: auto;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 11.5px; font-weight: 700;
+      background: var(--bg); color: var(--text3);
+    }
+    .pair-chip .dot { width: 8px; height: 8px; }
+    .pair-chip.paired { background: var(--success-soft); color: var(--success); }
+    .pair-chip.broken { background: var(--danger-soft); color: var(--danger); }
+    .pair-chip.offline { background: var(--warning-soft); color: #9a6d0b; }
+    .topbar-badge { margin-left: 0; }
 
     .wrap { max-width: 620px; margin: 0 auto; padding: 20px 20px 0; }
 
@@ -177,8 +190,9 @@
     <div class="logo-mark"><img src="icons/icon128.png" alt="MarkDeck"></div>
     <div>
       <div class="brand-name">MarkDeck 同步设置</div>
-      
+
     </div>
+    <span class="pair-chip" id="pairChip"><span class="dot none" id="pairChipDot"></span><span id="pairChipText">检查中…</span></span>
     <span class="topbar-badge" id="versionBadge">v—</span>
   </div>
 
@@ -222,8 +236,9 @@
       <div class="card-title">
         <span class="icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg></span>
         连接服务器
+        <span class="card-sub" id="connStateLabel"></span>
       </div>
-      <ol class="steps">
+      <ol class="steps" id="pairSteps">
         <li><span class="n">1</span><span>在管理页「设置 → 设备同步」生成配对码</span></li>
         <li><span class="n">2</span><span>填写地址与配对码，点击「配对」</span></li>
       </ol>
