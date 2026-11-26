@@ -307,6 +307,196 @@ func (s *Store) Restore(id string, at int64, deviceID string) (*Bookmark, error)
 	return s.Get(id)
 }
 
+// RestoreOpts controls RestoreWithPath.
+type RestoreOpts struct {
+	// ParentID pins the restore target. nil restores to the item's original
+	// location, rebuilding any deleted ancestors along the way (shells).
+	ParentID *string
+	// IncludeChildren restores the whole subtree of a folder. false revives
+	// only the folder row itself (children stay tombstoned, restorable
+	// individually later).
+	IncludeChildren bool
+}
+
+// RestoreWithPath restores a trashed bookmark, re-attaching it to a live
+// parent. With opts.ParentID nil the original parent chain is walked upward:
+// live ancestors become the anchor; tombstoned ancestors are revived as empty
+// shells (their own subtrees stay tombstoned); purged ancestors — whose title
+// and parent were wiped by Purge — are unrecoverable, so the chain re-roots
+// at the top level. When the anchor folder already has a live folder with the
+// same name, the item merges into it (folders only; URLs may share a name).
+//
+// Revived rows keep their ids: restoring siblings whose shared ancestors were
+// shell-revived reuses the same rows, so no duplicate folders can appear.
+// Already-live rows are left untouched (batch restores stay idempotent).
+func (s *Store) RestoreWithPath(id string, at int64, deviceID string, opts RestoreOpts) (*Bookmark, error) {
+	cur, err := s.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if cur.Purged {
+		return nil, ErrNotFound
+	}
+	if cur.DeletedAt == 0 {
+		return cur, nil // already live — idempotent no-op
+	}
+
+	// ---- resolve the anchor parent ----
+	anchor := ""
+	if opts.ParentID != nil {
+		// pinned target: must be a live folder
+		if *opts.ParentID != "" {
+			p, err := s.Get(*opts.ParentID)
+			if err != nil || p.DeletedAt > 0 || p.Purged || p.Type != "folder" {
+				return nil, fmt.Errorf("restore target %q is not a live folder", *opts.ParentID)
+			}
+		}
+		anchor = *opts.ParentID
+	} else if cur.ParentID != "" {
+		anchor, err = s.ensureLiveAncestor(cur.ParentID, cur.Type, at, deviceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// ---- revive ----
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if cur.Type == "folder" && opts.IncludeChildren {
+		ids, err := subtreeIDsTx(tx, id)
+		if err != nil {
+			return nil, err
+		}
+		pos, err := maxPositionTx(tx, anchor)
+		if err != nil {
+			return nil, err
+		}
+		for i, bid := range ids {
+			newPos := pos + 1 + float64(i)
+			if _, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, parent_id=CASE WHEN id=? THEN ? ELSE parent_id END, position=CASE WHEN id=? THEN ? ELSE position END, updated_at=?, device_id=? WHERE id=?`,
+				id, anchor, id, newPos, at, deviceID, bid); err != nil {
+				return nil, err
+			}
+			if _, err := bumpChange(tx, bid); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		// single row (or folder shell): revive just this row
+		if err := reviveRow(tx, id, anchor, at, deviceID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.Get(id)
+}
+
+// ensureLiveAncestor walks the parent chain upward from pid and returns the
+// id of the live row the caller should re-attach under ("" = root). Tombstoned
+// ancestors are shell-revived in place (their own subtrees stay tombstoned);
+// purged ancestors — whose title and parent Purge wiped — break the chain and
+// re-root it at the top level. Must run OUTSIDE a tx (uses MaxPosition).
+func (s *Store) ensureLiveAncestor(pid, childType string, at int64, deviceID string) (string, error) {
+	for guard := 0; pid != "" && guard < 100; guard++ {
+		p, err := s.Get(pid)
+		if err != nil || p.Purged {
+			// chain broken beyond recovery — anchor at the top level
+			return "", nil
+		}
+		if p.DeletedAt == 0 {
+			return pid, nil // live ancestor: anchor found
+		}
+		// tombstoned ancestor. Its own parent decides where it re-attaches;
+		// resolve that first (recursion is depth-bounded by the chain length).
+		grandAnchor, err := s.ensureLiveAncestor(p.ParentID, "folder", at, deviceID)
+		if err != nil {
+			return "", err
+		}
+		// same-name merge: if the grand anchor already holds a live folder
+		// with this name (and it isn't the row itself), merge into it and
+		// leave the original row tombstoned
+		if twin, err := s.findSameNameFolder(grandAnchor, p.Title, p.ID); err != nil {
+			return "", err
+		} else if twin != "" {
+			return twin, nil
+		}
+		// shell-revive p under grandAnchor — p becomes the caller's anchor
+		pos, err := s.MaxPosition(grandAnchor)
+		if err != nil {
+			return "", err
+		}
+		tx, err := s.DB.Begin()
+		if err != nil {
+			return "", err
+		}
+		if err := reviveRow(tx, p.ID, grandAnchor, at, deviceID); err != nil {
+			tx.Rollback()
+			return "", err
+		}
+		if _, err := tx.Exec(`UPDATE bookmarks SET position=? WHERE id=?`, pos+1, p.ID); err != nil {
+			tx.Rollback()
+			return "", err
+		}
+		if err := tx.Commit(); err != nil {
+			return "", err
+		}
+		return p.ID, nil
+	}
+	return pid, nil
+}
+
+// findSameNameFolder returns the id of a live folder named title directly
+// under parentID, excluding excludeID. "" when none.
+func (s *Store) findSameNameFolder(parentID, title, excludeID string) (string, error) {
+	rows, err := s.DB.Query(`SELECT id FROM bookmarks
+		WHERE parent_id = ? AND type = 'folder' AND deleted_at = 0 AND title = ? AND id != ?`,
+		parentID, title, excludeID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		return id, nil
+	}
+	return "", rows.Err()
+}
+
+// reviveRow clears the tombstone of one row and re-parents it. Position is
+// assigned by the caller when needed (maxPositionTx/MaxPosition + 1).
+func reviveRow(tx *sql.Tx, id, parentID string, at int64, deviceID string) error {
+	res, err := tx.Exec(`UPDATE bookmarks SET deleted_at=0, purged=0, parent_id=?, updated_at=?, device_id=? WHERE id=? AND deleted_at > 0`,
+		parentID, at, deviceID, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("row %s is not restorable (live or purged)", id)
+	}
+	_, err = bumpChange(tx, id)
+	return err
+}
+
+// maxPositionTx is MaxPosition bound to an open transaction.
+func maxPositionTx(tx *sql.Tx, parentID string) (float64, error) {
+	var max sql.NullFloat64
+	err := tx.QueryRow(`SELECT MAX(position) FROM bookmarks
+		WHERE parent_id = ? AND deleted_at = 0`, parentID).Scan(&max)
+	if err != nil {
+		return 0, err
+	}
+	return max.Float64, nil
+}
+
 // Get returns one bookmark by id (including tombstones).
 func (s *Store) Get(id string) (*Bookmark, error) {
 	row := s.DB.QueryRow(`SELECT `+scanCols+` FROM bookmarks WHERE id = ?`, id)

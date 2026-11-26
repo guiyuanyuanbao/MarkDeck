@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -141,13 +142,32 @@ func (a *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleRestore(w http.ResponseWriter, r *http.Request) {
-	b, err := a.Store.Restore(r.PathValue("id"), store.Now(), "web")
+	// body is optional: {} or no body restores to the original location with
+	// path rebuild; parentId pins the target; includeChildren=false shells
+	var body struct {
+		ParentID        *string `json:"parentId,omitempty"`
+		IncludeChildren *bool   `json:"includeChildren,omitempty"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad payload"})
+			return
+		}
+	}
+	opts := store.RestoreOpts{IncludeChildren: true}
+	if body.ParentID != nil {
+		opts.ParentID = body.ParentID
+	}
+	if body.IncludeChildren != nil {
+		opts.IncludeChildren = *body.IncludeChildren
+	}
+	b, err := a.Store.RestoreWithPath(r.PathValue("id"), store.Now(), "web", opts)
 	if err == store.ErrNotFound {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 	if err != nil {
-		httpError(w, http.StatusInternalServerError, err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	a.broadcastRevision()
@@ -214,11 +234,12 @@ func (a *API) handleReorder(w http.ResponseWriter, r *http.Request) {
 // can surface partial success instead of a bare count.
 func (a *API) handleBatch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		IDs      []string `json:"ids"`
-		Action   string   `json:"action"` // move | delete | restore | tag | untag | favorite | archive
-		ParentID string   `json:"parentId,omitempty"`
-		Tag      string   `json:"tag,omitempty"`
-		Value    *bool    `json:"value,omitempty"`
+		IDs             []string `json:"ids"`
+		Action          string   `json:"action"` // move | delete | restore | tag | untag | favorite | archive
+		ParentID        string   `json:"parentId,omitempty"`
+		Tag             string   `json:"tag,omitempty"`
+		Value           *bool    `json:"value,omitempty"`
+		IncludeChildren *bool    `json:"includeChildren,omitempty"` // restore only
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.IDs) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad payload"})
@@ -234,7 +255,17 @@ func (a *API) handleBatch(w http.ResponseWriter, r *http.Request) {
 		case "delete":
 			_, err = a.Store.DeleteSoft(id, at, "web")
 		case "restore":
-			_, err = a.Store.Restore(id, at, "web")
+			// path rebuild semantics per id; pinned batch moves share one
+			// target parent (ParentID empty = each to its own original spot)
+			opts := store.RestoreOpts{IncludeChildren: true}
+			if body.ParentID != "" {
+				t := body.ParentID
+				opts.ParentID = &t
+			}
+			if body.IncludeChildren != nil {
+				opts.IncludeChildren = *body.IncludeChildren
+			}
+			_, err = a.Store.RestoreWithPath(id, at, "web", opts)
 		case "move":
 			_, err = a.Store.Move(id, body.ParentID, 0, at, "web")
 		case "tag":
