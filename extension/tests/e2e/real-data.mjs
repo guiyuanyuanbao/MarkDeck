@@ -181,7 +181,7 @@ async function main() {
   const r5page = await context.newPage()
   await r5page.goto(`chrome-extension://${extId}/options.html`)
   await r5page.waitForTimeout(600)
-  let saved = null
+  let saved
   try {
     saved = await r5page.evaluate(async () =>
       await chrome.runtime.sendMessage({

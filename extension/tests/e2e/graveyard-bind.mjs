@@ -271,10 +271,9 @@ async function main() {
   // (user hit 'remove: refusing to delete root folder 125' because the
   //  holder row was tombstoned in messy history; its live children then
   //  had no placeable parent and 87 bookmarks failed)
-  let holderChild = null
   const holder = JSON.parse((await api('POST', '/api/bookmarks',
     { type: 'folder', title: '其他书签', position: 9999 }, H)).body)
-  holderChild = JSON.parse((await api('POST', '/api/bookmarks',
+  const holderChild = JSON.parse((await api('POST', '/api/bookmarks',
     { type: 'url', title: 'holder墓碑子书签', url: 'https://holder-tomb.test/x', parentId: holder.id }, H)).body)
   await api('DELETE', `/api/bookmarks/${holder.id}`, undefined, H)
   // child stays live but its parent row is now a tombstone (server-side orphan)
