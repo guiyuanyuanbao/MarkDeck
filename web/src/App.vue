@@ -67,15 +67,15 @@ onMounted(() => {
       </nav>
 
       <div class="md-header-right">
-        <button class="md-topicon" :class="{ active: devicesActive }" title="配对设备" @click="router.push('/settings#devices')">
-          <Icon name="laptop" :size="17" />
+        <button class="md-hnav-item" :class="{ active: devicesActive }" title="配对设备" @click="router.push('/settings#devices')">
+          <Icon name="laptop" :size="15" /> 设备
         </button>
-        <button class="md-topicon" :class="{ active: settingsActive }" title="设置" @click="router.push('/settings')">
-          <Icon name="settings" :size="17" />
+        <button class="md-hnav-item" :class="{ active: settingsActive }" title="设置" @click="router.push('/settings')">
+          <Icon name="settings" :size="15" /> 设置
         </button>
         <div class="theme-wrap">
-          <button class="md-topicon" title="配色主题" @click="themeOpen = !themeOpen">
-            <Icon name="palette" :size="17" />
+          <button class="md-hnav-item" title="配色主题" @click="themeOpen = !themeOpen">
+            <Icon name="palette" :size="15" /> 主题
           </button>
           <div v-if="themeOpen" class="theme-pop">
             <button
