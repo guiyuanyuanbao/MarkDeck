@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
@@ -8,6 +8,12 @@ import BatchTagDialog from '@/components/BatchTagDialog.vue'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
 import { Icon } from '@/components/icons'
+import { useSelection } from '@/composables/selection'
+import { useRevRefresh } from '@/composables/revRefresh'
+import { buildTree } from '@/utils/ui'
+// BookmarksView shows date-only on list rows (other views use full
+// timestamps via the shared fmtDate) — keep this view's format verbatim.
+const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleDateString()
 
 interface TreeNode {
   id: string
@@ -22,7 +28,6 @@ const tree = ref<TreeNode[]>([])
 const flat = ref<Map<string, Bookmark>>(new Map())
 const currentFolder = ref('')
 const list = ref<Bookmark[]>([])
-const checked = ref<Set<string>>(new Set())
 const loading = ref(false)
 const searchQ = ref('')
 const tagFilter = ref('')
@@ -54,21 +59,7 @@ const browsing = computed(() => !searchQ.value && !tagFilter.value)
 // internal clipboard for copy/cut/paste
 const clipboard = ref<{ mode: 'copy' | 'cut'; ids: string[] } | null>(null)
 
-// ---- tree assembly ----
-function buildTree(nodes: Bookmark[]): TreeNode[] {
-  const byParent = new Map<string, Bookmark[]>()
-  for (const n of nodes) {
-    if (!byParent.has(n.parentId)) byParent.set(n.parentId, [])
-    byParent.get(n.parentId)!.push(n)
-  }
-  const sortKids = (a: Bookmark, b: Bookmark) => a.position - b.position
-  const mk = (b: Bookmark): TreeNode => {
-    const kids = (byParent.get(b.id) || []).filter((k) => k.type === 'folder').sort(sortKids)
-    return { id: b.id, label: b.title || '(未命名)', type: b.type, isLeaf: b.type === 'url', raw: b, children: kids.map(mk) }
-  }
-  const roots = (byParent.get('') || []).filter((k) => k.type === 'folder').sort(sortKids)
-  return roots.map(mk)
-}
+// tree assembly uses the shared buildTree from @/utils/ui (TreeNode shape)
 
 async function loadTree() {
   const { nodes } = await bookmarksApi.tree()
@@ -87,9 +78,7 @@ async function loadList() {
     list.value = tagFilter.value ? inFolder.filter((n) => n.tags?.includes(tagFilter.value)) : inFolder
     // keep ids that still exist: a background revision mid-selection used to
     // wipe the user's checked set entirely
-    const live = new Set(list.value.map((n) => n.id))
-    checked.value = new Set([...checked.value].filter((id) => live.has(id)))
-    lastIndex = -1
+    retainOnly(new Set(list.value.map((n) => n.id)))
   } finally {
     loading.value = false
   }
@@ -119,17 +108,11 @@ watch(searchQ, () => {
 
 // revision bursts (batch syncs fire many pings) used to trigger two full
 // reloads per ping; coalesce to one refresh per 800ms window
-let revTimer: ReturnType<typeof setTimeout> | null = null
-function onRevision() {
-  if (revTimer) return
-  revTimer = setTimeout(() => { revTimer = null; loadTree(); loadList() }, 800)
-}
+useRevRefresh(() => { loadTree(); loadList() })
 onMounted(() => {
   loadTree(); loadList()
   bookmarksApi.tags().then((r) => (allTags.value = r.tags || []))
-  window.addEventListener('md:revision', onRevision)
 })
-onBeforeUnmount(() => window.removeEventListener('md:revision', onRevision))
 
 // ---- CRUD ----
 function openCreate(type: 'url' | 'folder') {
@@ -156,32 +139,8 @@ async function removeMany(ids: string[]) {
   } catch (e: any) { ElMessage.error(e.message) }
 }
 
-// ---- selection ----
-const allChecked = computed(() => list.value.length > 0 && list.value.every((b) => checked.value.has(b.id)))
-function toggleAll() {
-  if (allChecked.value) checked.value = new Set()
-  else checked.value = new Set(list.value.map((b) => b.id))
-}
-const selectedCount = computed(() => checked.value.size)
-
-// click-to-select with ctrl/shift range semantics (file-manager style)
-let lastIndex = -1
-function selectRow(b: Bookmark, ev: MouseEvent, idx: number) {
-  if (ev.ctrlKey || ev.metaKey) {
-    if (checked.value.has(b.id)) checked.value.delete(b.id)
-    else checked.value.add(b.id)
-    lastIndex = idx
-    return
-  }
-  if (ev.shiftKey && lastIndex >= 0) {
-    const [a, z] = lastIndex < idx ? [lastIndex, idx] : [idx, lastIndex]
-    for (let i = a; i <= z; i++) checked.value.add(list.value[i].id)
-    return
-  }
-  checked.value = new Set([b.id])
-  lastIndex = idx
-}
-function clearSelection() { checked.value = new Set(); lastIndex = -1 }
+// ---- selection (composable: ctrl/shift range semantics) ----
+const { checked, allChecked, selectedCount, toggleAll, selectRow, selectOnly, clearSelection, retainOnly } = useSelection(list)
 
 async function batchDelete() {
   await removeMany([...checked.value])
@@ -213,9 +172,6 @@ function activate(b: Bookmark) {
 function openUrl(url?: string) {
   if (url) window.open(url, '_blank', 'noopener')
 }
-function fmtDate(ts: number) {
-  return new Date(ts * 1000).toLocaleDateString()
-}
 
 // ---- drag & drop ----
 // dataTransfer payload: "text/md-ids" = JSON array (multi-select drag),
@@ -231,8 +187,7 @@ function draggedIds(ev: DragEvent): string[] {
 function onDragStart(b: Bookmark, ev: DragEvent, idx: number) {
   const ids = checked.value.has(b.id) ? [...checked.value] : [b.id]
   if (!checked.value.has(b.id)) {
-    checked.value = new Set([b.id])
-    lastIndex = idx
+    selectOnly(b.id, idx)
   }
   ev.dataTransfer?.setData('text/md-ids', JSON.stringify(ids))
   ev.dataTransfer!.effectAllowed = 'copyMove'
@@ -398,8 +353,7 @@ function onKeydown(e: KeyboardEvent) {
 function itemMenu(b: Bookmark, ev: MouseEvent) {
   // right-click selects the row under the cursor when it's not already in the set
   if (!checked.value.has(b.id)) {
-    checked.value = new Set([b.id])
-    lastIndex = list.value.indexOf(b)
+    selectOnly(b.id, list.value.indexOf(b))
   }
   const ids = [...checked.value]
   const multi = ids.length > 1

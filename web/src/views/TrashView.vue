@@ -5,7 +5,7 @@
 // All restore flows go through RestoreDialog (the default mechanism): it
 // defaults to the original location, rebuilds deleted ancestor paths
 // server-side (RestoreWithPath shells) and merges into same-name folders.
-import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
@@ -13,12 +13,13 @@ import RestoreDialog from '@/components/RestoreDialog.vue'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
 import { Icon } from '@/components/icons'
+import { useSelection } from '@/composables/selection'
+import { useRevRefresh } from '@/composables/revRefresh'
+import { fmtDate } from '@/utils/ui'
 
 const trash = ref<Bookmark[]>([])
 const loading = ref(false)
-const checked = ref<Set<string>>(new Set())
 const busy = ref(false)
-let lastIndex = -1
 
 // ---- hierarchy: current browsing folder inside the trash ----
 const currentFolder = ref('') // '' = trash top level
@@ -179,7 +180,7 @@ async function load() {
     // keep ids that still exist — a background revision mid-selection
     // shouldn't wipe the user's checked set
     const live = new Set(trash.value.map((b) => b.id))
-    checked.value = new Set([...checked.value].filter((id) => live.has(id)))
+    retainOnly(live)
     // browsed folder vanished (restored/purged elsewhere): climb back up to
     // the nearest ancestor that is still in the trash (browsable), else top.
     // The vanished row itself is gone from trashById, so its old parent comes
@@ -195,7 +196,7 @@ async function load() {
       // p is browsable only while it is still a tombstoned folder
       currentFolder.value = p && live.has(p) ? p : ''
     }
-    lastIndex = -1
+    clearSelection()
   } catch (e: any) {
     ElMessage.error('回收站加载失败: ' + e.message)
   } finally {
@@ -205,13 +206,7 @@ async function load() {
 onMounted(load)
 
 // background deletes (extension sync) refresh the trash too, coalesced
-let revTimer: ReturnType<typeof setTimeout> | null = null
-function onRevision() {
-  if (revTimer) return
-  revTimer = setTimeout(() => { revTimer = null; load() }, 800)
-}
-onMounted(() => window.addEventListener('md:revision', onRevision))
-onBeforeUnmount(() => window.removeEventListener('md:revision', onRevision))
+useRevRefresh(load)
 
 // ---- filter pipeline (current level; search is global) ----
 const searching = computed(() => q.value.trim().length > 0)
@@ -269,35 +264,12 @@ const activeFilterKey = computed(() => {
   return 'all'
 })
 
-// ---- selection (file-manager semantics, same as BookmarksView) ----
-const allChecked = computed(() => filtered.value.length > 0 && filtered.value.every((b) => checked.value.has(b.id)))
-function toggleAll() {
-  if (allChecked.value) checked.value = new Set()
-  else checked.value = new Set(filtered.value.map((b) => b.id))
-}
-function selectRow(b: Bookmark, ev: MouseEvent, idx: number) {
-  if (ev.ctrlKey || ev.metaKey) {
-    if (checked.value.has(b.id)) checked.value.delete(b.id)
-    else checked.value.add(b.id)
-    lastIndex = idx
-    return
-  }
-  if (ev.shiftKey && lastIndex >= 0) {
-    const [a, z] = lastIndex < idx ? [lastIndex, idx] : [idx, lastIndex]
-    for (let i = a; i <= z; i++) checked.value.add(filtered.value[i].id)
-    return
-  }
-  checked.value = new Set([b.id])
-  lastIndex = idx
-}
-function clearSelection() { checked.value = new Set(); lastIndex = -1 }
+// ---- selection (composable, file-manager semantics) ----
+const { checked, allChecked, toggleAll, selectRow, selectOnly, clearSelection, retainOnly } = useSelection(filtered)
 
 // ---- actions ----
 function openUrl(b: Bookmark) {
   if (b.url) window.open(b.url, '_blank', 'noopener')
-}
-function fmtDate(ts?: number) {
-  return ts ? new Date(ts * 1000).toLocaleString() : '—'
 }
 
 // every restore goes through the dialog (default mechanism)
@@ -363,8 +335,7 @@ function viewInfo(b: Bookmark) {
 // ---- context menus ----
 function itemMenu(b: Bookmark, ev: MouseEvent) {
   if (!checked.value.has(b.id)) {
-    checked.value = new Set([b.id])
-    lastIndex = filtered.value.indexOf(b)
+    selectOnly(b.id, filtered.value.indexOf(b))
   }
   const ids = [...checked.value]
   const multi = ids.length > 1
