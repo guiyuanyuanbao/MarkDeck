@@ -26,16 +26,11 @@
   --md-scrollbar: #d3d6e4;
   --md-scrollbar-hover: #c0c4d6;
   --md-row-hover: #f7f8fc;
-  --md-tree-hover: #f3f4fb;
-  --md-batch-bg: #e9ebfe;
   --md-batch-text: #3f49c4;
   --md-login-bg1: var(--md-login-bg1);
   --md-login-bg2: var(--md-login-bg2);
-  --md-sidebar-bg: linear-gradient(180deg, #14172a, #191d36);
   --md-sidebar-text: #b6bad0;
   --md-sidebar-text-dim: #8f95ad;
-  --md-sidebar-active: rgba(255, 255, 255, 0.08);
-  --md-sidebar-hover: rgba(255, 255, 255, 0.05);
   --md-folder-grad: linear-gradient(135deg, #f0b95a, #f59e0b);
   --md-radius: 14px;
   --md-radius-sm: 10px;
@@ -108,15 +103,6 @@ body {
 .el-dialog__header { padding: 20px 24px 12px; }
 .el-dialog__body { padding: 8px 24px 6px; }
 .el-dialog__footer { padding: 14px 24px 20px; }
-
-.el-table { --el-table-header-bg-color: #fafbfe; }
-.el-table th.el-table__cell {
-  font-size: 12px;
-  color: var(--md-text-3);
-  font-weight: 600;
-  text-transform: none;
-}
-.el-table .el-table__cell { padding: 10px 0; }
 
 .el-tag { border-radius: 999px; border: none; font-weight: 500; }
 .el-tag--info { background: var(--md-primary-light-8); color: #5a5f75; }
@@ -316,18 +302,6 @@ body {
 /* touch devices have no hover: reveal row actions once the row is rendered
    (tapping the row selects it, which also reveals them via .selected) */
 @media (hover: none) { .bm-actions { opacity: 1; } }
-.bm-act {
-  border: none; background: transparent;
-  font-size: 12.5px; color: var(--md-text-2);
-  padding: 5px 8px; border-radius: 7px;
-  cursor: pointer; font-family: inherit;
-  white-space: nowrap;
-}
-.bm-act:hover { background: var(--md-primary-light-8); color: var(--md-text); }
-.bm-act.danger:hover { background: var(--md-danger-soft); color: var(--md-danger); }
-.bm-act.primary { color: var(--md-primary); }
-.bm-act.primary:hover { background: var(--md-primary-soft); }
-
 .fav-star { color: var(--md-warning); display: inline-grid; place-items: center; }
 .fav-star svg { width: 14px; height: 14px; }
 
@@ -360,9 +334,6 @@ body {
 /* favicon avatars */
 .bm-avatar.icon { background: #fff; border: 1px solid var(--md-border); overflow: hidden; }
 .bm-avatar.icon img { width: 22px; height: 22px; display: block; }
-/* tools page: clamp long titles */
-.el-table .cell { overflow-wrap: anywhere; word-break: break-all; }
-.el-table .cell .bm-url { max-width: 340px; display: inline-block; vertical-align: middle; }
 
 /* ============================================================
    BookmarksView — file-manager interactions
@@ -562,14 +533,9 @@ body {
   --md-primary-hover: #0b7d72;
   --md-primary-soft: #e3f4f1;
   --md-row-hover: #f5faf9;
-  --md-tree-hover: #f0f8f6;
-  --md-batch-bg: #ddf1ec;
   --md-batch-text: #0b6b62;
   --md-scrollbar: #cfdfdb;
   --md-scrollbar-hover: #b8cfc9;
-  --md-sidebar-bg: linear-gradient(180deg, #0d1f1d, #12302c);
-  --md-sidebar-active: rgba(255, 255, 255, 0.09);
-  --md-sidebar-hover: rgba(255, 255, 255, 0.05);
   --md-login-bg1: #071a18;
   --md-login-bg2: #0e312d;
   --md-danger: #dc4c4c;
@@ -599,12 +565,9 @@ body {
   --md-success-soft: color-mix(in srgb, #34d399 15%, #12141c);
   --md-warning: #fbbf24;
   --md-row-hover: #20242f;
-  --md-tree-hover: #1e222c;
-  --md-batch-bg: color-mix(in srgb, #818cf8 18%, #12141c);
   --md-batch-text: #c3c9ff;
   --md-scrollbar: #2e3342;
   --md-scrollbar-hover: #3c4254;
-  --md-sidebar-hover: rgba(255, 255, 255, 0.05);
   --md-login-bg1: #0b0d13;
   --md-login-bg2: #161927;
   --md-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 10px rgba(0, 0, 0, 0.3);
@@ -624,14 +587,9 @@ body {
   --md-primary-hover: #b45309;
   --md-primary-soft: #fdf1df;
   --md-row-hover: #fbf5ea;
-  --md-tree-hover: #faf3e7;
-  --md-batch-bg: #fbe8c8;
   --md-batch-text: #92400e;
   --md-scrollbar: #e4d5bd;
   --md-scrollbar-hover: #d4c0a0;
-  --md-sidebar-bg: linear-gradient(180deg, #221a10, #332615);
-  --md-sidebar-active: rgba(255, 255, 255, 0.08);
-  --md-sidebar-hover: rgba(255, 255, 255, 0.05);
   --md-login-bg1: #1c1408;
   --md-login-bg2: #2f2210;
   --md-danger: #d64545;
@@ -655,11 +613,7 @@ body {
   --el-fill-color-light: var(--md-row-hover);
 }
 :root[data-theme='dark'] .el-card,
-:root[data-theme='dark'] .el-dialog,
-:root[data-theme='dark'] .el-table { background: var(--md-surface); color: var(--md-text); }
-:root[data-theme='dark'] .el-table tr,
-:root[data-theme='dark'] .el-table th.el-table__cell { background: transparent; color: var(--md-text); }
-:root[data-theme='dark'] .el-table td.el-table__cell { color: var(--md-text); }
+:root[data-theme='dark'] .el-dialog { background: var(--md-surface); color: var(--md-text); }
 :root[data-theme='dark'] .el-input__wrapper,
 :root[data-theme='dark'] .el-select__wrapper,
 :root[data-theme='dark'] .el-textarea__inner { background: var(--md-surface); box-shadow: 0 0 0 1px var(--md-border) inset !important; }
@@ -669,28 +623,6 @@ body {
 /* ============================================================
    Tools page — batch maintenance
    ============================================================ */
-.tm-head { margin-bottom: 14px; }
-.tm-tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--md-border);
-  margin-bottom: 16px;
-}
-.tm-tab {
-  border: none;
-  background: none;
-  padding: 10px 16px;
-  font-size: 13.5px;
-  font-family: inherit;
-  color: var(--md-text-2);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.tm-tab:hover { color: var(--md-text); }
-.tm-tab.active { color: var(--md-primary); border-bottom-color: var(--md-primary); font-weight: 600; }
 .tm-count {
   background: var(--md-primary-soft);
   color: var(--md-primary);
@@ -698,19 +630,6 @@ body {
   padding: 1px 8px;
   font-size: 11.5px;
   font-weight: 600;
-}
-.tm-panel {
-  background: var(--md-surface);
-  border: 1px solid var(--md-border);
-  border-radius: var(--md-radius);
-  padding: 18px;
-}
-.tm-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
 }
 .tm-hint { color: var(--md-text-3); font-size: 12.5px; }
 .tm-group {
@@ -761,44 +680,6 @@ body {
 /* ============================================================
    Top bar — page utilities one click away (new IA)
    ============================================================ */
-.md-topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-  min-height: 36px;
-  flex-wrap: nowrap;
-}
-.md-topbar-left, .md-topbar-right { flex-shrink: 0; display: flex; gap: 4px; align-items: center; }
-.md-topbar-left { gap: 6px; }
-.md-toplink {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border: none;
-  background: none;
-  padding: 6px 10px;
-  border-radius: 9px;
-  font-size: 13px;
-  font-family: inherit;
-  color: var(--md-text-2);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.md-toplink:hover { background: var(--md-primary-soft); color: var(--md-primary); }
-.md-toplink.active { background: var(--md-primary-soft); color: var(--md-primary); font-weight: 600; }
-.md-topbar-right { gap: 4px; }
-.md-topicon {
-  width: 32px; height: 32px;
-  border: none; background: none;
-  border-radius: 9px;
-  color: var(--md-text-2);
-  cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-}
-.md-topicon:hover, .md-topicon.active { background: var(--md-primary-soft); color: var(--md-primary); }
 .theme-wrap { position: relative; }
 .theme-pop {
   position: absolute;
@@ -889,17 +770,6 @@ body {
 .md-hnav-item:hover { color: var(--md-text); background: var(--md-primary-soft); }
 .md-hnav-item.active { color: var(--md-primary); background: var(--md-primary-soft); font-weight: 600; }
 .md-header-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.md-topicon {
-  width: 34px; height: 34px;
-  border: none; background: none;
-  border-radius: 10px;
-  color: var(--md-sidebar-text);
-  cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-  transition: color .15s, background .15s;
-}
-.md-topicon:hover, .md-topicon.active { background: var(--md-primary-soft); color: var(--md-primary); }
 .md-header-sep { width: 1px; height: 22px; background: var(--md-border); margin: 0 6px; }
 .md-user-chip { display: flex; align-items: center; gap: 8px; }
 .md-user-chip .md-user-avatar {
