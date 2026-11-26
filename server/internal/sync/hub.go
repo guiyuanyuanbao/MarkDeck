@@ -4,6 +4,7 @@
 package sync
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -74,8 +75,10 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, authenticate func
 					continue
 				}
 				current = rev
-				ctx := writeTimeoutContext()
-				if err := conn.Write(ctx, websocket.MessageText, []byte(`{"t":"rev","rev":`+itoa(rev)+`}`)); err != nil {
+				wctx, cancel := context.WithTimeout(r.Context(), writeTimeout)
+				err := conn.Write(wctx, websocket.MessageText, []byte(`{"t":"rev","rev":`+itoa(rev)+`}`))
+				cancel()
+				if err != nil {
 					return
 				}
 			case <-r.Context().Done():
@@ -106,10 +109,6 @@ func (h *Hub) Broadcast(rev int64) {
 		default: // slow client: drop; its alarm-poll fallback will catch up
 		}
 	}
-}
-
-func writeTimeoutContext() (ctx timeoutCtx) {
-	return newTimeoutCtx(writeTimeout)
 }
 
 func itoa(v int64) string {

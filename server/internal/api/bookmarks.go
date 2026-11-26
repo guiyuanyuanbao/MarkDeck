@@ -129,7 +129,7 @@ func (a *API) handleUpdate(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ids, err := a.Store.DeleteSoft(id, store.Now(), "web")
-	if err == store.ErrNotFound {
+	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
@@ -162,7 +162,7 @@ func (a *API) handleRestore(w http.ResponseWriter, r *http.Request) {
 		opts.IncludeChildren = *body.IncludeChildren
 	}
 	b, err := a.Store.RestoreWithPath(r.PathValue("id"), store.Now(), "web", opts)
-	if err == store.ErrNotFound {
+	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
@@ -176,7 +176,7 @@ func (a *API) handleRestore(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handlePurge(w http.ResponseWriter, r *http.Request) {
 	if err := a.Store.Purge(r.PathValue("id"), store.Now(), "web"); err != nil {
-		if err == store.ErrNotFound {
+		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
@@ -326,7 +326,7 @@ func (a *API) handleSetTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, err := a.Store.SetTags(r.PathValue("id"), body.Tags, "web")
-	if err == store.ErrNotFound {
+	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}

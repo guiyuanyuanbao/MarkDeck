@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/url"
@@ -393,7 +394,7 @@ func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	if err := a.Auth.RevokeDevice(r.PathValue("id")); err != nil {
-		if err == store.ErrNotFound {
+		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
 			return
 		}

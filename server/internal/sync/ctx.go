@@ -1,27 +1,7 @@
 package sync
 
-import (
-	"context"
-	"time"
-)
-
-// timeoutCtx adapts a context.Context-compatible type for websocket writes
-// without pulling extra deps beyond stdlib usage already present.
-type timeoutCtx struct {
-	deadline time.Time
-	done     chan struct{}
-}
-
-func newTimeoutCtx(d time.Duration) timeoutCtx {
-	return timeoutCtx{
-		deadline: time.Now().Add(d),
-		done:     make(chan struct{}),
-	}
-}
-
-func (c timeoutCtx) Deadline() (time.Time, bool) { return c.deadline, true }
-func (c timeoutCtx) Done() <-chan struct{}       { return c.done }
-func (c timeoutCtx) Err() error                  { return nil }
-func (c timeoutCtx) Value(key any) any           { return nil }
-
-var _ context.Context = timeoutCtx{}
+// The websocket write deadline is applied per-write in HandleWS via
+// context.WithTimeout on the request context (see the writer pump in
+// hub.go). History: the pre-0.1.17 timeoutCtx struct had Done() returning a
+// never-closed channel and Err() always nil, so coder/websocket's select on
+// Done never fired and the 5s write timeout was not actually enforced.

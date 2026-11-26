@@ -52,6 +52,20 @@ func httpError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+// csrfGuard rejects state-changing requests whose X-CSRF header does not
+// match the session's token. Device-token traffic never calls this (tokens
+// don't ride browser cookies, so CSRF does not apply).
+func csrfGuard(w http.ResponseWriter, r *http.Request, sess *auth.Session) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		if r.Header.Get("X-CSRF") != sess.CSRF {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "csrf mismatch"})
+			return false
+		}
+	}
+	return true
+}
+
 func (a *API) requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := a.Auth.SessionFromRequest(r)
@@ -60,12 +74,8 @@ func (a *API) requireSession(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		// CSRF: state-changing methods must carry the session's token header.
-		switch r.Method {
-		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-			if r.Header.Get("X-CSRF") != sess.CSRF {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "csrf mismatch"})
-				return
-			}
+		if !csrfGuard(w, r, sess) {
+			return
 		}
 		next(w, r)
 	}
@@ -102,14 +112,8 @@ func (a *API) requireAny(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
-		if sess != nil {
-			switch r.Method {
-			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-				if r.Header.Get("X-CSRF") != sess.CSRF {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": "csrf mismatch"})
-					return
-				}
-			}
+		if sess != nil && !csrfGuard(w, r, sess) {
+			return
 		}
 		next(w, r)
 	}
