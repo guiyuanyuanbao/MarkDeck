@@ -23,6 +23,7 @@ func (a *API) RegisterToolsRoutes(mux *http.ServeMux, chain *tools.Chain) {
 	mux.HandleFunc("GET /api/tools/deadlinks", a.requireAny(a.handleDeadLinks))
 	mux.HandleFunc("GET /api/tools/deadlinks/status", a.requireAny(a.handleDeadScanStatus))
 	mux.HandleFunc("POST /api/tools/deadlinks/scan", a.requireAny(a.handleDeadScan))
+	mux.HandleFunc("POST /api/tools/deadlinks/clear", a.requireAny(a.handleDeadLinksClear))
 	mux.HandleFunc("GET /api/tools/duplicates", a.requireAny(a.handleDuplicates))
 	mux.HandleFunc("POST /api/tools/duplicates/merge", a.requireAny(a.handleDupMerge))
 	mux.HandleFunc("GET /api/tools/folder-duplicates", a.requireAny(a.handleListFolderDuplicates))
@@ -173,6 +174,14 @@ func (a *API) handleDeadScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "started"})
+}
+
+func (a *API) handleDeadLinksClear(w http.ResponseWriter, r *http.Request) {
+	if err := a.chain.ClearDeadLinks(); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
 }
 
 func (a *API) handleDuplicates(w http.ResponseWriter, r *http.Request) {

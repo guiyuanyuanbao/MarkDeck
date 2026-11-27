@@ -26,7 +26,10 @@ async function load(preserveSelection = false) {
   loading.value = true
   try {
     const [d, g, fg] = await Promise.all([toolsApi.deadLinks(), toolsApi.duplicates(), toolsApi.folderDuplicates()])
-    dead.value = d.links || []
+    // the scan's working surface shows only rows that need human attention:
+    // 'ok' rows are reachable bookmarks, not dead links — keeping them listed
+    // buried the findings and made the tab look permanently cluttered
+    dead.value = (d.links || []).filter((x) => x.status !== 'ok')
     dups.value = g.groups || []
     folderDups.value = fg.groups || []
     // selection-preserving mode for the scan poller: wiping deadSel every
@@ -114,6 +117,20 @@ async function deleteDeadSelected() {
     if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
   } finally {
     deadDeleting.value = false
+  }
+}
+
+// clear the whole result list: the dead-links list is a temporary working
+// surface (scan → review → fix/delete → clear), not an archive
+async function clearDeadRecords() {
+  try {
+    await ElMessageBox.confirm('清空全部检测记录？书签本身不受影响，下次扫描会重新生成。', '清空检测记录', { type: 'warning' })
+    await toolsApi.clearDead()
+    deadSel.value = new Set()
+    ElMessage.success('检测记录已清空')
+    await load()
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
   }
 }
 
@@ -277,13 +294,14 @@ async function clearFavicons() {
           <el-button v-if="dead.length" type="danger" plain :disabled="!deadSel.size" :loading="deadDeleting" @click="deleteDeadSelected">
             移入回收站（{{ deadSel.size }}）
           </el-button>
-          <span class="tm-hint">HEAD → GET 回退，并发 8；blocked:4xx 多为反爬拦截，删除前请人工确认</span>
+          <el-button v-if="dead.length" plain @click="clearDeadRecords">清空记录</el-button>
+          <span class="tm-hint">HEAD → GET 回退，并发 8；blocked:4xx 多为反爬拦截，点击标题或链接可人工核实（新标签页打开）</span>
         </div>
       </div>
       <div v-if="dead.length" class="data-list">
         <div class="data-row" style="padding: 9px 18px; background: var(--md-bg)">
           <el-checkbox class="row-check" :model-value="allDeadSelected" @change="toggleAllDead" />
-          <span class="data-row-sub" style="font-size: 12.5px">{{ dead.length }} 条记录<template v-if="deadSel.size"> · 已选 {{ deadSel.size }}</template></span>
+          <span class="data-row-sub" style="font-size: 12.5px">{{ dead.length }} 条待确认<template v-if="deadSel.size"> · 已选 {{ deadSel.size }}</template></span>
         </div>
         <div
           v-for="row in dead"
@@ -298,8 +316,18 @@ async function clearFavicons() {
           />
           <BookmarkAvatar :b="row.bookmark" :size="34" />
           <div class="data-row-main">
-            <span class="data-row-title">{{ row.bookmark.title || row.bookmark.url }}</span>
-            <span class="data-row-sub">{{ row.bookmark.url }}</span>
+            <a
+              class="data-row-title dead-link"
+              :href="row.bookmark.url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >{{ row.bookmark.title || row.bookmark.url }}</a>
+            <a
+              class="data-row-sub dead-link"
+              :href="row.bookmark.url"
+              target="_blank"
+              rel="noopener noreferrer"
+            >{{ row.bookmark.url }}</a>
           </div>
           <div class="data-row-meta">
             <span class="status-pill" :class="row.status === 'ok' ? 'ok' : row.status.startsWith('blocked') ? 'warn' : 'err'">
@@ -407,4 +435,10 @@ async function clearFavicons() {
 .status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
 .status-pill.warn { background: color-mix(in srgb, var(--md-warning) 15%, transparent); color: var(--md-warning); }
 .status-pill.err { background: var(--md-danger-soft); color: var(--md-danger); }
+.dead-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.dead-link:hover { color: var(--md-primary); text-decoration: underline; }
 </style>

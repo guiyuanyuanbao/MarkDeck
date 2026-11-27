@@ -211,6 +211,14 @@ func (c *Chain) ScanStatus() (running bool, lastAt int64) {
 	return c.deadRunning, c.lastDeadAt
 }
 
+// ClearDeadLinks wipes the dead_links table. The list is a working surface —
+// check, review, fix or delete, then clear — not a permanent archive; stale
+// rows otherwise pile up forever and bury the current scan's findings.
+func (c *Chain) ClearDeadLinks() error {
+	_, err := c.Store.DB.Exec(`DELETE FROM dead_links`)
+	return err
+}
+
 // DeadLinks returns bookmarks currently tagged dead, with status and age.
 type DeadLink struct {
 	Bookmark *store.Bookmark `json:"bookmark"`

@@ -160,6 +160,7 @@ export const authApi = {
 export const toolsApi = {
   deadLinks: () => api.get<{ links: { bookmark: Bookmark; status: string; checked: number }[] }>('/api/tools/deadlinks'),
   scanDead: () => api.post('/api/tools/deadlinks/scan'),
+  clearDead: () => api.post('/api/tools/deadlinks/clear'),
   scanStatus: () => api.get<{ running: boolean; lastScanAt: number }>('/api/tools/deadlinks/status'),
   duplicates: () => api.get<{ groups: { key: string; items: Bookmark[] }[] }>('/api/tools/duplicates'),
   mergeDup: (keepId: string, removeIds: string[]) =>
