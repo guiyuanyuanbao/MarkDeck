@@ -246,12 +246,12 @@ async function onListDrop(ev: DragEvent) {
   // dropping onto a folder row = move into it (only when NOT over a reorder line)
   if (insertAt === null) return
   if (!ids.length) return
-  const currentIds = list.value.map((b) => b.id).filter((id) => !ids.includes(id))
-  // splice the dragged ids at the insertion point
-  let at = insertAt - list.value.slice(0, insertAt).filter((b) => ids.includes(b.id)).length
-  if (at < 0) at = 0
-  if (at > currentIds.length) at = currentIds.length
-  currentIds.splice(at, 0, ...ids)
+  await persistReorder(spliceAt(insertAt, ids))
+}
+
+// persist a reorder: currentIds is the FULL sibling sequence with the
+// dragged set already spliced at the insertion point. Both views end here.
+async function persistReorder(currentIds: string[]) {
   try {
     await bookmarksApi.reorder(currentFolder.value, currentIds)
     ElMessage.success('已排序')
@@ -259,18 +259,109 @@ async function onListDrop(ev: DragEvent) {
   } catch (e: any) { ElMessage.error(e.message) }
 }
 
+// splice the dragged ids into the sibling sequence at insertAt
+// (insert BEFORE list[insertAt]) — shared insertion-point math
+function spliceAt(insertAt: number, ids: string[]): string[] {
+  const currentIds = list.value.map((b) => b.id).filter((id) => !ids.includes(id))
+  let at = insertAt - list.value.slice(0, insertAt).filter((b) => ids.includes(b.id)).length
+  if (at < 0) at = 0
+  if (at > currentIds.length) at = currentIds.length
+  currentIds.splice(at, 0, ...ids)
+  return currentIds
+}
+
 // preview set for dragover filtering (set at dragstart, read during dragover)
 let draggedIdsPreview: string[] = []
+
+// ---- grid view drag:二维判定(高亮目标卡 + 边缘插入缝) ----
+// The row model (above/below + drop-line) does not map onto a multi-column
+// grid: the indicator never rendered there, left/right intent was unreadable,
+// and folder-vs-reorder feedback fought each other. Grid cards carry their
+// own state: nearest-edge zone picks the slot, the card CENTER of a folder
+// picks move-into-it.
+const gridDrop = ref<{ id: string; side: 'before' | 'after' | 'inside' } | null>(null)
+const gridDragSourceId = ref<string | null>(null)
+
+// dragging a folder onto its own descendant would be rejected by moveIds'
+// cycle check — keep the edge semantics for that case so the indicator
+// never promises an impossible move
+function isAncestorOfDragged(folderId: string): boolean {
+  for (const id of draggedIdsPreview) {
+    let p: string | undefined = id
+    let guard = 0
+    while (p && guard++ < 100) {
+      if (p === folderId) return true
+      p = flat.value.get(p)?.parentId || ''
+    }
+  }
+  return false
+}
+
+function onCardDragOver(b: Bookmark, ev: DragEvent) {
+  if (!dragging.value || !browsing.value) return
+  const ids = draggedIdsPreview
+  if (ids.includes(b.id)) return // dropping onto itself
+  ev.preventDefault()
+  ev.dataTransfer!.dropEffect = 'move'
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+  const dx = (ev.clientX - rect.left) / rect.width
+  const dy = (ev.clientY - rect.top) / rect.height
+  // nearest-edge zone: the smallest distance wins; left/top edges insert
+  // before, right/bottom edges insert after
+  const before = Math.min(dx, dy)
+  const after = Math.min(1 - dx, 1 - dy)
+  // folder cards: hovering the CENTER means move-into (edge zone keeps the
+  // reorder slot; self-subtree drops fall through — moveIds would reject them)
+  if (b.type === 'folder' && before > 0.25 && after > 0.25 && !isAncestorOfDragged(b.id)) {
+    gridDrop.value = { id: b.id, side: 'inside' }
+    return
+  }
+  gridDrop.value = { id: b.id, side: before <= after ? 'before' : 'after' }
+}
+
+function onCardDragLeave(b: Bookmark) {
+  if (gridDrop.value?.id === b.id) gridDrop.value = null
+}
+
+async function onCardDrop(b: Bookmark, ev: DragEvent) {
+  ev.preventDefault()
+  dragging.value = false
+  const drop = gridDrop.value
+  gridDrop.value = null
+  if (!browsing.value) return
+  if (!drop || drop.id !== b.id) return
+  const ids = draggedIds(ev)
+  if (!ids.length) return
+  if (drop.side === 'inside') {
+    await moveIds(ids, b.id)
+    return
+  }
+  const idx = list.value.findIndex((x) => x.id === b.id)
+  if (idx < 0) return
+  await persistReorder(spliceAt(drop.side === 'before' ? idx : idx + 1, ids))
+}
+
+// drop on the grid's empty space: no card hovered → cancel (no accidental reorder)
+async function onGridContainerDrop(ev: DragEvent) {
+  const target = gridDrop.value ? list.value.find((x) => x.id === gridDrop.value!.id) : null
+  gridDrop.value = null
+  dragging.value = false
+  if (!target) return
+  await onCardDrop(target, ev)
+}
 
 function onDragStartCapture(b: Bookmark, ev: DragEvent, idx: number) {
   draggedIdsPreview = checked.value.has(b.id) ? [...checked.value] : [b.id]
   dragging.value = true
+  gridDragSourceId.value = b.id
   onDragStart(b, ev, idx)
 }
 function onDragEnd() {
   dragging.value = false
   dropLineIdx.value = null
   dropHoverId.value = null
+  gridDrop.value = null
+  gridDragSourceId.value = null
 }
 
 // ---- copy / cut / paste ----
@@ -618,7 +709,7 @@ function goUp() {
       <div
         v-else
         class="bm-grid"
-        @drop="onListDrop"
+        @drop="onGridContainerDrop"
         @dragover="dragging && browsing && $event.preventDefault()"
       >
         <template v-for="(b, idx) in list" :key="b.id">
@@ -626,14 +717,17 @@ function goUp() {
             class="bm-card"
             :class="{
               selected: checked.has(b.id),
-              droppable: b.type === 'folder' && dropHoverId === b.id,
+              'drop-target': gridDrop?.id === b.id && gridDrop.side === 'inside',
+              'drop-before': gridDrop?.id === b.id && gridDrop.side === 'before',
+              'drop-after': gridDrop?.id === b.id && gridDrop.side === 'after',
+              'dragging-source': gridDragSourceId === b.id,
             }"
             :draggable="true"
             @dragstart="onDragStartCapture(b, $event, idx)"
             @dragend="onDragEnd"
-            @dragover="b.type === 'folder' ? (dropHoverId = b.id, $event.preventDefault()) : onRowDragOver(b, $event, idx)"
-            @dragleave="b.type === 'folder' && dropHoverId === b.id && (dropHoverId = null)"
-            @drop.prevent="b.type === 'folder' ? (dropHoverId = null, moveIds(draggedIds($event), b.id)) : onListDrop($event)"
+            @dragover="onCardDragOver(b, $event)"
+            @dragleave="onCardDragLeave(b)"
+            @drop.prevent="onCardDrop(b, $event)"
             @click="selectRow(b, $event, idx)"
             @dblclick="activate(b)"
             @contextmenu.prevent.stop="itemMenu(b, $event)"
