@@ -1,0 +1,49 @@
+{
+  "scenario": "minted-row re-rooting: folder deleted server-side, child re-pushes to top",
+  "chromeOps": [
+    {
+      "kind": "remove",
+      "serverId": "f1",
+      "localId": "lf"
+    }
+  ],
+  "serverOps": [
+    {
+      "op": "create",
+      "id": "minted-c",
+      "parentId": "",
+      "type": "url",
+      "title": "C",
+      "url": "https://precious",
+      "position": 1,
+      "updatedAt": 1700,
+      "deviceId": "dev-1"
+    }
+  ],
+  "newBase": {
+    "minted-c": {
+      "server": {
+        "id": "minted-c",
+        "parentId": "",
+        "type": "url",
+        "title": "C",
+        "url": "https://precious",
+        "position": 1,
+        "revision": 0,
+        "updatedAt": 1700,
+        "deviceId": "dev-1"
+      },
+      "localId": "lc"
+    }
+  },
+  "stats": {
+    "planned": 2,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 1,
+    "adopted": 0,
+    "pushed": 1,
+    "positionPushes": 0
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "scenario": "server edit newer than local edit applies server title locally",
+  "chromeOps": [
+    {
+      "kind": "update",
+      "serverId": "b1",
+      "localId": "c1",
+      "title": "Server edit",
+      "url": "https://x"
+    }
+  ],
+  "serverOps": [],
+  "newBase": {
+    "b1": {
+      "server": {
+        "id": "b1",
+        "parentId": "",
+        "type": "url",
+        "title": "Server edit",
+        "url": "https://x",
+        "position": 1,
+        "revision": 118,
+        "updatedAt": 1900,
+        "deviceId": "srv"
+      },
+      "localId": "c1"
+    }
+  },
+  "stats": {
+    "planned": 1,
+    "chromeCreates": 0,
+    "chromeUpdates": 1,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 0,
+    "pushed": 0,
+    "positionPushes": 0
+  }
+}

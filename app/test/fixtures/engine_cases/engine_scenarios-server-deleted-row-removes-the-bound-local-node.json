@@ -1,0 +1,22 @@
+{
+  "scenario": "server-deleted row removes the bound local node",
+  "chromeOps": [
+    {
+      "kind": "remove",
+      "serverId": "b1",
+      "localId": "c1"
+    }
+  ],
+  "serverOps": [],
+  "newBase": {},
+  "stats": {
+    "planned": 1,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 1,
+    "adopted": 0,
+    "pushed": 0,
+    "positionPushes": 0
+  }
+}

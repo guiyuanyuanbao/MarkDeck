@@ -1,0 +1,38 @@
+{
+  "scenario": "local delete pushes a server delete (LWW newer)",
+  "chromeOps": [],
+  "serverOps": [
+    {
+      "op": "delete",
+      "id": "b1",
+      "updatedAt": 1900,
+      "deviceId": "dev-1"
+    }
+  ],
+  "newBase": {
+    "b1": {
+      "server": {
+        "id": "b1",
+        "parentId": "",
+        "type": "url",
+        "title": "Go",
+        "url": "https://go.dev",
+        "position": 1,
+        "revision": 135,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": "c1"
+    }
+  },
+  "stats": {
+    "planned": 1,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 0,
+    "pushed": 1,
+    "positionPushes": 0
+  }
+}

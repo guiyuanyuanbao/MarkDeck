@@ -1,0 +1,40 @@
+{
+  "scenario": "offline rename wins LWW over stale server row",
+  "chromeOps": [],
+  "serverOps": [
+    {
+      "op": "update",
+      "id": "b1",
+      "title": "Local edit",
+      "updatedAt": 1800,
+      "deviceId": "dev-1",
+      "observedRevision": 110
+    }
+  ],
+  "newBase": {
+    "b1": {
+      "server": {
+        "id": "b1",
+        "parentId": "",
+        "type": "url",
+        "title": "Base",
+        "url": "https://x",
+        "position": 1,
+        "revision": 110,
+        "updatedAt": 1500,
+        "deviceId": "srv"
+      },
+      "localId": "c1"
+    }
+  },
+  "stats": {
+    "planned": 1,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 0,
+    "pushed": 1,
+    "positionPushes": 0
+  }
+}

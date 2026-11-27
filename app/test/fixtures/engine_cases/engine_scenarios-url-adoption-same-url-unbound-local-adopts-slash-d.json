@@ -1,0 +1,31 @@
+{
+  "scenario": "URL adoption: same URL unbound local adopts (slash divergence)",
+  "chromeOps": [],
+  "serverOps": [],
+  "newBase": {
+    "b1": {
+      "server": {
+        "id": "b1",
+        "parentId": "",
+        "type": "url",
+        "title": "Site",
+        "url": "https://x.com/",
+        "position": 1,
+        "revision": 140,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": "c1"
+    }
+  },
+  "stats": {
+    "planned": 0,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 1,
+    "pushed": 0,
+    "positionPushes": 0
+  }
+}

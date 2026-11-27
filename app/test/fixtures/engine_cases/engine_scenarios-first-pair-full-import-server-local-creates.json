@@ -1,0 +1,83 @@
+{
+  "scenario": "first-pair full import (server → local creates)",
+  "chromeOps": [
+    {
+      "kind": "create",
+      "serverId": "md-others",
+      "parentServerId": "",
+      "type": "folder",
+      "title": "其他书签",
+      "index": 9998
+    },
+    {
+      "kind": "create",
+      "serverId": "f1",
+      "parentServerId": "",
+      "type": "folder",
+      "title": "Tech",
+      "index": 0
+    },
+    {
+      "kind": "create",
+      "serverId": "b1",
+      "parentServerId": "f1",
+      "type": "url",
+      "title": "Go",
+      "url": "https://go.dev",
+      "index": 0
+    }
+  ],
+  "serverOps": [],
+  "newBase": {
+    "md-others": {
+      "server": {
+        "id": "md-others",
+        "parentId": "",
+        "type": "folder",
+        "title": "其他书签",
+        "position": 9999,
+        "revision": 101,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": null
+    },
+    "f1": {
+      "server": {
+        "id": "f1",
+        "parentId": "",
+        "type": "folder",
+        "title": "Tech",
+        "position": 1,
+        "revision": 102,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": null
+    },
+    "b1": {
+      "server": {
+        "id": "b1",
+        "parentId": "f1",
+        "type": "url",
+        "title": "Go",
+        "url": "https://go.dev",
+        "position": 1,
+        "revision": 103,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": null
+    }
+  },
+  "stats": {
+    "planned": 3,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 0,
+    "pushed": 0,
+    "positionPushes": 0
+  }
+}

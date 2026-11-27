@@ -1,0 +1,155 @@
+[
+  {
+    "name": "first-pair full import (server → local creates)",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [
+      { "id": "md-others", "parentId": "", "type": "folder", "title": "其他书签", "position": 9999, "revision": 101, "updatedAt": 1000, "deviceId": "srv" },
+      { "id": "f1", "parentId": "", "type": "folder", "title": "Tech", "position": 1, "revision": 102, "updatedAt": 1000, "deviceId": "srv" },
+      { "id": "b1", "parentId": "f1", "type": "url", "title": "Go", "url": "https://go.dev", "position": 1, "revision": 103, "updatedAt": 1000, "deviceId": "srv" }
+    ],
+    "local": [
+      { "id": "bar", "parentId": "", "type": "folder", "title": "书签栏", "index": 0 }
+    ],
+    "touch": {}
+  },
+  {
+    "name": "local-only create pushes minted url under bar",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [],
+    "local": [
+      { "id": "bar", "parentId": "", "type": "folder", "title": "书签栏", "index": 0 },
+      { "id": "c1", "parentId": "bar", "type": "url", "title": "New", "url": "https://new.dev", "index": 0 }
+    ],
+    "touch": { "c1": { "at": 1900 } }
+  },
+  {
+    "name": "offline rename wins LWW over stale server row",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [
+      { "id": "b1", "parentId": "", "type": "url", "title": "Base", "url": "https://x", "position": 1, "revision": 110, "updatedAt": 1500, "deviceId": "srv" }
+    ],
+    "local": [
+      { "id": "c1", "parentId": "", "type": "url", "title": "Local edit", "url": "https://x", "index": 0 }
+    ],
+    "base": {
+      "head": 500,
+      "othersId": "md-others",
+      "entries": {
+        "b1": { "server": { "id": "b1", "parentId": "", "type": "url", "title": "Base", "url": "https://x", "position": 1, "revision": 105, "updatedAt": 1000, "deviceId": "srv" }, "localId": "c1", "appliedAt": 0 }
+      }
+    },
+    "touch": { "c1": { "at": 1800 } }
+  },
+  {
+    "name": "server edit newer than local edit applies server title locally",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [
+      { "id": "b1", "parentId": "", "type": "url", "title": "Server edit", "url": "https://x", "position": 1, "revision": 118, "updatedAt": 1900, "deviceId": "srv" }
+    ],
+    "local": [
+      { "id": "c1", "parentId": "", "type": "url", "title": "Local edit", "url": "https://x", "index": 0 }
+    ],
+    "base": {
+      "head": 500,
+      "othersId": "md-others",
+      "entries": {
+        "b1": { "server": { "id": "b1", "parentId": "", "type": "url", "title": "Base", "url": "https://x", "position": 1, "revision": 105, "updatedAt": 1000, "deviceId": "srv" }, "localId": "c1", "appliedAt": 0 }
+      }
+    },
+    "touch": { "c1": { "at": 1500 } }
+  },
+  {
+    "name": "reorder sweep: drag B above A pushes both slots",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [
+      { "id": "a1", "parentId": "", "type": "url", "title": "A", "url": "https://a", "position": 1, "revision": 120, "updatedAt": 1000, "deviceId": "srv" },
+      { "id": "b1", "parentId": "", "type": "url", "title": "B", "url": "https://b", "position": 2, "revision": 121, "updatedAt": 1000, "deviceId": "srv" }
+    ],
+    "local": [
+      { "id": "bar", "parentId": "", "type": "folder", "title": "书签栏", "index": 0 },
+      { "id": "b1", "parentId": "bar", "type": "url", "title": "B", "url": "https://b", "index": 0 },
+      { "id": "a1", "parentId": "bar", "type": "url", "title": "A", "url": "https://a", "index": 1 }
+    ],
+    "base": {
+      "head": 500,
+      "othersId": "md-others",
+      "entries": {
+        "a1": { "server": { "id": "a1", "parentId": "", "type": "url", "title": "A", "url": "https://a", "position": 1, "revision": 120, "updatedAt": 1000, "deviceId": "srv" }, "localId": "a1", "appliedAt": 0 },
+        "b1": { "server": { "id": "b1", "parentId": "", "type": "url", "title": "B", "url": "https://b", "position": 2, "revision": 121, "updatedAt": 1000, "deviceId": "srv" }, "localId": "b1", "appliedAt": 0 }
+      }
+    },
+    "touch": { "b1": { "at": 1800 } }
+  },
+  {
+    "name": "server-deleted row removes the bound local node",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [],
+    "local": [
+      { "id": "c1", "parentId": "", "type": "url", "title": "Go", "url": "https://go.dev", "index": 0 }
+    ],
+    "base": {
+      "head": 500,
+      "othersId": "md-others",
+      "entries": {
+        "b1": { "server": { "id": "b1", "parentId": "", "type": "url", "title": "Go", "url": "https://go.dev", "position": 1, "revision": 130, "updatedAt": 1000, "deviceId": "srv" }, "localId": "c1", "appliedAt": 0 }
+      }
+    },
+    "touch": {}
+  },
+  {
+    "name": "local delete pushes a server delete (LWW newer)",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [
+      { "id": "b1", "parentId": "", "type": "url", "title": "Go", "url": "https://go.dev", "position": 1, "revision": 135, "updatedAt": 1000, "deviceId": "srv" }
+    ],
+    "local": [],
+    "base": {
+      "head": 500,
+      "othersId": "md-others",
+      "entries": {
+        "b1": { "server": { "id": "b1", "parentId": "", "type": "url", "title": "Go", "url": "https://go.dev", "position": 1, "revision": 135, "updatedAt": 1000, "deviceId": "srv" }, "localId": "c1", "appliedAt": 0 }
+      }
+    },
+    "touch": { "c1": { "at": 1900, "removed": true } }
+  },
+  {
+    "name": "URL adoption: same URL unbound local adopts (slash divergence)",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [
+      { "id": "b1", "parentId": "", "type": "url", "title": "Site", "url": "https://x.com/", "position": 1, "revision": 140, "updatedAt": 1000, "deviceId": "srv" }
+    ],
+    "local": [
+      { "id": "bar", "parentId": "", "type": "folder", "title": "书签栏", "index": 0 },
+      { "id": "c1", "parentId": "bar", "type": "url", "title": "Site", "url": "https://x.com", "index": 0 }
+    ],
+    "touch": {}
+  },
+  {
+    "name": "minted-row re-rooting: folder deleted server-side, child re-pushes to top",
+    "deviceId": "dev-1",
+    "now": 2000,
+    "server": [],
+    "local": [
+      { "id": "bar", "parentId": "", "type": "folder", "title": "书签栏", "index": 0 },
+      { "id": "lf", "parentId": "bar", "type": "folder", "title": "F", "index": 0 },
+      { "id": "lc", "parentId": "lf", "type": "url", "title": "C", "url": "https://precious", "index": 0 }
+    ],
+    "base": {
+      "head": 500,
+      "othersId": "md-others",
+      "entries": {
+        "f1": { "server": { "id": "f1", "parentId": "", "type": "folder", "title": "F", "position": 1, "revision": 145, "updatedAt": 900, "deviceId": "srv" }, "localId": "lf", "appliedAt": 0 },
+        "minted-c": { "server": { "id": "minted-c", "parentId": "f1", "type": "url", "title": "C", "url": "https://precious", "position": 1, "revision": 0, "updatedAt": 1700, "deviceId": "dev-1" }, "localId": "lc", "appliedAt": 0 }
+      }
+    },
+    "touch": {}
+  }
+]

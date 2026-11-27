@@ -1,0 +1,43 @@
+{
+  "scenario": "local-only create pushes minted url under bar",
+  "chromeOps": [],
+  "serverOps": [
+    {
+      "op": "create",
+      "id": "e310aaf4-2874-4f8b-ae17-3a2febcd4969",
+      "parentId": "",
+      "type": "url",
+      "title": "New",
+      "url": "https://new.dev",
+      "position": 1,
+      "updatedAt": 1900,
+      "deviceId": "dev-1"
+    }
+  ],
+  "newBase": {
+    "e310aaf4-2874-4f8b-ae17-3a2febcd4969": {
+      "server": {
+        "id": "e310aaf4-2874-4f8b-ae17-3a2febcd4969",
+        "parentId": "",
+        "type": "url",
+        "title": "New",
+        "url": "https://new.dev",
+        "position": 1,
+        "revision": 0,
+        "updatedAt": 1900,
+        "deviceId": "dev-1"
+      },
+      "localId": "c1"
+    }
+  },
+  "stats": {
+    "planned": 1,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 0,
+    "pushed": 1,
+    "positionPushes": 0
+  }
+}

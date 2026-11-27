@@ -1,0 +1,63 @@
+{
+  "scenario": "reorder sweep: drag B above A pushes both slots",
+  "chromeOps": [],
+  "serverOps": [
+    {
+      "op": "update",
+      "id": "b1",
+      "title": "B",
+      "position": 1,
+      "updatedAt": 1800,
+      "deviceId": "dev-1",
+      "observedRevision": 121
+    },
+    {
+      "op": "update",
+      "id": "a1",
+      "position": 2,
+      "updatedAt": 2000,
+      "deviceId": "dev-1",
+      "observedRevision": 120
+    }
+  ],
+  "newBase": {
+    "a1": {
+      "server": {
+        "id": "a1",
+        "parentId": "",
+        "type": "url",
+        "title": "A",
+        "url": "https://a",
+        "position": 1,
+        "revision": 120,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": "a1"
+    },
+    "b1": {
+      "server": {
+        "id": "b1",
+        "parentId": "",
+        "type": "url",
+        "title": "B",
+        "url": "https://b",
+        "position": 2,
+        "revision": 121,
+        "updatedAt": 1000,
+        "deviceId": "srv"
+      },
+      "localId": "b1"
+    }
+  },
+  "stats": {
+    "planned": 2,
+    "chromeCreates": 0,
+    "chromeUpdates": 0,
+    "chromeMoves": 0,
+    "chromeRemoves": 0,
+    "adopted": 0,
+    "pushed": 1,
+    "positionPushes": 2
+  }
+}

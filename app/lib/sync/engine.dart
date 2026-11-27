@@ -1325,11 +1325,11 @@ String _uuidFromHash(String key) {
   // FNV-1a 64-bit ×2 → 128 bits, formatted as a UUID v4-shaped string.
   var h1 = 0x811c9dc5;
   var h2 = 0x01000193;
-  // BigInt(c) on the TS side hashes the FULL code unit value; Dart ints
-  // are 64-bit so we XOR the full value too, masking to 32 bits after mul.
   int fnv(int h, int c) {
-    h ^= c;
-    h = (h * 0x01000193) & 0xFFFFFFFF;
+    // JS BigInt masks the product with 0xffffffffffffffffn; Dart's int
+    // multiplication already wraps modulo 2^64, so the values match without
+    // an explicit mask.
+    h = (h ^ c) * 0x01000193;
     return h;
   }
 
@@ -1337,8 +1337,16 @@ String _uuidFromHash(String key) {
     h1 = fnv(h1, key.codeUnitAt(i));
     h2 = fnv(h2, key.codeUnitAt(key.length - 1 - i));
   }
-  final hex1 = h1.toRadixString(16).padLeft(8, '0');
-  final hex2 = h2.toRadixString(16).padLeft(8, '0');
+  // Dart ints are SIGNED 64-bit and toRadixString prefixes '-' on negatives
+  // (toUnsigned can't fix that — it value-wraps but the VM web/js semantics
+  // differ). Print each 32-bit half masked to positive instead; the halves
+  // concatenated reproduce the TS BigInt's unsigned 64-bit hex exactly.
+  final hex1 =
+      '${((h1 >> 32) & 0xFFFFFFFF).toRadixString(16).padLeft(8, '0')}'
+      '${(h1 & 0xFFFFFFFF).toRadixString(16).padLeft(8, '0')}';
+  final hex2 =
+      '${((h2 >> 32) & 0xFFFFFFFF).toRadixString(16).padLeft(8, '0')}'
+      '${(h2 & 0xFFFFFFFF).toRadixString(16).padLeft(8, '0')}';
   final hex = (hex1 + hex2).padLeft(32, '0').substring(0, 32);
   return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-4${hex.substring(13, 16)}-a${hex.substring(17, 20)}-${hex.substring(20, 32)}';
 }
