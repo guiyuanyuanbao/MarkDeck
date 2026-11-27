@@ -37,7 +37,7 @@ jobs:
 
       - name: Typecheck + lint + build web
         working-directory: web
-        run: npm ci && npm run typecheck && npm run lint && npm run build
+        run: npm ci && npm run typecheck && npm run lint && npm test && npm run build
 
       - name: Test extension
         working-directory: extension
