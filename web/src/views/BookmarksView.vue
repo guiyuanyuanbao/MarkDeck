@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
 import BatchMoveDialog from '@/components/BatchMoveDialog.vue'
@@ -10,7 +10,8 @@ import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
 import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
-import { buildTree } from '@/utils/ui'
+import { useViewMode, useGridSize } from '@/composables/useViewMode'
+import { buildTree, confirmAct } from '@/utils/ui'
 // BookmarksView shows date-only on list rows (other views use full
 // timestamps via the shared fmtDate) — keep this view's format verbatim.
 const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleDateString()
@@ -38,18 +39,9 @@ const moveDlg = ref<InstanceType<typeof BatchMoveDialog> | null>(null)
 const tagDlg = ref<InstanceType<typeof BatchTagDialog> | null>(null)
 const ctxMenu = ref<InstanceType<typeof ContextMenu> | null>(null)
 
-// ---- view mode (list | grid), persisted ----
-const viewMode = ref<'list' | 'grid'>((localStorage.getItem('md-view-mode') as 'list' | 'grid') || 'list')
-watch(viewMode, (v) => localStorage.setItem('md-view-mode', v))
-const gridSize = ref<'small' | 'medium' | 'large'>((localStorage.getItem('md-grid-size') as 'small' | 'medium' | 'large') || 'medium')
-watch(gridSize, (v) => {
-  localStorage.setItem('md-grid-size', v)
-  document.documentElement.setAttribute('data-gridsize', v)
-})
-// apply on mount too (initTheme handles theme; this handles grid density)
-if (!document.documentElement.getAttribute('data-gridsize')) {
-  document.documentElement.setAttribute('data-gridsize', gridSize.value)
-}
+// ---- view mode (list | grid), persisted (shared composable) ----
+const viewMode = useViewMode('md-view-mode')
+const gridSize = useGridSize()
 
 // searching / tag-filtering shows results outside the current folder —
 // drag-reorder and paste are meaningless there, so the view degrades to
@@ -129,14 +121,11 @@ async function toggleFav(b: Bookmark) {
 }
 async function removeMany(ids: string[]) {
   if (!ids.length) return
-  try {
-    await ElMessageBox.confirm(`将 ${ids.length} 项移入回收站？`, '删除', { type: 'warning' })
-  } catch { return } // user cancelled — not an error
-  try {
+  await confirmAct(`将 ${ids.length} 项移入回收站？`, '删除', async () => {
     await bookmarksApi.batch({ ids, action: 'delete' })
     ElMessage.success(`已删除 ${ids.length} 项`)
     loadTree(); loadList()
-  } catch (e: any) { ElMessage.error(e.message) }
+  })
 }
 
 // ---- selection (composable: ctrl/shift range semantics) ----

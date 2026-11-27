@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus' // ElMessageBox: prompt dialogs (rename/merge tag)
 import { bookmarksApi, type TagInfo } from '@/api/client'
 import { Icon } from '@/components/icons'
+import { confirmAct } from '@/utils/ui'
 
 const tags = ref<TagInfo[]>([])
 const loading = ref(false)
@@ -47,15 +48,12 @@ async function merge(t: TagInfo) {
   } catch (e: any) { ElMessage.error(e.message) }
 }
 
-async function remove(t: TagInfo) {
-  try {
-    await ElMessageBox.confirm(`从所有书签移除标签「${t.tag}」？（不影响书签本身）`, '删除标签', { type: 'warning' })
-  } catch { return }
-  try {
+function remove(t: TagInfo) {
+  void confirmAct(`从所有书签移除标签「${t.tag}」？（不影响书签本身）`, '删除标签', async () => {
     const r = await bookmarksApi.deleteTag(t.tag)
     ElMessage.success(`已移除（影响 ${r.affected} 个书签）`)
     load()
-  } catch (e: any) { ElMessage.error(e.message) }
+  })
 }
 
 // deterministic pastel per tag name (matches BookmarkAvatar palette family)

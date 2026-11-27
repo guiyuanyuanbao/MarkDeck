@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { authApi, toolsApi, type Device, type Snapshot } from '@/api/client'
 import { Icon } from '@/components/icons'
+import { confirmAct } from '@/utils/ui'
 
 const tab = ref('account')
 // deep-link: /settings#devices jumps straight to the pairing tab (the
@@ -136,15 +137,12 @@ async function confirmTotp() {
   }
 }
 
-async function disableTotp() {
-  try {
-    await ElMessageBox.confirm('关闭两步验证？', '确认', { type: 'warning' })
+function disableTotp() {
+  void confirmAct('关闭两步验证？', '确认', async () => {
     await authApi.totpDisable()
     totpEnabled.value = false
     ElMessage.success('已关闭')
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
-  }
+  }, { errorText: '操作失败' })
 }
 
 async function loadProxy() {
@@ -213,15 +211,12 @@ async function copyPairCode() {
   }
 }
 
-async function revoke(d: Device) {
-  try {
-    await ElMessageBox.confirm(`吊销设备「${d.name}」？其同步将立即停止。`, '吊销设备', { type: 'warning' })
+function revoke(d: Device) {
+  void confirmAct(`吊销设备「${d.name}」？其同步将立即停止。`, '吊销设备', async () => {
     await authApi.revokeDevice(d.id)
     loadAll()
     ElMessage.success('已吊销')
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
-  }
+  }, { errorText: '吊销失败' })
 }
 
 async function takeSnapshot() {
@@ -291,21 +286,19 @@ loadRetention()
 
 const restoring = ref(false)
 const snapUploadEl = ref<HTMLInputElement | null>(null)
-async function restoreSnap(s: Snapshot) {
+function restoreSnap(s: Snapshot) {
   if (restoring.value) return
   restoring.value = true
-  try {
-    await ElMessageBox.confirm(
-      `将书签库恢复到 ${new Date(s.createdAt * 1000).toLocaleString()} 的快照？\n当前状态会先自动备份（pre-restore 快照）。`,
-      '恢复快照', { type: 'warning' })
-    await toolsApi.restoreSnapshot(s.id)
-    ElMessage.success('已恢复，所有设备将自动同步')
-    loadAll()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('恢复失败: ' + e.message)
-  } finally {
+  void confirmAct(
+    `将书签库恢复到 ${new Date(s.createdAt * 1000).toLocaleString()} 的快照？\n当前状态会先自动备份（pre-restore 快照）。`,
+    '恢复快照', async () => {
+      await toolsApi.restoreSnapshot(s.id)
+      ElMessage.success('已恢复，所有设备将自动同步')
+      loadAll()
+    }, { errorText: '恢复失败' },
+  ).finally(() => {
     restoring.value = false
-  }
+  })
 }
 
 // upload a previously downloaded snapshot file (.json.gz) and restore it
@@ -318,23 +311,15 @@ async function uploadSnapshotFile(ev: Event) {
     input.value = ''
     return
   }
-  try {
-    await ElMessageBox.confirm(
-      `导入并恢复快照「${file.name}」？\n当前状态会先自动备份（pre-restore 快照）。`,
-      '导入快照', { type: 'warning' })
-  } catch {
-    input.value = ''
-    return
-  }
-  try {
-    await toolsApi.uploadSnapshot(file)
-    ElMessage.success('快照已导入并恢复，所有设备将自动同步')
-    loadAll()
-  } catch (e: any) {
-    ElMessage.error('导入失败: ' + (e?.message || '文件无法解析'))
-  } finally {
-    input.value = ''
-  }
+  await confirmAct(
+    `导入并恢复快照「${file.name}」？\n当前状态会先自动备份（pre-restore 快照）。`,
+    '导入快照', async () => {
+      await toolsApi.uploadSnapshot(file)
+      ElMessage.success('快照已导入并恢复，所有设备将自动同步')
+      loadAll()
+    }, { errorText: '导入失败' },
+  )
+  input.value = ''
 }
 </script>
 <template>

@@ -40,17 +40,44 @@ export function folderTree(rows: { id: string; parentId: string; type: string; t
   return (byParent.get('') || []).filter((k) => k.type === 'folder').map(mk)
 }
 
-// confirmAct wraps ElMessageBox.confirm + action with the shared semantics:
-// user cancel ('cancel'/'close' rejection) is silent, real errors surface
-// via ElMessage.error when the caller passes a message, or rethrow for
-// callers that handle errors themselves.
-import { ElMessageBox } from 'element-plus'
+// confirmAct wraps ElMessageBox.confirm + action with the codebase's shared
+// semantics (previously copy-pasted ×15+): user cancel ('cancel'/'close'
+// rejection) is silent, real action errors surface via ElMessage.error with
+// the caller's prefix. opts pass through to the dialog (type, button text).
+import { ElMessageBox, ElMessage } from 'element-plus'
 
-export async function confirmAct(message: string, title: string, action: () => Promise<void> | void, opts?: { type?: 'warning' | 'info' | 'error' }): Promise<void> {
+export async function confirmAct(
+  message: string,
+  title: string,
+  action: () => Promise<void> | void,
+  opts?: {
+    type?: 'warning' | 'info' | 'error'
+    confirmButtonText?: string
+    cancelButtonText?: string
+    // error prefix for ElMessage.error, e.g. '合并失败'
+    errorText?: string
+  },
+): Promise<void> {
   try {
-    await ElMessageBox.confirm(message, title, { type: opts?.type ?? 'warning' })
+    await ElMessageBox.confirm(message, title, {
+      type: opts?.type ?? 'warning',
+      confirmButtonText: opts?.confirmButtonText,
+      cancelButtonText: opts?.cancelButtonText,
+    })
   } catch {
     return // user cancelled — not an error
   }
-  await action()
+  try {
+    await action()
+  } catch (e) {
+    ElMessage.error(opts?.errorText ? `${opts.errorText}: ${errMsg(e)}` : errMsg(e))
+  }
+}
+
+// errMsg extracts a human-readable message from a thrown value without
+// typing it as any — the typed-error migration's single funnel.
+export function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message
+  if (typeof e === 'string') return e
+  return '未知错误'
 }

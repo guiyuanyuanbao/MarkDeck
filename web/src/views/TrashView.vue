@@ -6,7 +6,7 @@
 // defaults to the original location, rebuilds deleted ancestor paths
 // server-side (RestoreWithPath shells) and merges into same-name folders.
 import { ref, computed, onMounted, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
 import RestoreDialog from '@/components/RestoreDialog.vue'
@@ -15,7 +15,8 @@ import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
 import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
-import { fmtDate } from '@/utils/ui'
+import { useViewMode, useGridSize } from '@/composables/useViewMode'
+import { fmtDate, confirmAct } from '@/utils/ui'
 
 const trash = ref<Bookmark[]>([])
 const loading = ref(false)
@@ -100,25 +101,11 @@ const scope = ref<'all' | 'url' | 'folder' | '7d' | 'older'>('all')
 const q = ref('')
 const sortBy = ref<'deletedDesc' | 'deletedAsc' | 'title'>('deletedDesc')
 
-// view mode (list | grid), persisted separately from the bookmarks view
-const viewMode = ref<'list' | 'grid'>((localStorage.getItem('md-trash-view-mode') as 'list' | 'grid') || 'list')
-function toggleViewMode() {
-  viewMode.value = viewMode.value === 'list' ? 'grid' : 'list'
-  localStorage.setItem('md-trash-view-mode', viewMode.value)
-}
-
-// grid density: shares the bookmarks view's global data-gridsize attribute and
-// md-grid-size key, so both grids stay in sync (same --grid-min variable)
-const gridSize = ref<'small' | 'medium' | 'large'>((localStorage.getItem('md-grid-size') as 'small' | 'medium' | 'large') || 'medium')
-watch(gridSize, (v) => {
-  localStorage.setItem('md-grid-size', v)
-  document.documentElement.setAttribute('data-gridsize', v)
-})
-// entering trash directly (deep link / refresh) — apply the stored density,
-// the attribute only carries over when BookmarksView set it earlier
-if (!document.documentElement.getAttribute('data-gridsize')) {
-  document.documentElement.setAttribute('data-gridsize', gridSize.value)
-}
+// view mode (list | grid), persisted separately from the bookmarks view;
+// grid density shares the bookmarks view's global data-gridsize attribute
+// and md-grid-size key (shared composables)
+const viewMode = useViewMode('md-trash-view-mode')
+const gridSize = useGridSize()
 
 const restoreDlg = ref<InstanceType<typeof RestoreDialog> | null>(null)
 const ctxMenu = ref<InstanceType<typeof ContextMenu> | null>(null)
@@ -312,45 +299,45 @@ function confirmPurgeText(items: Bookmark[]): string {
   return `永久删除所选 ${items.length} 项？此操作不可撤销。`
 }
 
-async function purge(items: Bookmark[]) {
+function purge(items: Bookmark[]) {
   if (!items.length) return
-  try {
-    await ElMessageBox.confirm(confirmPurgeText(items), '彻底删除', { type: 'error', confirmButtonText: '彻底删除' })
-  } catch { return }
   busy.value = true
-  let ok = 0
-  let failed = 0
-  try {
-    for (const b of items) {
-      try { await bookmarksApi.purge(b.id); ok++ } catch { failed++ }
+  void confirmAct(confirmPurgeText(items), '彻底删除', async () => {
+    let ok = 0
+    let failed = 0
+    try {
+      for (const b of items) {
+        try { await bookmarksApi.purge(b.id); ok++ } catch { failed++ }
+      }
+      if (failed) ElMessage.warning(`已删除 ${ok} 项，${failed} 项失败`)
+      else ElMessage.success(`已永久删除 ${ok} 项`)
+      load()
+    } finally {
+      busy.value = false
     }
-    if (failed) ElMessage.warning(`已删除 ${ok} 项，${failed} 项失败`)
-    else ElMessage.success(`已永久删除 ${ok} 项`)
-    load()
-  } finally {
-    busy.value = false
-  }
+  }, { type: 'error', confirmButtonText: '彻底删除' })
+    .finally(() => { busy.value = false })
 }
 
-async function emptyAll() {
+function emptyAll() {
   if (!trash.value.length) return
-  try {
-    await ElMessageBox.confirm(`彻底删除回收站中全部 ${trash.value.length} 项？此操作不可撤销。`, '清空回收站', { type: 'error', confirmButtonText: '全部删除' })
-  } catch { return }
   busy.value = true
-  let ok = 0
-  let failed = 0
-  try {
-    for (const b of trash.value) {
-      try { await bookmarksApi.purge(b.id); ok++ } catch { failed++ }
+  void confirmAct(`彻底删除回收站中全部 ${trash.value.length} 项？此操作不可撤销。`, '清空回收站', async () => {
+    let ok = 0
+    let failed = 0
+    try {
+      for (const b of trash.value) {
+        try { await bookmarksApi.purge(b.id); ok++ } catch { failed++ }
+      }
+      if (failed) ElMessage.warning(`已删除 ${ok} 项，${failed} 项失败`)
+      else ElMessage.success('回收站已清空')
+      currentFolder.value = ''
+      load()
+    } finally {
+      busy.value = false
     }
-    if (failed) ElMessage.warning(`已删除 ${ok} 项，${failed} 项失败`)
-    else ElMessage.success('回收站已清空')
-    currentFolder.value = ''
-    load()
-  } finally {
-    busy.value = false
-  }
+  }, { type: 'error', confirmButtonText: '全部删除' })
+    .finally(() => { busy.value = false })
 }
 
 function viewInfo(b: Bookmark) {
@@ -392,7 +379,7 @@ function blankMenu(ev: MouseEvent) {
   const items: (CtxMenuItem | 'divider')[] = [
     { label: '全选', icon: 'check', handler: toggleAll },
     { label: '刷新', icon: 'refresh', handler: load },
-    { label: viewMode.value === 'list' ? '切换到图标视图' : '切换到列表视图', icon: viewMode.value === 'list' ? 'grid' : 'list', handler: toggleViewMode },
+    { label: viewMode.value === 'list' ? '切换到图标视图' : '切换到列表视图', icon: viewMode.value === 'list' ? 'grid' : 'list', handler: () => (viewMode.value = viewMode.value === 'list' ? 'grid' : 'list') },
   ]
   if (currentFolder.value) {
     items.push('divider', { label: '返回上一级', icon: 'up', handler: goUp })

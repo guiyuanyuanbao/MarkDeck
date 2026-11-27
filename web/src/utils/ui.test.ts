@@ -1,16 +1,16 @@
 // Tests for the shared UI helpers: tree assembly from flat server rows and
 // the confirmAct cancel-is-silent contract.
 import { describe, it, expect, vi } from 'vitest'
-import { buildTree, folderTree, fmtDate, confirmAct } from './ui'
+import { buildTree, folderTree, fmtDate, confirmAct, errMsg } from './ui'
 
-// element-plus ElMessageBox is mocked so confirmAct's cancel path is tested
-// without a dialog actually rendering (jsdom has no overlay).
+// element-plus ElMessageBox/ElMessage are mocked so confirmAct's cancel and
+// error paths are tested without a dialog actually rendering (jsdom has no
+// overlay).
 vi.mock('element-plus', () => ({
-  ElMessageBox: {
-    confirm: vi.fn(),
-  },
+  ElMessageBox: { confirm: vi.fn() },
+  ElMessage: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
-import { ElMessageBox } from 'element-plus'
+import { ElMessageBox, ElMessage } from 'element-plus'
 
 describe('buildTree', () => {
   const rows = [
@@ -65,7 +65,9 @@ describe('confirmAct', () => {
     vi.mocked(ElMessageBox.confirm).mockResolvedValueOnce('confirm' as never)
     const action = vi.fn()
     await confirmAct('msg', 'title', action)
-    expect(ElMessageBox.confirm).toHaveBeenCalledWith('msg', 'title', { type: 'warning' })
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith('msg', 'title', {
+      type: 'warning', confirmButtonText: undefined, cancelButtonText: undefined,
+    })
     expect(action).toHaveBeenCalledTimes(1)
   })
 
@@ -83,9 +85,32 @@ describe('confirmAct', () => {
     expect(action).not.toHaveBeenCalled()
   })
 
-  it('passes opts.type through to the dialog', async () => {
+  it('action error surfaces via ElMessage.error with the caller prefix', async () => {
     vi.mocked(ElMessageBox.confirm).mockResolvedValueOnce('confirm' as never)
-    await confirmAct('m', 't', () => {}, { type: 'error' })
-    expect(ElMessageBox.confirm).toHaveBeenCalledWith('m', 't', { type: 'error' })
+    await confirmAct('m', 't', () => Promise.reject(new Error('boom')), { errorText: '合并失败' })
+    expect(ElMessage.error).toHaveBeenCalledWith('合并失败: boom')
+  })
+
+  it('action error without prefix shows the raw message', async () => {
+    vi.mocked(ElMessageBox.confirm).mockResolvedValueOnce('confirm' as never)
+    await confirmAct('m', 't', () => Promise.reject(new Error('boom')))
+    expect(ElMessage.error).toHaveBeenCalledWith('boom')
+  })
+
+  it('passes opts.type and button text through to the dialog', async () => {
+    vi.mocked(ElMessageBox.confirm).mockResolvedValueOnce('confirm' as never)
+    await confirmAct('m', 't', () => {}, { type: 'error', confirmButtonText: '彻底删除' })
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith('m', 't', {
+      type: 'error', confirmButtonText: '彻底删除', cancelButtonText: undefined,
+    })
+  })
+})
+
+describe('errMsg', () => {
+  it('extracts Error.message, passes strings through, and falls back for other values', () => {
+    expect(errMsg(new Error('x'))).toBe('x')
+    expect(errMsg('cancel')).toBe('cancel')
+    expect(errMsg(undefined)).toBe('未知错误')
+    expect(errMsg(42)).toBe('未知错误')
   })
 })

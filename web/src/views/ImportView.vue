@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { uploadFile, api } from '@/api/client'
 import { Icon } from '@/components/icons'
+import { confirmAct } from '@/utils/ui'
 
 const uploading = ref(false)
 const mode = ref<'newfolder' | 'merge'>('merge')
@@ -37,14 +38,19 @@ function onChange(e: Event) {
 async function doImport() {
   const f = pendingFile.value
   if (!f) return
+  // merge mode gates on a confirm; confirmAct swallows the cancel silently
+  // and only runs the import on 确认
   if (mode.value === 'merge') {
-    try {
-      await ElMessageBox.confirm(
-        '合并导入会按 URL 去重写入库中（已有书签保持不动）。继续吗？', '合并导入',
-        { type: 'info', confirmButtonText: '开始导入', cancelButtonText: '取消' },
-      )
-    } catch { return }
+    await confirmAct(
+      '合并导入会按 URL 去重写入库中（已有书签保持不动）。继续吗？', '合并导入',
+      () => runImport(f), { type: 'info', confirmButtonText: '开始导入', cancelButtonText: '取消', errorText: '导入失败' },
+    )
+    return
   }
+  await runImport(f)
+}
+
+async function runImport(f: File) {
   uploading.value = true
   result.value = null
   try {

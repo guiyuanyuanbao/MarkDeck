@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { toolsApi, authApi, bookmarksApi, type Bookmark } from '@/api/client'
 import { Icon } from '@/components/icons'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
+import { confirmAct } from '@/utils/ui'
 
 const tab = ref('dead')
 const scanning = ref(false)
@@ -106,15 +107,14 @@ function toggleAllDead() {
 async function deleteDeadSelected() {
   const ids = [...deadSel.value]
   if (!ids.length) return
+  deadDeleting.value = true
   try {
-    await ElMessageBox.confirm(`将所选 ${ids.length} 条失效/可疑书签移入回收站？可在回收站恢复。`, '批量删除', { type: 'warning' })
-    deadDeleting.value = true
-    await bookmarksApi.batch({ ids, action: 'delete' })
-    ElMessage.success(`已移入回收站 ${ids.length} 条`)
-    deadSel.value = new Set()
-    await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+    await confirmAct(`将所选 ${ids.length} 条失效/可疑书签移入回收站？可在回收站恢复。`, '批量删除', async () => {
+      await bookmarksApi.batch({ ids, action: 'delete' })
+      ElMessage.success(`已移入回收站 ${ids.length} 条`)
+      deadSel.value = new Set()
+      await load()
+    })
   } finally {
     deadDeleting.value = false
   }
@@ -122,16 +122,13 @@ async function deleteDeadSelected() {
 
 // clear the whole result list: the dead-links list is a temporary working
 // surface (scan → review → fix/delete → clear), not an archive
-async function clearDeadRecords() {
-  try {
-    await ElMessageBox.confirm('清空全部检测记录？书签本身不受影响，下次扫描会重新生成。', '清空检测记录', { type: 'warning' })
+function clearDeadRecords() {
+  void confirmAct('清空全部检测记录？书签本身不受影响，下次扫描会重新生成。', '清空检测记录', async () => {
     await toolsApi.clearDead()
     deadSel.value = new Set()
     ElMessage.success('检测记录已清空')
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
-  }
+  })
 }
 
 // ---- duplicate bookmarks ----
@@ -146,36 +143,30 @@ function toggleAllDup() {
   else selDup.value = new Set(dups.value.map(dupKey))
 }
 
-async function mergeGroup(g: { key: string; items: Bookmark[] }) {
+function mergeGroup(g: { key: string; items: Bookmark[] }) {
   const keep = g.items[0]
   const removes = g.items.slice(1).map((i) => i.id)
-  try {
-    await ElMessageBox.confirm(
-      `保留「${keep.title || keep.url}」（最早创建），其余 ${removes.length} 条移入回收站，标签与备注会合并到保留项。继续？`,
-      '合并重复', { type: 'warning' })
-    await toolsApi.mergeDup(keep.id, removes)
-    ElMessage.success('已合并')
-    load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('合并失败: ' + e.message)
-  }
+  void confirmAct(
+    `保留「${keep.title || keep.url}」（最早创建），其余 ${removes.length} 条移入回收站，标签与备注会合并到保留项。继续？`,
+    '合并重复', async () => {
+      await toolsApi.mergeDup(keep.id, removes)
+      ElMessage.success('已合并')
+      load()
+    }, { errorText: '合并失败' },
+  )
 }
 
-async function mergeSelectedDups() {
+function mergeSelectedDups() {
   const groups = dups.value.filter((g) => selDup.value.has(dupKey(g)))
   if (!groups.length) return
   const totalRemove = groups.reduce((n, g) => n + g.items.length - 1, 0)
-  try {
-    await ElMessageBox.confirm(
-      `将合并 ${groups.length} 组重复书签，各组保留最早一条，其余 ${totalRemove} 条移入回收站（标签/备注并入保留项）。继续？`,
-      '批量合并重复书签', { type: 'warning' })
-    await runBatch(groups.map((g) => ({
+  void confirmAct(
+    `将合并 ${groups.length} 组重复书签，各组保留最早一条，其余 ${totalRemove} 条移入回收站（标签/备注并入保留项）。继续？`,
+    '批量合并重复书签', () => runBatch(groups.map((g) => ({
       keep: g.items[0].id,
       removes: g.items.slice(1).map((i) => i.id),
-    })), 'dup')
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('批量合并失败: ' + e.message)
-  }
+    })), 'dup'), { errorText: '批量合并失败' },
+  )
 }
 
 // ---- duplicate folders ----
@@ -190,35 +181,29 @@ function toggleAllFolder() {
   else selFolder.value = new Set(folderDups.value.map(folderKey))
 }
 
-async function mergeFolderGroup(g: { parentId: string; title: string; items: Bookmark[] }) {
+function mergeFolderGroup(g: { parentId: string; title: string; items: Bookmark[] }) {
   const keep = g.items[0]
   const removes = g.items.slice(1).map((i) => i.id)
-  try {
-    await ElMessageBox.confirm(
-      `保留第一个「${g.title}」文件夹，其余 ${removes.length} 个副本中的书签会并入保留文件夹（URL 重复的丢弃），副本壳移入回收站。继续？`,
-      '合并重复文件夹', { type: 'warning' })
-    const r = await toolsApi.mergeFolderDup(keep.id, removes)
-    ElMessage.success(`已合并，${r.moved ?? 0} 条书签移入保留文件夹`)
-    load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('合并失败: ' + e.message)
-  }
+  void confirmAct(
+    `保留第一个「${g.title}」文件夹，其余 ${removes.length} 个副本中的书签会并入保留文件夹（URL 重复的丢弃），副本壳移入回收站。继续？`,
+    '合并重复文件夹', async () => {
+      const r = await toolsApi.mergeFolderDup(keep.id, removes)
+      ElMessage.success(`已合并，${r.moved ?? 0} 条书签移入保留文件夹`)
+      load()
+    }, { errorText: '合并失败' },
+  )
 }
 
-async function mergeSelectedFolders() {
+function mergeSelectedFolders() {
   const groups = folderDups.value.filter((g) => selFolder.value.has(folderKey(g)))
   if (!groups.length) return
-  try {
-    await ElMessageBox.confirm(
-      `将合并 ${groups.length} 组重复文件夹（每组保留第一个副本，其余内容并入）。继续？`,
-      '批量合并重复文件夹', { type: 'warning' })
-    await runBatch(groups.map((g) => ({
+  void confirmAct(
+    `将合并 ${groups.length} 组重复文件夹（每组保留第一个副本，其余内容并入）。继续？`,
+    '批量合并重复文件夹', () => runBatch(groups.map((g) => ({
       keep: g.items[0].id,
       removes: g.items.slice(1).map((i) => i.id),
-    })), 'folder')
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('批量合并失败: ' + e.message)
-  }
+    })), 'folder'), { errorText: '批量合并失败' },
+  )
 }
 
 // sequential merge with progress; server endpoints are per-group but the
@@ -251,19 +236,17 @@ async function runBatch(groups: { keep: string; removes: string[] }[], kind: 'du
 }
 
 // ---- favicon cache maintenance ----
-async function clearFavicons() {
-  try {
-    await ElMessageBox.confirm(
-      '清空服务端缓存的全部网站图标。清空后各设备下次同步会重新上传浏览器里的真实图标，服务端也会重新抓取。此操作立即生效。',
-      '重扫网站图标', { type: 'warning' })
-    clearingFavicons.value = true
-    await authApi.clearFavicons()
-    ElMessage.success('图标缓存已清空，等待各设备下次同步自动重推')
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error('操作失败: ' + e.message)
-  } finally {
+function clearFavicons() {
+  clearingFavicons.value = true
+  void confirmAct(
+    '清空服务端缓存的全部网站图标。清空后各设备下次同步会重新上传浏览器里的真实图标，服务端也会重新抓取。此操作立即生效。',
+    '重扫网站图标', async () => {
+      await authApi.clearFavicons()
+      ElMessage.success('图标缓存已清空，等待各设备下次同步自动重推')
+    }, { errorText: '操作失败' },
+  ).finally(() => {
     clearingFavicons.value = false
-  }
+  })
 }
 </script>
 <template>
