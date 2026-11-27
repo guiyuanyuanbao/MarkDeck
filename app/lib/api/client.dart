@@ -130,6 +130,15 @@ class ApiClient {
   Future<dynamic> delete(String path) =>
       _run(() => _http.delete(_uri(path), headers: _headers(mutating: true)), mutating: true);
 
+  /// Raw bytes fetch (export/download endpoints).
+  Future<http.Response> getBytes(String path) async {
+    final resp = await _http.get(_uri(path), headers: _headers()).timeout(timeout);
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw ApiException(resp.statusCode, 'HTTP ${resp.statusCode}');
+    }
+    return resp;
+  }
+
   // ---- auth: setup detection, pairing, admin login ----
 
   /// GET /api/auth/state -> {setup, totp}. `setup` true = first run.
