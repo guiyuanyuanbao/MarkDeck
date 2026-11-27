@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import type { ElTree } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 
 const visible = ref(false)
 const loading = ref(false)
 const emit = defineEmits<{ done: [] }>()
+const treeRef = ref<InstanceType<typeof ElTree> | null>(null)
 
 interface NodeItem { id: string; label: string; children?: NodeItem[] }
 const folders = ref<NodeItem[]>([])
@@ -33,6 +35,11 @@ function open(ids: string[], excludeFolderId?: string) {
       items.filter((i) => i.id !== excludeFolderId).map((i) => ({ ...i, children: i.children ? prune(i.children) : undefined }))
     folders.value = prune(folders.value)
     visible.value = true
+    // el-tree keeps its highlight-current node across dialog opens while
+    // target resets to '' — the highlighted row promised a selection the
+    // confirm button would refuse. Clear both together: nothing highlighted
+    // until the user actually clicks a folder.
+    treeRef.value?.setCurrentKey(null)
   })
 }
 
@@ -57,6 +64,7 @@ defineExpose({ open })
 <template>
   <el-dialog v-model="visible" title="移动到文件夹" width="420px">
     <el-tree
+      ref="treeRef"
       :data="folders"
       node-key="id"
       :props="{ label: 'label', children: 'children' }"

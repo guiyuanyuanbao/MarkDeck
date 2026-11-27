@@ -496,6 +496,17 @@ function blankMenu(ev: MouseEvent) {
   ctxMenu.value?.open(ev.clientX, ev.clientY, items)
 }
 
+// left-click on empty space clears the selection (file-manager habit):
+// anything that is NOT an item row/card counts as blank — header, side
+// tree, paddings, gaps. Clicks inside interactive widgets (dialogs,
+// context menus, batch bar buttons) bubble through overlays whose
+// closest() also matches, so they never reach the clear path.
+function blankClick(ev: MouseEvent) {
+  if (!checked.value.size) return
+  if ((ev.target as HTMLElement).closest('.bm-row, .bm-card, .folder-node, .el-dialog, .ctx-menu, .batch-bar, .el-tree, .crumbs, .head-actions, button, input, .el-select, .el-input')) return
+  clearSelection()
+}
+
 const folderName = computed(() => currentFolder.value === '' ? '根目录' : flat.value.get(currentFolder.value)?.title || '')
 
 // breadcrumb: root → ... → current folder, every crumb clickable
@@ -566,6 +577,7 @@ function goUp() {
       tabindex="0"
       @keydown="onKeydown"
       @contextmenu.prevent="blankMenu"
+      @click="blankClick"
     >
       <div class="content-head">
         <div class="head-top">
