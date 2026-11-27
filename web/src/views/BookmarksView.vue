@@ -5,17 +5,17 @@ import { bookmarksApi, type Bookmark } from '@/api/client'
 import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
 import BatchMoveDialog from '@/components/BatchMoveDialog.vue'
 import BatchTagDialog from '@/components/BatchTagDialog.vue'
-import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
 import ViewSwitch from '@/components/ViewSwitch.vue'
 import GridSizeSwitch from '@/components/GridSizeSwitch.vue'
-import EmptyState from '@/components/EmptyState.vue'
-import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
 import { useViewMode, useGridSize } from '@/composables/useViewMode'
 import { useBookmarkClipboard } from '@/composables/useBookmarkClipboard'
 import { buildTree, confirmAct, errMsg, type TreeNode } from '@/utils/ui'
+import FolderTree from './bookmarks/FolderTree.vue'
+import BookmarkList from './bookmarks/BookmarkList.vue'
+import BookmarkGrid from './bookmarks/BookmarkGrid.vue'
 // BookmarksView shows date-only on list rows (other views use full
 // timestamps via the shared fmtDate) — keep this view's format verbatim.
 const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleDateString()
@@ -228,6 +228,18 @@ async function onListDrop(ev: DragEvent) {
   await persistReorder(spliceIds(list.value, insertAt, ids))
 }
 
+// folder-row drop (forwarded from BookmarkList): a folder row takes a
+// move-into only when NOT over a reorder line — otherwise the list drop
+// (reorder) wins. Semantics verbatim from the pre-split template expression.
+async function onRowFolderDrop(b: Bookmark, ev: DragEvent) {
+  if (dropLineIdx.value !== null) {
+    await onListDrop(ev)
+    return
+  }
+  dropHoverId.value = null
+  await moveIds(draggedIds(ev), b.id)
+}
+
 // persist a reorder: currentIds is the FULL sibling sequence with the
 // dragged set already spliced at the insertion point. Both views end here.
 async function persistReorder(currentIds: string[]) {
@@ -410,6 +422,30 @@ function blankMenu(ev: MouseEvent) {
   ctxMenu.value?.open(ev.clientX, ev.clientY, items)
 }
 
+// sidebar folder node menu (forwarded from FolderTree; previously inline in
+// the el-tree node template)
+function folderMenu(folderId: string, ev: MouseEvent) {
+  ctxMenu.value?.open(ev.clientX, ev.clientY, [
+    { label: '打开', icon: 'folder', handler: () => (currentFolder.value = folderId) },
+    { label: '新建书签', icon: 'plus', handler: () => editDlg.value?.openCreate(folderId, 'url') },
+    { label: '新建文件夹', icon: 'folder', handler: () => editDlg.value?.openCreate(folderId, 'folder') },
+    'divider',
+    { label: '粘贴到此', icon: 'paste', disabled: !clipboard.value, handler: () => pasteIntoFolder(folderId) },
+  ])
+}
+
+// paste the clipboard into a sidebar folder: temporarily browse that folder
+// so paste()'s target resolves there, then restore the previous folder
+async function pasteIntoFolder(folderId: string) {
+  const f = currentFolder.value
+  currentFolder.value = folderId
+  try {
+    await paste()
+  } finally {
+    currentFolder.value = f
+  }
+}
+
 // left-click on empty space clears the selection (file-manager habit):
 // anything that is NOT an item row/card counts as blank — header, side
 // tree, paddings, gaps. Clicks inside interactive widgets (dialogs,
@@ -447,42 +483,16 @@ function goUp() {
 <template>
   <div class="bm-layout">
     <!-- folder tree -->
-    <div class="bm-side">
-      <div class="panel-head">
-        <span class="panel-title">文件夹</span>
-        <button class="icon-btn" title="新建文件夹" @click="openCreate('folder')">＋</button>
-      </div>
-      <div class="tree-scroll">
-        <el-tree
-          :data="tree"
-          node-key="id"
-          :props="{ label: 'label', children: 'children', isLeaf: 'isLeaf' }"
-          :expand-on-click-node="false"
-          highlight-current
-          @node-click="(n: TreeNode) => (currentFolder = n.id)"
-        >
-          <template #default="{ data }">
-            <span
-              class="folder-node"
-              :class="{ 'drop-target': dropHoverId === data.id }"
-              @dragover.prevent="dropHoverId = data.id"
-              @dragleave="dropHoverId === data.id && (dropHoverId = null)"
-              @drop.prevent="dropHoverId = null; moveIds(draggedIds($event), data.id)"
-              @contextmenu.prevent.stop="ctxMenu?.open($event.clientX, $event.clientY, [
-                { label: '打开', icon: 'folder', handler: () => (currentFolder = data.id) },
-                { label: '新建书签', icon: 'plus', handler: () => editDlg?.openCreate(data.id, 'url') },
-                { label: '新建文件夹', icon: 'folder', handler: () => editDlg?.openCreate(data.id, 'folder') },
-                'divider',
-                { label: '粘贴到此', icon: 'paste', disabled: !clipboard, handler: () => { const f = currentFolder; currentFolder = data.id; paste().then(() => (currentFolder = f)) } },
-              ])"
-            >
-              <span style="display:inline-flex;color:var(--md-warning)"><Icon name="folder" :size="15" /></span>
-              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ data.label }}</span>
-            </span>
-          </template>
-        </el-tree>
-      </div>
-    </div>
+    <FolderTree
+      :tree="tree"
+      :drop-hover-id="dropHoverId"
+      @open-folder="(id) => (currentFolder = id)"
+      @create="(folderId, type) => editDlg?.openCreate(folderId, type)"
+      @paste-into="pasteIntoFolder"
+      @node-drop="(folderId, ev) => moveIds(parseDraggedIds(ev), folderId)"
+      @hover="(id) => (dropHoverId = id)"
+      @node-menu="folderMenu"
+    />
 
     <!-- content -->
     <div
@@ -537,110 +547,47 @@ function goUp() {
       </div>
 
       <!-- ==================== LIST VIEW ==================== -->
-      <div
+      <BookmarkList
         v-if="viewMode === 'list'"
-        class="bm-list"
-        @drop="onListDrop"
-        @dragover="dragging && browsing && $event.preventDefault()"
-      >
-        <!-- header row: mirrors the data-row column structure exactly
-             (avatar slot + tags + date) so columns align -->
-        <div class="bm-row bm-row-head">
-          <el-checkbox :model-value="allChecked" @change="toggleAll" />
-          <div class="bm-avatar bm-avatar-head" />
-          <span class="bm-main bm-col-head">标题</span>
-          <div class="bm-tags bm-tags-head"><span style="visibility:hidden">.</span></div>
-          <span class="bm-date bm-col-head">添加日期</span>
-        </div>
-
-        <template v-for="(b, idx) in list" :key="b.id">
-          <div
-            v-if="dropLineIdx === idx"
-            class="drop-line"
-          />
-          <div
-            class="bm-row"
-            :class="{ selected: checked.has(b.id), droppable: b.type === 'folder' && dropHoverId === b.id }"
-            :draggable="true"
-            @dragstart="onDragStartCapture(b, $event, idx)"
-            @dragend="onDragEnd"
-            @dragover="onRowDragOver(b, $event, idx)"
-            @dragleave="onRowDragLeave"
-            @drop.prevent="b.type === 'folder' && dropLineIdx === null ? (dropHoverId = null, moveIds(draggedIds($event), b.id)) : onListDrop($event)"
-            @click="selectRow(b, $event, idx)"
-            @dblclick="activate(b)"
-            @contextmenu.prevent.stop="itemMenu(b, $event)"
-          >
-            <el-checkbox
-              :model-value="checked.has(b.id)"
-              @click.stop
-              @change="checked.has(b.id) ? checked.delete(b.id) : checked.add(b.id)"
-            />
-            <BookmarkAvatar :b="b" :size="26" />
-            <div class="bm-main">
-              <div class="bm-title">
-                <a v-if="b.type === 'url'" :href="b.url" target="_blank" rel="noopener noreferrer" @click.stop>{{ b.title || b.url }}</a>
-                <template v-else>{{ b.title }}</template>
-                <span v-if="b.favorite" class="fav-star">
-                  <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-                </span>
-                <span v-if="b.note" title="含备注" style="color:var(--md-text-3);display:inline-flex"><Icon name="note" :size="13" /></span>
-              </div>
-              <div class="bm-url" v-if="b.type === 'url'">{{ b.url }}</div>
-            </div>
-            <div class="bm-tags">
-              <span v-for="t in (b.tags || [])" :key="t" class="bm-tag">{{ t }}</span>
-            </div>
-            <span class="bm-date">{{ fmtDate(b.createdAt) }}</span>
-          </div>
-        </template>
-        <div v-if="dropLineIdx === list.length && list.length" class="drop-line" />
-
-        <EmptyState v-if="!loading && !list.length" title="这里还没有书签" hint="右键空白处新建 · 或从浏览器导入 · 拖拽可移动与排序" />
-      </div>
+        :list="list"
+        :loading="loading"
+        :checked="checked"
+        :all-checked="allChecked"
+        :drop-line-idx="dropLineIdx"
+        :drop-hover-id="dropHoverId"
+        :fmt-date="fmtDate"
+        @toggle-all="toggleAll"
+        @toggle-row="(b, on) => on ? checked.add(b.id) : checked.delete(b.id)"
+        @select-row="selectRow"
+        @activate="activate"
+        @item-menu="itemMenu"
+        @drag-start="onDragStartCapture"
+        @drag-end="onDragEnd"
+        @row-drag-over="onRowDragOver"
+        @row-drag-leave="onRowDragLeave"
+        @list-drop="onListDrop"
+        @row-drop-into-folder="onRowFolderDrop"
+      />
 
       <!-- ==================== GRID VIEW ==================== -->
-      <div
+      <BookmarkGrid
         v-else
-        class="bm-grid"
-        @drop="onGridContainerDrop"
-        @dragover="dragging && browsing && $event.preventDefault()"
-      >
-        <template v-for="(b, idx) in list" :key="b.id">
-          <div
-            class="bm-card"
-            :class="{
-              selected: checked.has(b.id),
-              'drop-target': gridDrop?.id === b.id && gridDrop.side === 'inside',
-              'drop-before': gridDrop?.id === b.id && gridDrop.side === 'before',
-              'drop-after': gridDrop?.id === b.id && gridDrop.side === 'after',
-              'dragging-source': gridDragSourceId === b.id,
-            }"
-            :draggable="true"
-            @dragstart="onDragStartCapture(b, $event, idx)"
-            @dragend="onDragEnd"
-            @dragover="onCardDragOver(b, $event)"
-            @dragleave="onCardDragLeave(b)"
-            @drop.prevent="onCardDrop(b, $event)"
-            @click="selectRow(b, $event, idx)"
-            @dblclick="activate(b)"
-            @contextmenu.prevent.stop="itemMenu(b, $event)"
-          >
-            <span v-if="b.favorite" class="card-fav">
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
-            </span>
-            <div class="card-icon-wrap">
-              <BookmarkAvatar :b="b" :size="40" />
-            </div>
-            <div class="card-title" :title="b.title || b.url">{{ b.title || b.url }}</div>
-            <div class="card-sub">
-              {{ b.type === 'folder' ? '文件夹' : (b.tags?.length ? (b.tags.length > 1 ? `${b.tags[0]} +${b.tags.length - 1}` : b.tags[0]) : fmtDate(b.createdAt)) }}
-            </div>
-          </div>
-        </template>
-
-        <EmptyState v-if="!loading && !list.length" title="这里还没有书签" hint="右键空白处新建 · 或从浏览器导入 · 拖拽可移动与排序" />
-      </div>
+        :list="list"
+        :loading="loading"
+        :checked="checked"
+        :grid-drop="gridDrop"
+        :grid-drag-source-id="gridDragSourceId"
+        :fmt-date="fmtDate"
+        @select-row="selectRow"
+        @activate="activate"
+        @item-menu="itemMenu"
+        @drag-start="onDragStartCapture"
+        @drag-end="onDragEnd"
+        @card-drag-over="onCardDragOver"
+        @card-drag-leave="onCardDragLeave"
+        @card-drop="onCardDrop"
+        @grid-drop="onGridContainerDrop"
+      />
     </div>
 
     <ContextMenu ref="ctxMenu" />
