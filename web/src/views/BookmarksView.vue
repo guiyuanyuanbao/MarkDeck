@@ -7,6 +7,9 @@ import BatchMoveDialog from '@/components/BatchMoveDialog.vue'
 import BatchTagDialog from '@/components/BatchTagDialog.vue'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
+import ViewSwitch from '@/components/ViewSwitch.vue'
+import GridSizeSwitch from '@/components/GridSizeSwitch.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
@@ -593,31 +596,8 @@ function goUp() {
             <el-select v-model="tagFilter" placeholder="按标签筛选" clearable style="width: 140px">
               <el-option v-for="t in allTags" :key="t.tag" :label="`${t.tag} (${t.count})`" :value="t.tag" />
             </el-select>
-            <div class="view-switch" role="group" aria-label="视图切换">
-              <button
-                class="view-btn"
-                :class="{ active: viewMode === 'list' }"
-                title="列表视图"
-                aria-label="列表视图"
-                @click="viewMode = 'list'"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
-              </button>
-              <button
-                class="view-btn"
-                :class="{ active: viewMode === 'grid' }"
-                title="图标视图"
-                aria-label="图标视图"
-                @click="viewMode = 'grid'"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-              </button>
-            </div>
-            <div v-if="viewMode === 'grid'" class="grid-size-switch" role="group" aria-label="图标大小">
-              <button class="gs-btn" :class="{ active: gridSize === 'small' }" title="小图标" @click="gridSize = 'small'"><Icon name="grid" :size="11" /></button>
-              <button class="gs-btn" :class="{ active: gridSize === 'medium' }" title="中图标" @click="gridSize = 'medium'"><Icon name="grid" :size="14" /></button>
-              <button class="gs-btn" :class="{ active: gridSize === 'large' }" title="大图标" @click="gridSize = 'large'"><Icon name="grid" :size="17" /></button>
-            </div>
+            <ViewSwitch v-model="viewMode" />
+            <GridSizeSwitch v-if="viewMode === 'grid'" v-model="gridSize" />
             <el-button type="primary" @click="openCreate('url')">＋ 新书签</el-button>
           </div>
         </div>
@@ -694,16 +674,7 @@ function goUp() {
         </template>
         <div v-if="dropLineIdx === list.length && list.length" class="drop-line" />
 
-        <div v-if="!loading && !list.length" class="md-empty">
-          <div class="md-empty-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-            </svg>
-          </div>
-          <div class="md-empty-title">这里还没有书签</div>
-          <div class="md-empty-hint">右键空白处新建 · 或从浏览器导入 · 拖拽可移动与排序</div>
-        </div>
+        <EmptyState v-if="!loading && !list.length" title="这里还没有书签" hint="右键空白处新建 · 或从浏览器导入 · 拖拽可移动与排序" />
       </div>
 
       <!-- ==================== GRID VIEW ==================== -->
@@ -746,16 +717,7 @@ function goUp() {
           </div>
         </template>
 
-        <div v-if="!loading && !list.length" class="md-empty" style="grid-column: 1 / -1">
-          <div class="md-empty-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-            </svg>
-          </div>
-          <div class="md-empty-title">这里还没有书签</div>
-          <div class="md-empty-hint">右键空白处新建 · 或从浏览器导入 · 拖拽可移动与排序</div>
-        </div>
+        <EmptyState v-if="!loading && !list.length" title="这里还没有书签" hint="右键空白处新建 · 或从浏览器导入 · 拖拽可移动与排序" />
       </div>
     </div>
 

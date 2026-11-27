@@ -393,6 +393,8 @@ body {
   gap: 12px;
   padding: 14px 4px 20px;
 }
+/* the empty state inside a grid must span every column */
+.bm-grid .md-empty { grid-column: 1 / -1; }
 .bm-card {
   position: relative;
   display: flex;
@@ -867,6 +869,26 @@ body {
 }
 .section-card-title .sec-ico { color: var(--md-primary); display: inline-flex; }
 .section-card-sub { color: var(--md-text-3); font-size: 12.5px; font-weight: 400; margin-left: 2px; }
+
+/* shared form/action helpers (were duplicated+drifted in Tools/Settings scoped styles):
+   gap keeps the Settings value (10px — tighter rows around inputs); hint keeps
+   the Tools value (12.5px — the page-sub matches at 12.5px). Settings hints sat
+   under .inline-row siblings → 10px top margin as before. */
+.inline-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.field-hint { color: var(--md-text-3); font-size: 12.5px; line-height: 1.7; }
+.inline-row + .field-hint, .retention-row + .inline-row .field-hint { margin-top: 10px; }
+
+/* status pill (dead-link statuses, TOTP badge) */
+.status-pill {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
+.status-pill.warn { background: color-mix(in srgb, var(--md-warning) 15%, transparent); color: var(--md-warning); }
+.status-pill.err { background: var(--md-danger-soft); color: var(--md-danger); }
 
 /* borderless data list: file-manager rows instead of el-table */
 .data-list {

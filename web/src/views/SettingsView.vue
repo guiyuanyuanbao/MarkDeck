@@ -556,9 +556,8 @@ async function uploadSnapshotFile(ev: Event) {
 </template>
 
 <style scoped>
+/* .inline-row/.field-hint/.status-pill(.ok) live in styles.css now */
 .form-stack { display: flex; flex-direction: column; gap: 10px; max-width: 380px; }
-.inline-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.field-hint { color: var(--md-text-3); font-size: 12px; margin: 10px 0 0; line-height: 1.6; }
 /* trash retention: preset chips + inline custom-days input */
 .retention-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .retention-opt {
@@ -586,8 +585,6 @@ async function uploadSnapshotFile(ev: Event) {
   outline: none;
 }
 .retention-input:focus { box-shadow: 0 0 0 3px var(--md-primary-soft); }
-.status-pill { padding: 3px 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; }
-.status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
 
 .totp-setup { margin-top: 4px; max-width: 480px; }
 .totp-tip { font-size: 13px; color: var(--md-text-2); margin: 0 0 10px; }

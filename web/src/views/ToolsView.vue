@@ -406,18 +406,7 @@ function clearFavicons() {
 </template>
 
 <style scoped>
-.inline-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.field-hint { color: var(--md-text-3); font-size: 12.5px; margin: 0; line-height: 1.7; }
-.status-pill {
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.status-pill.ok { background: var(--md-success-soft); color: var(--md-success); }
-.status-pill.warn { background: color-mix(in srgb, var(--md-warning) 15%, transparent); color: var(--md-warning); }
-.status-pill.err { background: var(--md-danger-soft); color: var(--md-danger); }
+/* .inline-row/.field-hint/.status-pill/.ok/.warn/.err live in styles.css now */
 .dead-link {
   color: inherit;
   text-decoration: none;

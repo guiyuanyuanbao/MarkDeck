@@ -12,6 +12,9 @@ import EditBookmarkDialog from '@/components/EditBookmarkDialog.vue'
 import RestoreDialog from '@/components/RestoreDialog.vue'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
 import ContextMenu, { type CtxMenuItem } from '@/components/ContextMenu.vue'
+import ViewSwitch from '@/components/ViewSwitch.vue'
+import GridSizeSwitch from '@/components/GridSizeSwitch.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
@@ -503,19 +506,8 @@ function onKeydown(e: KeyboardEvent) {
               <el-option label="最早删除优先" value="deletedAsc" />
               <el-option label="按标题排序" value="title" />
             </el-select>
-            <div class="view-switch" role="group" aria-label="视图切换">
-              <button class="view-btn" :class="{ active: viewMode === 'list' }" title="列表视图" @click="viewMode = 'list'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
-              </button>
-              <button class="view-btn" :class="{ active: viewMode === 'grid' }" title="图标视图" @click="viewMode = 'grid'">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-              </button>
-            </div>
-            <div v-if="viewMode === 'grid'" class="grid-size-switch" role="group" aria-label="图标大小">
-              <button class="gs-btn" :class="{ active: gridSize === 'small' }" title="小图标" @click="gridSize = 'small'"><Icon name="grid" :size="11" /></button>
-              <button class="gs-btn" :class="{ active: gridSize === 'medium' }" title="中图标" @click="gridSize = 'medium'"><Icon name="grid" :size="14" /></button>
-              <button class="gs-btn" :class="{ active: gridSize === 'large' }" title="大图标" @click="gridSize = 'large'"><Icon name="grid" :size="17" /></button>
-            </div>
+            <ViewSwitch v-model="viewMode" />
+            <GridSizeSwitch v-if="viewMode === 'grid'" v-model="gridSize" />
             <el-button v-if="trash.length" type="danger" plain :disabled="busy" @click="emptyAll">清空回收站</el-button>
           </div>
         </div>
@@ -580,20 +572,8 @@ function onKeydown(e: KeyboardEvent) {
           </div>
         </div>
 
-        <div v-if="!loading && !filtered.length && trash.length" class="md-empty">
-          <div class="md-empty-icon"><Icon name="search" :size="26" /></div>
-          <div class="md-empty-title">没有匹配的条目</div>
-          <div class="md-empty-hint">换个关键词或筛选条件试试</div>
-        </div>
-        <div v-else-if="!loading && !trash.length" class="md-empty">
-          <div class="md-empty-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M6 6l1 14a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-14" />
-            </svg>
-          </div>
-          <div class="md-empty-title">回收站是空的</div>
-          <div class="md-empty-hint">删除的书签会先出现在这里，确认后才真正消失</div>
-        </div>
+        <EmptyState v-if="!loading && !filtered.length && trash.length" icon="search" title="没有匹配的条目" hint="换个关键词或筛选条件试试" />
+        <EmptyState v-else-if="!loading && !trash.length" title="回收站是空的" hint="删除的书签会先出现在这里，确认后才真正消失" />
       </div>
 
       <!-- ==================== GRID VIEW ==================== -->
@@ -617,20 +597,8 @@ function onKeydown(e: KeyboardEvent) {
           <div class="card-sub" style="margin-top: 2px">删除于 {{ fmtDate(b.deletedAt) }}</div>
         </div>
 
-        <div v-if="!loading && !filtered.length && trash.length" class="md-empty" style="grid-column: 1 / -1">
-          <div class="md-empty-icon"><Icon name="search" :size="26" /></div>
-          <div class="md-empty-title">没有匹配的条目</div>
-          <div class="md-empty-hint">换个关键词或筛选条件试试</div>
-        </div>
-        <div v-else-if="!loading && !trash.length" class="md-empty" style="grid-column: 1 / -1">
-          <div class="md-empty-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M6 6l1 14a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-14" />
-            </svg>
-          </div>
-          <div class="md-empty-title">回收站是空的</div>
-          <div class="md-empty-hint">删除的书签会先出现在这里，确认后才真正消失</div>
-        </div>
+        <EmptyState v-if="!loading && !filtered.length && trash.length" icon="search" title="没有匹配的条目" hint="换个关键词或筛选条件试试" />
+        <EmptyState v-else-if="!loading && !trash.length" title="回收站是空的" hint="删除的书签会先出现在这里，确认后才真正消失" />
       </div>
     </div>
 
