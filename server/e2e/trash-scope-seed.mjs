@@ -23,5 +23,8 @@ for (const n of tree.filter((x) => x.parentId === '')) {
   await api('DELETE', `/api/bookmarks/${n.id}`)
 }
 const trash = (await api('GET', '/api/trash')).data.nodes || []
-check('trash seeded (2 folders + 8 urls = 10 rows)', trash.length === 10, JSON.stringify(trash.map((b) => (b.type === 'folder' ? '📁' : '🔗') + b.title)))
+// 2 folders + 4 user urls + 5 imported urls + the md-others holder folder
+// (the canonical "Other bookmarks" row is deleted with the rest of the top level)
+check('trash seeded (11 rows: 数据+Imported+9 urls incl. md-others)', trash.length === 11,
+  `${trash.length} rows: ${trash.map((b) => (b.type === 'folder' ? '📁' : '🔗') + b.title).join(' | ')}`)
 summary()
