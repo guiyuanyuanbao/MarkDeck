@@ -19,20 +19,36 @@ Future<void> showEditSheet(
   AppDatabase db, {
   Node? existing,
   String parentId = '',
+  String presetTitle = '',
+  String presetUrl = '',
 }) async {
   await showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
-    builder: (ctx) => _EditSheet(db: db, existing: existing, parentId: parentId),
+    builder: (ctx) => _EditSheet(
+      db: db,
+      existing: existing,
+      parentId: parentId,
+      presetTitle: presetTitle,
+      presetUrl: presetUrl,
+    ),
   );
 }
 
 class _EditSheet extends StatefulWidget {
-  const _EditSheet({required this.db, this.existing, required this.parentId});
+  const _EditSheet({
+    required this.db,
+    this.existing,
+    required this.parentId,
+    this.presetTitle = '',
+    this.presetUrl = '',
+  });
 
   final AppDatabase db;
   final Node? existing;
   final String parentId;
+  final String presetTitle;
+  final String presetUrl;
 
   @override
   State<_EditSheet> createState() => _EditSheetState();
@@ -49,8 +65,8 @@ class _EditSheetState extends State<_EditSheet> {
   void initState() {
     super.initState();
     final e = widget.existing;
-    _title = TextEditingController(text: e?.title ?? '');
-    _url = TextEditingController(text: e?.url ?? '');
+    _title = TextEditingController(text: e?.title ?? widget.presetTitle);
+    _url = TextEditingController(text: e?.url ?? widget.presetUrl);
     _note = TextEditingController(text: e?.note ?? '');
     _tags = e == null ? [] : tagsFromJson(e.tags);
     _favorite = e?.favorite ?? false;
@@ -90,7 +106,6 @@ class _EditSheetState extends State<_EditSheet> {
     } else {
       await (widget.db.update(widget.db.nodes)..where((r) => r.id.equals(e.id))).write(
         NodesCompanion(
-          title: Value(title),
           url: _isUrl ? Value(_url.text.trim()) : const Value.absent(),
           note: Value(_note.text.trim()),
           favorite: Value(_favorite),
