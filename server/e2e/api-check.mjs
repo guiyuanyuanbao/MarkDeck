@@ -1,45 +1,15 @@
 // e2e-api-check.mjs — end-to-end API verification of the refactored server.
 // Drives the full lifecycle: setup, login, CRUD, tags, trash/restore,
 // purge, batch, search, snapshots, tools, favicon push, sync endpoints.
-const BASE = 'http://127.0.0.1:8777'
-const results = []
-function check(name, ok, detail = '') {
-  results.push({ name, ok, detail })
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`)
-}
+import { BASE, check, summary, api, session, bootstrap } from './lib.mjs'
 
-let csrf = ''
-let cookie = ''
-async function api(method, path, body, token) {
-  const headers = { 'Content-Type': 'application/json' }
-  if (csrf) headers['X-CSRF'] = csrf
-  if (token) headers['Authorization'] = 'Bearer ' + token
-  if (cookie) headers['Cookie'] = cookie
-  const resp = await fetch(BASE + path, {
-    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
-  })
-  const setCookie = resp.headers.get('set-cookie')
-  if (setCookie) cookie = setCookie.split(';')[0]
-  let data = null
-  const text = await resp.text()
-  try { data = text ? JSON.parse(text) : null } catch { data = { raw: text } }
-  return { status: resp.status, data }
-}
-
-// 1. setup admin password (fresh DB; 400 = already set up, fine on re-runs)
-const pw = 'E2eTest-Passw0rd!'
-let r = await api('POST', '/api/auth/setup', { password: pw })
-check('auth/setup', r.status === 200 || r.status === 400, `status=${r.status}`)
-
-// 2. login sets session + issues the CSRF token
-r = await api('POST', '/api/auth/login', { password: pw })
-check('auth/login', r.status === 200 && !!cookie, `status=${r.status}`)
-csrf = r.data?.csrf || csrf
-r = await api('GET', '/api/auth/me')
+// 1-2. fresh-DB bootstrap: setup admin password + login (session + CSRF)
+await bootstrap()
+let r = await api('GET', '/api/auth/me')
 check('auth/me (session cookie)', r.status === 200 && r.data?.admin === true, `status=${r.status}`)
 
 // 3. CSRF enforcement: PUT without header must 403
-r = await fetch(BASE + '/api/bookmarks/x', { method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: '{}' })
+r = await fetch(BASE + '/api/bookmarks/x', { method: 'PUT', headers: { 'Content-Type': 'application/json', Cookie: session.cookie }, body: '{}' })
 check('CSRF rejected on session PUT without header', r.status === 403, `status=${r.status}`)
 
 // 4. create folders + bookmarks
@@ -73,11 +43,11 @@ check('reorder', r.status === 200, `status=${r.status}`)
 
 // 8. favicon push (device-style bearer is not set up here; session path accepted)
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
-r = await fetch(BASE + '/api/favicon/example.com', { method: 'PUT', headers: { 'X-CSRF': csrf, Cookie: cookie, 'Content-Type': 'image/png' }, body: png })
+r = await fetch(BASE + '/api/favicon/example.com', { method: 'PUT', headers: { 'X-CSRF': session.csrf, Cookie: session.cookie, 'Content-Type': 'image/png' }, body: png })
 check('favicon PUT (session+CSRF)', r.status === 200, `status=${r.status}`)
-r = await fetch(BASE + '/api/favicon/example.com?probe=1', { headers: { Cookie: cookie } })
+r = await fetch(BASE + '/api/favicon/example.com?probe=1', { headers: { Cookie: session.cookie } })
 check('favicon GET probe', r.status === 200, `status=${r.status}`)
-r = await fetch(BASE + '/api/favicon/bad<!host', { headers: { Cookie: cookie } })
+r = await fetch(BASE + '/api/favicon/bad<!host', { headers: { Cookie: session.cookie } })
 check('favicon GET sanitizes host', r.status === 404 || r.status === 400, `status=${r.status}`)
 
 // 9. trash -> restore -> purge lifecycle
@@ -143,9 +113,9 @@ r = await api('GET', '/api/devices')
 check('devices list', r.status === 200 && Array.isArray(r.data?.devices), `status=${r.status}`)
 r = await api('GET', '/api/stats')
 check('stats', r.status === 200 && typeof r.data?.bookmarks === 'number', JSON.stringify(r.data))
-r = await fetch(BASE + '/api/export/json', { headers: { Cookie: cookie } })
+r = await fetch(BASE + '/api/export/json', { headers: { Cookie: session.cookie } })
 check('export json', r.status === 200, `status=${r.status}`)
-r = await fetch(BASE + '/api/export/html', { headers: { Cookie: cookie } })
+r = await fetch(BASE + '/api/export/html', { headers: { Cookie: session.cookie } })
 check('export netscape html', r.status === 200 && (await r.text()).includes('NETSCAPE-Bookmark-file'), `status=${r.status}`)
 
 // 15. import round-trip (netscape)
@@ -158,13 +128,11 @@ const netscape = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
 const fd = new FormData()
 fd.append('file', new Blob([netscape], { type: 'text/html' }), 'bookmarks.html')
 fd.append('mode', 'merge')
-r = await fetch(BASE + '/api/import/html', { method: 'POST', headers: { 'X-CSRF': csrf, Cookie: cookie }, body: fd })
+r = await fetch(BASE + '/api/import/html', { method: 'POST', headers: { 'X-CSRF': session.csrf, Cookie: session.cookie }, body: fd })
 check('import netscape merge', r.status === 200, `status=${r.status}`)
 
 // 16. logout
 r = await api('POST', '/api/auth/logout', {})
 check('logout', r.status === 200, `status=${r.status}`)
 
-const failed = results.filter((x) => !x.ok)
-console.log(`\n=== ${results.length - failed.length}/${results.length} checks passed ===`)
-if (failed.length) process.exit(1)
+summary()
