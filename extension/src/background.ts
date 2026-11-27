@@ -268,7 +268,6 @@ async function reconcileOnce(reason: string): Promise<{ ok: boolean; error?: str
     stats.planned = plan.chromeOps.length + plan.serverOps.length
     stats.adopted = plan.stats.adopted
     stats.pushed = plan.serverOps.length
-
     // 4. push server ops FIRST (single batch) — the server is the source of
     // truth; local creates land before local-echo creates are pulled back
     let newHead: number | null = null
@@ -544,7 +543,7 @@ async function connectWS(cfg: Config) {
 // were server content → the user's pending create is swallowed).
 // pullChain is the shared serialization channel (reconciles already run
 // through it); journal writes enter the same chain.
-function journalTouch(localId: string, extra?: { removed?: boolean; title?: string; url?: string }) {
+function journalTouch(localId: string, extra?: { removed?: boolean; title?: string; url?: string; reordered?: boolean }) {
   if (reconciling) return
   pullChain = pullChain
     .then(async () => {
@@ -561,7 +560,11 @@ chrome.bookmarks.onCreated.addListener((id) => { void journalTouch(id) })
 chrome.bookmarks.onChanged.addListener((id, info) => { void journalTouch(id, { title: info.title }) })
 chrome.bookmarks.onMoved.addListener((id) => { void journalTouch(id) })
 chrome.bookmarks.onRemoved.addListener((id) => { void journalTouch(id, { removed: true }) })
-chrome.bookmarks.onChildrenReordered.addListener((id) => { void journalTouch(id) })
+// browser bookmark-manager sort (right-click → 按标题排序 etc.): fires once
+// for the PARENT with the full new child order. The `reordered` flag is the
+// reorder sweep's vouch — a plain folder rename journal must never re-order
+// that folder's children.
+chrome.bookmarks.onChildrenReordered.addListener((id) => { void journalTouch(id, { reordered: true }) })
 
 // ---- lifecycle ----
 

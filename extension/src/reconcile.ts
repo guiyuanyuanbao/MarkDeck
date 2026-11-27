@@ -62,6 +62,7 @@ export interface TouchEntry {
   title?: string // observed after changed/rename events
   url?: string
   tags?: string[] // quick-save tags to carry on the node's create push
+  reordered?: boolean // parent's children were reordered (bookmark-manager sort)
 }
 
 export type TouchJournal = Record<string, TouchEntry> // keyed by LOCAL id
@@ -76,7 +77,7 @@ export type ChromeOp =
 
 export type ServerOp =
   | { op: 'create'; id: string; parentId: string; type: 'folder' | 'url'; title: string; url?: string; position: number; updatedAt: number; deviceId: string }
-  | { op: 'update'; id: string; title: string; url?: string; parentId?: string; tags?: string[]; undelete?: boolean; updatedAt: number; deviceId: string; observedRevision: number }
+  | { op: 'update'; id: string; title?: string; url?: string; parentId?: string; position?: number; tags?: string[]; undelete?: boolean; updatedAt: number; deviceId: string; observedRevision: number }
   | { op: 'delete'; id: string; updatedAt: number; deviceId: string }
 
 export interface SyncPlan {
@@ -93,6 +94,7 @@ export interface SyncPlan {
     chromeRemoves: number
     adopted: number
     pushed: number
+    positionPushes: number // sibling rows re-ordered server-side by a sweep
   }
 }
 
@@ -158,6 +160,11 @@ interface Ctx {
   othersId: string
   barRootLid?: string
   otherRootLid?: string
+  // parents whose child order is being re-asserted server-side by the
+  // reorder sweep this plan — planPositionOnly suppresses the opposing
+  // "move to server rank" chrome ops for their children (they would fight
+  // the push and the sweep would never converge).
+  sweptParents: Set<string>
 }
 
 // ---- the engine ----
@@ -170,7 +177,7 @@ export function planSync(input: PlanInput): SyncPlan {
 
   const chromeOps: ChromeOp[] = []
   const serverOps: ServerOp[] = []
-  const stats = { planned: 0, chromeCreates: 0, chromeUpdates: 0, chromeMoves: 0, chromeRemoves: 0, adopted: 0, pushed: 0 }
+  const stats = { planned: 0, chromeCreates: 0, chromeUpdates: 0, chromeMoves: 0, chromeRemoves: 0, adopted: 0, pushed: 0, positionPushes: 0 }
 
   // serverId -> localId binding as this plan leaves it (seeded from base)
   const binding = new Map<string, string | null>()
@@ -251,7 +258,29 @@ export function planSync(input: PlanInput): SyncPlan {
     othersId: input.othersId,
     barRootLid: barRootLocal?.id,
     otherRootLid: otherRootLocal?.id,
+    sweptParents: new Set<string>(),
   }
+
+  // ---- Pass 0.5: browser → server reorder sweep (detection) ----
+  // Sorting is a PARENT-SCOPED property: dragging one row shifts the indexes
+  // of every sibling, and chrome.bookmarks fires onMoved only for the
+  // dragged node — the touch journal names the dragged row, never its
+  // neighbors. The content passes therefore see untouched siblings as
+  // unchanged, and convergence (planPositionOnly) then "fixes" their indexes
+  // BACK to the server rank — the drag silently reverts on the next apply.
+  //
+  // The sweep compares each parent's children as two sequences (browser
+  // index order vs server rank order). When they disagree AND the touch
+  // journal vouches that this device reordered/moved a member since the
+  // last successful reconcile (with a sequence-level LWW gate against the
+  // current server sibling set), the plan re-asserts the browser's order
+  // server-side. Detected FIRST so sweptParents can suppress the opposing
+  // convergence moves the content passes would otherwise plan; the target
+  // positions are RETURNED (not emitted) and merged into the content ops
+  // after the passes — one op per row per batch, positions riding on the
+  // content op when one exists (or as a position-only op when the row's
+  // content is already in sync).
+  const sweepPositions = sweepLocalOrder(ctx, input, base, serverById)
 
   // ---- Pass 1: server-side rows ----
   // Orphan normalization FIRST: a row whose parent id is not itself in the
@@ -662,6 +691,50 @@ export function planSync(input: PlanInput): SyncPlan {
   // must survive to the next reconcile even though the tree request raced
   Object.assign(newBaseEntries, rebindingEntries)
 
+  // ---- merge the sweep's target positions into the ops ----
+  // One op per row per batch: a row with a content op absorbs its swept
+  // position (the sweep's slot is authoritative — it was computed over the
+  // FULL browser sequence including pending creates); a row with no content
+  // op gets a position-only op (content already agreed, only the slot
+  // moved). Runs after the passes so the merge sees the final op set.
+  //
+  // "Needs writing" is judged by RANK (0-based order among the swept
+  // membership), never by the raw position: web creates land at
+  // MaxPosition+1 (raw 20/21 while the browser index is 0/1), so comparing
+  // slot against the raw value would skip rows whose RELATIVE order is
+  // wrong — and the server sorts by raw position, landing the new row
+  // ahead of scattered siblings. When the rank disagrees with the target
+  // slot the position write normalizes the raw value to the slot.
+  for (const [sid, slot] of sweepPositions) {
+    const sn = serverById.get(sid)
+    if (!sn) continue
+    const slotChanged = (ctx.serverRank.get(sid) ?? slot - 1) !== slot - 1 ||
+      Math.abs(sn.position - slot) >= 0.0001
+    const existing = serverOps.find((o) => o.op === 'update' && o.id === sid) as
+      | Extract<ServerOp, { op: 'update' }>
+      | undefined
+    if (existing) {
+      // a real drift must survive the merge; an equal-value write would
+      // only churn the row's LWW clock (it already carries the touch time)
+      if (slotChanged) {
+        existing.position = slot
+        ctx.stats.positionPushes++
+      }
+      continue
+    }
+    if (!slotChanged) continue // already exact on the server
+    const localId = binding.get(sid)
+    const t = (localId && touch[localId]?.at) || input.now
+    serverOps.push({
+      op: 'update', id: sid,
+      position: slot,
+      updatedAt: Math.max(t, input.now),
+      deviceId,
+      observedRevision: sn.revision,
+    })
+    ctx.stats.positionPushes++
+  }
+
   stats.planned = orderedChrome.length + serverOps.length
   return { chromeOps: orderedChrome, serverOps, newBaseEntries, stats }
 }
@@ -771,7 +844,11 @@ function planServerToLocal(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: str
 // node moved between roots (holder ↔ bar, index 0 → rank 0) shares the
 // rank but sits under the WRONG parent — comparing index alone made every
 // cross-root server move silently never reach the browser.
+// A parent claimed by this plan's reorder sweep is skipped: the sweep is
+// pushing the browser's order server-side; writing the server rank back
+// here would fight the push and un-do the user's drag on the next apply.
 function planPositionOnly(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: string, rank: number) {
+  if (ctx.sweptParents.has(ln.parentId)) return
   const parentCheck = localParentMatchesServer(ln, sn.parentId, ctx)
   // null = undecidable → abstain (no move from the parent axis alone)
   const parentMismatch = parentCheck === false
@@ -784,22 +861,229 @@ function planPositionOnly(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: stri
 // push the local node's content to the server. A local MOVE must carry
 // the new parent's server id (the browser-only parentId → server id
 // translation runs through the binding maps); quick-save TAGS ride the
-// touch journal onto the op.
+// touch journal onto the op. Content fields ride ONLY on an actual
+// difference — a pure drag/move journal must never rewrite the server's
+// title/url (a sibling edited elsewhere concurrently would be clobbered
+// by an identical-value write that still bumps the row's LWW clock).
+// The browser index rides along as the server position when the row's
+// parent bucket is being re-ordered by this plan's sweep and the row's
+// rank disagrees with its browser index.
 function pushLocalState(ctx: Ctx, sn: ServerNode, ln: LocalNode, localId: string) {
   const t = touchAt(ctx.touch, localId) || Math.floor((ln.dateAdded || Date.now()) / 1000)
   const localParentSid = ctx.reverse.get(ln.parentId)
   const parentChanged = localParentSid !== undefined && localParentSid !== sn.parentId
   const tags = ctx.touch[localId]?.tags
+  const urlChanged = ln.url !== undefined && normBookmarkUrl(ln.url) !== normBookmarkUrl(sn.url)
+  // TITLE is always carried (the original semantics): pushLocalState is
+  // reached only when the touch journal vouches this device's edit, and
+  // the LWW gate upstream guarantees the local side wins — an equal title
+  // write is idempotent and advances the row's LWW clock so the plan
+  // converges; a divergent title is the actual push. URL rides ONLY on a
+  // real difference (the server's URL is authoritative on ties, and an
+  // equal-value write would just churn). The position rides along ONLY on
+  // a parent change (the row moved buckets — its slot is meaningless in
+  // the old parent); within-bucket slot management belongs to the sweep
+  // merge, which sees the FULL browser sequence.
   ctx.serverOps.push({
     op: 'update', id: sn.id,
     title: ln.title,
-    ...(ln.url !== undefined ? { url: ln.url } : {}),
-    ...(parentChanged ? { parentId: localParentSid } : {}),
+    ...(urlChanged ? { url: ln.url } : {}),
+    ...(parentChanged ? { parentId: localParentSid, position: ln.index + 1 } : {}),
     ...(tags?.length ? { tags } : {}),
     updatedAt: t, deviceId: ctx.deviceId,
     observedRevision: sn.revision,
   })
   ctx.stats.pushed++
+}
+
+// ---- reorder sweep: browser child order → server positions ----
+
+// Per-sibling decision inside one parent's sweep: push the browser index
+// as the new server position, or keep the server position.
+interface SweepSibling {
+  sn: ServerNode
+  ln: LocalNode
+  drifted: boolean // browser index ≠ server rank (normalized among bound siblings)
+}
+
+// Detect browser-initiated reordering and plan the new child order for the
+// server. Returns the ServerOps to append AFTER the content ops (the caller
+// sequences them last); detection still runs before the content passes so
+// ctx.sweptParents can suppress the opposing convergence moves.
+//
+// Preconditions per parent bucket (all must hold, else the bucket is
+// skipped — a partial/incomplete view must never re-order the server):
+//   - the bucket is a REAL parent in the sync scope (bar root '', the
+//     canonical others holder, or a folder bound to a server row that the
+//     CURRENT tree still carries);
+//   - the browser bucket is fully populated: every local child is bound,
+//     every live server child of the parent is present locally, and no
+//     creates/removes for its members are pending (pass 1/pass 2/pass 3
+//     handle those — ordering a half-applied bucket would re-assert a
+//     sequence the next reconcile immediately rewrites anyway);
+//   - the browser sequence and the server rank sequence differ;
+//   - the touch journal vouches a reorder/move inside this bucket since
+//     the last successful reconcile (onChildrenReordered journals the
+//     PARENT with `reordered`; onMoved journals the dragged CHILD);
+//   - LWW gate (sequence-level): the newest touch timestamp among the
+//     bucket's journaled children beats the newest server updatedAt across
+//     ALL live siblings — a web reorder lands with a fresh updatedAt on
+//     every sibling, so a stale drag must never override a fresh web sort.
+//
+// The ops are POSITION-ONLY (id + position + LWW fields, no title/url):
+// the sweep must never clobber sibling content that changed on the server
+// after the drag — content divergence is the content passes' job, and the
+// server rejects the position op alone when the row moved on (LWW).
+function sweepLocalOrder(ctx: Ctx, input: PlanInput, base: Base | null, serverById: Map<string, ServerNode>): Map<string, number> {
+  // bucket the server tree by parent once (rank-ordered)
+  const serverKidsByParent = new Map<string, ServerNode[]>()
+  for (const sn of input.server) {
+    const arr = serverKidsByParent.get(sn.parentId) || []
+    arr.push(sn)
+    serverKidsByParent.set(sn.parentId, arr)
+  }
+  for (const [, arr] of serverKidsByParent) {
+    arr.sort((a, b) => a.position - b.position)
+  }
+
+  // candidate local buckets: bar root + other root + every folder bound to
+  // a row the current tree still carries
+  const buckets: Array<{ serverParentId: string; localParentId: string }> = []
+  if (ctx.barRootLid) buckets.push({ serverParentId: '', localParentId: ctx.barRootLid })
+  if (ctx.otherRootLid) buckets.push({ serverParentId: ctx.othersId, localParentId: ctx.otherRootLid })
+  for (const [sid, lid] of ctx.binding) {
+    if (!lid) continue
+    const sn = serverById.get(sid)
+    if (sn?.type === 'folder' && input.server.some((x) => x.id === sid)) {
+      buckets.push({ serverParentId: sid, localParentId: lid })
+    }
+  }
+
+  const positions = new Map<string, number>() // serverId → target slot (1-based)
+  for (const { serverParentId, localParentId } of buckets) {
+    const localKids = (ctx.localChildren.get(localParentId) || []).slice().sort((a, b) => a.index - b.index)
+    const serverKids = (serverKidsByParent.get(serverParentId) || [])
+      .filter((k) => k.id !== ctx.othersId) // the holder occupies no slot in the bar bucket (structurally bound elsewhere)
+    if (serverParentId === '' && !localKids.length) continue // empty bar: nothing to order
+    if (serverParentId !== '' && serverParentId !== ctx.othersId && !serverKids.length && !localKids.length) continue
+
+    // The browser bucket must be fully populated: every local child either
+    // bound or a pending pass-3 create (unbound locals get minted ids and
+    // position = index+1 — they PARTICIPATE in the swept sequence, e.g. a
+    // create-in-the-middle must not have its slot swallowed by the siblings'
+    // renumbering). Local children with a `removed` journal are NOT members
+    // (their chrome op removes them); server children bound to nodes outside
+    // this bucket or already deleted server-side are pending pass-1/pass-2
+    // writes — the order we see now is transient for THOSE, so the bucket
+    // only sweeps when every server child is accounted for locally.
+    let complete = true
+    for (const k of localKids) {
+      if (ctx.touch[k.id]?.removed) continue // pending remove: not a member
+      if (!ctx.reverse.has(k.id)) continue // pending create: participates
+      const boundSid = ctx.reverse.get(k.id)!
+      if (!serverById.has(boundSid)) { complete = false; break } // stale binding
+    }
+    if (!complete) continue
+    for (const sk of serverKids) {
+      const lid = ctx.binding.get(sk.id)
+      const ln = lid ? ctx.localById.get(lid) : undefined
+      if (!ln) {
+        // no local node for this server row: either the device never placed
+        // it (pass 1 will create — transient membership, abstain) or its
+        // node was deleted while the row survives (pass 2 will remove both
+        // sides — the row is VACATING, it must not block the survivors'
+        // renumbering: an offline delete racing an insert would otherwise
+        // forfeit the whole bucket's sweep).
+        if (lid && ctx.touch[lid]?.removed) continue
+        complete = false
+        break
+      }
+      if (ln.parentId !== localParentId) { complete = false; break }
+    }
+    if (!complete) continue
+
+    // Touch vouch: a reorder journal on the PARENT (browser-manager sort)
+    // or a move/rename journal on any CHILD (single drag) newer than the
+    // last successful reconcile. Entries older than the producing plan's
+    // head describe edits already pushed — re-reading them would re-order
+    // the server every reconcile with no user action.
+    const head = base?.head ?? 0
+    let newestTouch = 0
+    let vouched = !!(head > 0 && ctx.touch[localParentId]?.reordered && ctx.touch[localParentId].at > 0)
+    for (const s of localKids) {
+      const t = ctx.touch[s.id]?.at || 0
+      if (ctx.touch[s.id]?.removed) continue // deleted rows never vouch
+      if (t > 0) vouched = vouched || t > 0
+      if (t > newestTouch) newestTouch = t
+    }
+    if (!vouched || newestTouch === 0) continue
+
+    // Per-sibling drift over the FULL browser sequence (pending creates
+    // occupy slots: their pass-3 create already carries position = index+1,
+    // so bound siblings must renumber AROUND them). Server children bound
+    // to a pending-removed local node are excluded from the target sequence
+    // (they are being deleted) — they get no sweep op.
+    const sweep: Array<{ sn: ServerNode; slot: number }> = []
+    let driftedCount = 0
+    let target = 0
+    for (const ln of localKids) {
+      if (ctx.touch[ln.id]?.removed) continue // pending remove: skip slot
+      const sid = ctx.reverse.get(ln.id)
+      const sn = sid ? serverById.get(sid) : undefined
+      if (!sn) { target++; continue } // pending create: its slot is index+1 via the create op
+      const drift = target !== (ctx.serverRank.get(sid!) ?? target)
+      if (drift) driftedCount++
+      sweep.push({ sn, slot: target + 1 }) // 1-based server position
+      target++
+    }
+    if (driftedCount === 0) continue
+
+    // LWW gate (sequence-level, two checks):
+    //
+    // 1. PER-ROW base delta: a sibling whose server row is NEWER than the
+    //    base snapshot's copy was edited remotely (a web reorder bumps every
+    //    sibling's updatedAt) since the last sync. The local drag may claim
+    //    the bucket only if its journal entry is STRICTLY newer than that
+    //    remote edit — comparing touch vs the CURRENT server row's clock.
+    //    Rows untouched since base carry no remote edit: their clock is the
+    //    last sync point, and requiring the touch to beat it would wrongly
+    //    reject a drag made the SAME SECOND the rows were created/last
+    //    synced (touch at == row updatedAt → the old absolute-clock gate
+    //    skipped the sweep and the convergence pass reverted the user's
+    //    drag on the very next apply).
+    // 2. Bucket-level guard: if NO sibling changed since base, the journal
+    //    is the only evidence — sweep freely (the touch vouch above already
+    //    proved a local edit exists). If SOME sibling changed remotely and
+    //    no journal entry beats that change, the browser order is stale —
+    //    skip (the normal convergence pass applies the server order).
+    let remoteConflictAt = 0
+    let staleSweep = false
+    for (const s of sweep) {
+      const baseAt = base?.entries[s.sn.id]?.server.updatedAt ?? 0
+      if (s.sn.updatedAt > baseAt) {
+        // remotely edited since base: the drag must be strictly newer
+        const lid = ctx.binding.get(s.sn.id)
+        const t = (lid && ctx.touch[lid]?.at) || newestTouch
+        if (t <= s.sn.updatedAt) { staleSweep = true; break }
+        if (s.sn.updatedAt > remoteConflictAt) remoteConflictAt = s.sn.updatedAt
+      }
+    }
+    if (staleSweep) continue
+    if (newestTouch <= remoteConflictAt) continue
+
+    // Re-assert the browser order server-side: slot = target + 1
+    // (web Reorder semantics, 1-based, computed over the FULL sequence
+    // including pending creates). The sweep only RECORDS target slots
+    // here — the caller merges them into the final op set (one op per
+    // row; position rides on the content op when one exists).
+    for (const s of sweep) {
+      positions.set(s.sn.id, s.slot)
+    }
+    // claim the bucket: convergence moves into the server rank are
+    // suppressed for its children THIS plan (they would undo the sweep)
+    ctx.sweptParents.add(localParentId)
+  }
+  return positions
 }
 
 // ---- topology: parents before children (chrome creates) ----

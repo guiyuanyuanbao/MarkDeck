@@ -72,6 +72,39 @@
 `/api/sync/tree` 返回 `othersId`，设备把浏览器的"其他书签"根结构化绑定到它
 ——不是存映射，绑定随每次成功对账原子重写。
 
+## 排序同步（reorder sweep，v0.1.24+）
+
+浏览器 index ↔ 服务端 position **双向同步**。服务端 `ORDER BY position, created_at`
+是唯一顺序事实源；对账引擎比较的是 **rank**（服务端兄弟行按 position 排序后的
+0-based 位次）与浏览器 index，raw position 散乱（web 创建落 MaxPosition+1）不影响
+rank 收敛。
+
+**浏览器 → 服务端（reorder sweep，`sweepLocalOrder`）**：排序是父容器作用域属性
+——拖一行会平移所有兄弟的 index，而 chrome.bookmarks 只对被拖行触发 onMoved，
+touch journal 里没有兄弟的记录。引擎在每次 plan 前运行 sweep：对每个父桶，当
+
+1. 桶内成员完整（每个本地子节点已绑定或待推送 create；每个服务端子节点在本地
+   有对应节点）；
+2. 浏览器序列 ≠ 服务端 rank 序列；
+3. touch journal 佐证本地发生过重排（子节点 onMoved / 父节点
+   onChildrenReordered 的 `reordered` 标记）；
+4. LWW 门：服务端行自 base 快照后未被远端改过（`sn.updatedAt == base.updatedAt`）
+   → sweep 直接允许；有远端编辑 → 拖拽 touch 必须严格晚于该远端编辑。
+
+四条全满足时，把浏览器整条序列服务端化：**每行一条 update op，仅携带
+`position = index+1`（web Reorder 同语义），绝不携带 title/url**——兄弟内容属于
+content pass，sweep 只写顺序轴。位置合并进该行的 content op（如有），无 content
+op 的行生成 position-only op；同一行同一批只有一个 op。被 sweep 认领的桶，
+`planPositionOnly` 抑制其子节点的反向收敛 move（否则 sweep 与收敛互相打架）。
+待推送的 create（pass 3）占据 slot：create 本身带 `position=index+1`，bound 兄弟
+围绕它重编号（浏览器中插书签的位置不丢）。
+
+**服务端 → 浏览器**：无 touch 佐证的 rank 漂移（web 端拖拽/排序）走既有收敛路径
+（`planPositionOnly`），浏览器吸收服务端顺序。
+
+**服务端**：`BatchOp.Position` 为指针可选合并，position-only update 天然支持；
+LWW 裁决与内容 op 完全一致（同秒 tie 走 observedRevision 规则）。
+
 ## URL 归一化（判同）
 
 三处实现，语义不同（勿合并）：
