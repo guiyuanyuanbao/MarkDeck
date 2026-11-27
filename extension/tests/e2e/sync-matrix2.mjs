@@ -359,23 +359,50 @@ async function main() {
     log('N2a2: post-restore fixedpoint', st2.failed === 0, 'failed=' + st2.failed)
 
     // same-name folder: recreate a folder with the old name while old one
-    // sits in trash, then restore the OLD one → two folders coexist
+    // sits in trash, then restore the OLD one → the server's same-name
+    // merge policy folds the old subtree INTO the new folder (the original
+    // row stays tombstoned — no duplicate folder trees). Expect ONE folder,
+    // holding both chains, and the old row still in trash.
     const oldF = ids[0] // 'N2-L1' currently live again; delete it again
     await webDelete(oldF)
     await waitB(A.sw, (bt) => !bt.includes('N2-L1'))
-    await webCreateFolder('N2-L1') // new one, same title
+    const newL1 = await webCreateFolder('N2-L1') // new one, same title
     await waitB(A.sw, (bt) => bt.includes('N2-L1'))
-    await webRestore(oldF) // old comes back → two same-title folders
-    const both = await converge(A.sw, async () => {
+    await webRestore(oldF) // same-name merge: old subtree folds into the new folder
+    const merged = await converge(A.sw, async () => {
       const rows = (await serverNodes()).filter(x => x.title === 'N2-L1' && x.type === 'folder')
       const bCount = (await browserFolders(A.sw)).filter(t => t === 'N2-L1').length
-      return rows.length === 2 && bCount === 2
+      return rows.length === 1 && bCount === 1
     })
-    log('N2b: same-name folder recreate + old restore → two coexist', both)
+    if (!merged) {
+      const rowsNow = (await serverNodes()).filter(x => x.title.includes('N2-L'))
+      const foldersNow = await browserFolders(A.sw)
+      const st2d = await A.sw.evaluate(() => globalThis.__markdeckReconcileStats())
+      const touchNow = await A.sw.evaluate(async () => {
+        const t = (await chrome.storage.local.get('md_touch')).md_touch || {}
+        const out = {}
+        for (const [k, v] of Object.entries(t)) {
+          const node = await chrome.bookmarks.get(k).then(r => r[0]).catch(() => null)
+          out[node?.title || k + ' (GONE)'] = v
+        }
+        return out
+      })
+      console.log('  [N2bdiag] srvRows=' + JSON.stringify(rowsNow.map(x => ({ t: x.title, id: x.id.slice(0,8), p: x.parentId.slice(0,8), pos: x.position, del: x.deletedAt || 0 }))) + ' trash=' + JSON.stringify((await serverTrash()).filter(x => x.title.includes('N2-L')).map(x => x.title.slice(0,8))) )
+      console.log('  [N2bdiag] browserFolders=' + JSON.stringify(foldersNow.filter(t => t.includes('N2-L'))))
+      console.log('  [N2bdiag] stats=' + JSON.stringify(st2d) + ' touch=' + JSON.stringify(touchNow))
+    }
+    log('N2b: same-name folder restore MERGES into the live twin (one folder)', merged,
+      'rows=' + (await serverNodes()).filter(x => x.title === 'N2-L1' && x.type === 'folder').length +
+      ' trash=' + (await serverTrash()).filter(x => x.title === 'N2-L1').length)
+    // the old row stays tombstoned; the whole chain is live under the twin
+    const oldStillTrashed = (await serverTrash()).some(x => x.title === 'N2-L1')
+    const chainLive = (await serverNodes()).filter(x => x.title.startsWith('N2-L')).length === 5
+    log('N2b1: old row stays tombstoned, full chain live under the twin', oldStillTrashed && chainLive,
+      'trash=' + oldStillTrashed + ' chain=' + chainLive)
     await resync(A.sw)
     await new Promise(r => setTimeout(r, 1200))
     const st2b = await A.sw.evaluate(() => globalThis.__markdeckReconcileStats())
-    log('N2b2: coexistence fixedpoint (no churn/merge)', st2b.failed === 0,
+    log('N2b2: merge fixedpoint (no churn)', st2b.failed === 0,
       'failed=' + st2b.failed)
 
     // ★ offline edit under a PURGED folder → purge is terminal, no revival
