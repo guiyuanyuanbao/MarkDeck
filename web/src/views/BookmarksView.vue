@@ -14,6 +14,7 @@ import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
 import { useViewMode, useGridSize } from '@/composables/useViewMode'
+import { useBookmarkClipboard } from '@/composables/useBookmarkClipboard'
 import { buildTree, confirmAct, errMsg, type TreeNode } from '@/utils/ui'
 // BookmarksView shows date-only on list rows (other views use full
 // timestamps via the shared fmtDate) — keep this view's format verbatim.
@@ -41,9 +42,6 @@ const gridSize = useGridSize()
 // drag-reorder and paste are meaningless there, so the view degrades to
 // selection + open/edit/delete only
 const browsing = computed(() => !searchQ.value && !tagFilter.value)
-
-// internal clipboard for copy/cut/paste
-const clipboard = ref<{ mode: 'copy' | 'cut'; ids: string[] } | null>(null)
 
 // tree assembly uses the shared buildTree from @/utils/ui (TreeNode shape)
 
@@ -158,14 +156,12 @@ function openUrl(url?: string) {
 
 // ---- drag & drop ----
 // dataTransfer payload: "text/md-ids" = JSON array (multi-select drag),
-// falling back to the legacy single "text/bookmark-id".
+// falling back to the legacy single "text/bookmark-id" (payload parsing,
+// splice math, ancestor check and grid zones live in composables/bookmarkDnd
+// with table-driven tests).
+import { draggedIds as parseDraggedIds, spliceAt as spliceIds, isAncestorOfDragged as draggedCoversAncestorOf, gridDropZone } from '@/composables/bookmarkDnd'
 function draggedIds(ev: DragEvent): string[] {
-  const raw = ev.dataTransfer?.getData('text/md-ids')
-  if (raw) {
-    try { return JSON.parse(raw) as string[] } catch { /* fallthrough */ }
-  }
-  const single = ev.dataTransfer?.getData('text/bookmark-id')
-  return single ? [single] : []
+  return parseDraggedIds(ev)
 }
 function onDragStart(b: Bookmark, ev: DragEvent, idx: number) {
   const ids = checked.value.has(b.id) ? [...checked.value] : [b.id]
@@ -229,7 +225,7 @@ async function onListDrop(ev: DragEvent) {
   // dropping onto a folder row = move into it (only when NOT over a reorder line)
   if (insertAt === null) return
   if (!ids.length) return
-  await persistReorder(spliceAt(insertAt, ids))
+  await persistReorder(spliceIds(list.value, insertAt, ids))
 }
 
 // persist a reorder: currentIds is the FULL sibling sequence with the
@@ -242,17 +238,6 @@ async function persistReorder(currentIds: string[]) {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
-// splice the dragged ids into the sibling sequence at insertAt
-// (insert BEFORE list[insertAt]) — shared insertion-point math
-function spliceAt(insertAt: number, ids: string[]): string[] {
-  const currentIds = list.value.map((b) => b.id).filter((id) => !ids.includes(id))
-  let at = insertAt - list.value.slice(0, insertAt).filter((b) => ids.includes(b.id)).length
-  if (at < 0) at = 0
-  if (at > currentIds.length) at = currentIds.length
-  currentIds.splice(at, 0, ...ids)
-  return currentIds
-}
-
 // preview set for dragover filtering (set at dragstart, read during dragover)
 let draggedIdsPreview: string[] = []
 
@@ -261,25 +246,15 @@ let draggedIdsPreview: string[] = []
 // grid: the indicator never rendered there, left/right intent was unreadable,
 // and folder-vs-reorder feedback fought each other. Grid cards carry their
 // own state: nearest-edge zone picks the slot, the card CENTER of a folder
-// picks move-into-it.
+// picks move-into-it. Zone resolution lives in composables/bookmarkDnd
+// (tested); only the event wiring stays here.
 const gridDrop = ref<{ id: string; side: 'before' | 'after' | 'inside' } | null>(null)
 const gridDragSourceId = ref<string | null>(null)
 
-// dragging a folder onto its own descendant would be rejected by moveIds'
-// cycle check — keep the edge semantics for that case so the indicator
-// never promises an impossible move
-function isAncestorOfDragged(folderId: string): boolean {
-  for (const id of draggedIdsPreview) {
-    let p: string | undefined = id
-    let guard = 0
-    while (p && guard++ < 100) {
-      if (p === folderId) return true
-      p = flat.value.get(p)?.parentId || ''
-    }
-  }
-  return false
-}
-
+// draggedCoversAncestorOf(folderId): true when the dragged set contains a
+// folder whose parent chain reaches folderId — the grid then keeps edge
+// semantics so the indicator never promises an impossible move (moveIds'
+// cycle check would reject it anyway).
 function onCardDragOver(b: Bookmark, ev: DragEvent) {
   if (!dragging.value || !browsing.value) return
   const ids = draggedIdsPreview
@@ -289,17 +264,10 @@ function onCardDragOver(b: Bookmark, ev: DragEvent) {
   const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
   const dx = (ev.clientX - rect.left) / rect.width
   const dy = (ev.clientY - rect.top) / rect.height
-  // nearest-edge zone: the smallest distance wins; left/top edges insert
-  // before, right/bottom edges insert after
-  const before = Math.min(dx, dy)
-  const after = Math.min(1 - dx, 1 - dy)
-  // folder cards: hovering the CENTER means move-into (edge zone keeps the
-  // reorder slot; self-subtree drops fall through — moveIds would reject them)
-  if (b.type === 'folder' && before > 0.25 && after > 0.25 && !isAncestorOfDragged(b.id)) {
-    gridDrop.value = { id: b.id, side: 'inside' }
-    return
+  gridDrop.value = {
+    id: b.id,
+    side: gridDropZone(dx, dy, b, { draggingSelfSubtree: draggedCoversAncestorOf(draggedIdsPreview, b.id, flat.value) }),
   }
-  gridDrop.value = { id: b.id, side: before <= after ? 'before' : 'after' }
 }
 
 function onCardDragLeave(b: Bookmark) {
@@ -321,7 +289,7 @@ async function onCardDrop(b: Bookmark, ev: DragEvent) {
   }
   const idx = list.value.findIndex((x) => x.id === b.id)
   if (idx < 0) return
-  await persistReorder(spliceAt(drop.side === 'before' ? idx : idx + 1, ids))
+  await persistReorder(spliceIds(list.value, drop.side === 'before' ? idx : idx + 1, ids))
 }
 
 // drop on the grid's empty space: no card hovered → cancel (no accidental reorder)
@@ -347,50 +315,13 @@ function onDragEnd() {
   gridDragSourceId.value = null
 }
 
-// ---- copy / cut / paste ----
-function copySelected(mode: 'copy' | 'cut') {
-  const ids = [...checked.value]
-  if (!ids.length) return
-  clipboard.value = { mode, ids }
-  ElMessage.success(mode === 'copy' ? `已复制 ${ids.length} 项` : `已剪切 ${ids.length} 项`)
-}
-let pasting = false
-async function paste() {
-  const clip = clipboard.value
-  if (!clip || pasting) return // Ctrl+V auto-repeat / double-fire guard
-  pasting = true
-  try {
-    if (clip.mode === 'cut') {
-      await bookmarksApi.batch({ ids: clip.ids, action: 'move', parentId: currentFolder.value })
-      clipboard.value = null // cut is one-shot
-      ElMessage.success('已粘贴（移动）')
-    } else {
-      let done = 0
-      let failed = 0
-      for (const id of clip.ids) {
-        const src = flat.value.get(id)
-        if (!src) continue
-        try {
-          await bookmarksApi.create({
-            type: src.type,
-            parentId: currentFolder.value,
-            title: src.title,
-            url: src.url || '',
-            note: src.note || '',
-            favorite: src.favorite,
-            tags: src.tags || [],
-          })
-          done++
-        } catch { failed++ }
-      }
-      if (failed) ElMessage.warning(`已粘贴 ${done} 项，${failed} 项失败`)
-      else ElMessage.success(`已复制 ${done} 项`)
-    }
-    loadTree(); loadList()
-  } catch (e) { ElMessage.error(errMsg(e)) } finally {
-    pasting = false
-  }
-}
+// ---- copy / cut / paste (composable: cut one-shot, paste double-fire guard) ----
+const { clipboard, copySelected, paste, setLookup, setSelectionSource } = useBookmarkClipboard(
+  () => currentFolder.value,
+  () => { loadTree(); loadList() },
+)
+setLookup((id) => flat.value.get(id))
+setSelectionSource(() => [...checked.value])
 
 // ---- keyboard (scoped to .bm-content) ----
 function onKeydown(e: KeyboardEvent) {
