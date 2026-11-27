@@ -53,9 +53,13 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Generate drift code
+        working-directory: app
+        run: flutter pub get && dart run build_runner build --force-jit
+
       - name: Analyze app
         working-directory: app
-        run: flutter pub get && flutter analyze
+        run: flutter analyze
 
       - name: Test app
         working-directory: app
