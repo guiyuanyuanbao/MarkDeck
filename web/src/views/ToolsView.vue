@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { toolsApi, authApi, bookmarksApi, type Bookmark } from '@/api/client'
 import { Icon } from '@/components/icons'
 import BookmarkAvatar from '@/components/BookmarkAvatar.vue'
-import { confirmAct } from '@/utils/ui'
+import { confirmAct, errMsg } from '@/utils/ui'
 
 const tab = ref('dead')
 const scanning = ref(false)
@@ -43,8 +43,8 @@ async function load(preserveSelection = false) {
       const liveDead = new Set(dead.value.map((x) => x.bookmark.id))
       deadSel.value = new Set([...deadSel.value].filter((id) => liveDead.has(id)))
     }
-  } catch (e: any) {
-    ElMessage.error('工具数据加载失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('工具数据加载失败: ' + errMsg(e))
   } finally {
     loading.value = false
   }
@@ -56,8 +56,8 @@ async function startScan() {
     await toolsApi.scanDead()
     ElMessage.info('扫描已开始，完成后列表自动更新')
     pollScan()
-  } catch (e: any) {
-    ElMessage.error(e.message)
+  } catch (e) {
+    ElMessage.error(errMsg(e))
     scanning.value = false
   }
 }

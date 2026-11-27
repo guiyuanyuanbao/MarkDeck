@@ -10,6 +10,7 @@
 //  - batch mode: restore each to its own original spot, or one shared target
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { errMsg } from '@/utils/ui'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 
 const emit = defineEmits<{ done: [] }>()
@@ -112,8 +113,8 @@ async function open(items: Bookmark[], trashRows: Bookmark[]) {
   target.value = null
   try {
     await loadFolders()
-  } catch (e: any) {
-    ElMessage.error('恢复目标加载失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('恢复目标加载失败: ' + errMsg(e))
     return
   }
   // preselect the original location ONLY when it is a live folder
@@ -134,7 +135,7 @@ async function createInlineFolder() {
     newFolderName.value = ''
     await loadFolders()
     target.value = created.id
-  } catch (e: any) { ElMessage.error(e.message) } finally { loading.value = false }
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { loading.value = false }
 }
 
 async function confirm() {

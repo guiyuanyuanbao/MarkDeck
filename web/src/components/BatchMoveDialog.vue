@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import type { ElTree } from 'element-plus'
 import { ElMessage } from 'element-plus'
+import { errMsg } from '@/utils/ui'
 import { bookmarksApi, type Bookmark } from '@/api/client'
 
 const visible = ref(false)
@@ -51,8 +52,8 @@ async function confirm() {
     ElMessage.success(`已移动 ${pendingIds.value.length} 项`)
     visible.value = false
     emit('done')
-  } catch (e: any) {
-    ElMessage.error(e.message)
+  } catch (e) {
+    ElMessage.error(errMsg(e))
   } finally {
     loading.value = false
   }

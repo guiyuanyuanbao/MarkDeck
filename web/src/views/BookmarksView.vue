@@ -14,19 +14,10 @@ import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
 import { useViewMode, useGridSize } from '@/composables/useViewMode'
-import { buildTree, confirmAct } from '@/utils/ui'
+import { buildTree, confirmAct, errMsg, type TreeNode } from '@/utils/ui'
 // BookmarksView shows date-only on list rows (other views use full
 // timestamps via the shared fmtDate) — keep this view's format verbatim.
 const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleDateString()
-
-interface TreeNode {
-  id: string
-  label: string
-  type: 'folder' | 'url'
-  isLeaf: boolean
-  children: TreeNode[]
-  raw: Bookmark
-}
 
 const tree = ref<TreeNode[]>([])
 const flat = ref<Map<string, Bookmark>>(new Map())
@@ -120,7 +111,7 @@ async function toggleFav(b: Bookmark) {
   try {
     await bookmarksApi.update(b.id, { favorite: !b.favorite })
     loadList()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 async function removeMany(ids: string[]) {
   if (!ids.length) return
@@ -153,7 +144,7 @@ async function batchFavorite(value: boolean) {
   try {
     await bookmarksApi.batch({ ids, action: 'favorite', value })
     loadTree(); loadList()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 // ---- open semantics ----
@@ -206,7 +197,7 @@ async function moveIds(ids: string[], folderId: string) {
     await bookmarksApi.batch({ ids: targets, action: 'move', parentId: folderId })
     ElMessage.success(`已移动 ${targets.length} 项`)
     loadTree(); loadList()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 // reorder within the current folder: drop above/below a target row inserts
@@ -248,7 +239,7 @@ async function persistReorder(currentIds: string[]) {
     await bookmarksApi.reorder(currentFolder.value, currentIds)
     ElMessage.success('已排序')
     loadList()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 // splice the dragged ids into the sibling sequence at insertAt
@@ -396,7 +387,7 @@ async function paste() {
       else ElMessage.success(`已复制 ${done} 项`)
     }
     loadTree(); loadList()
-  } catch (e: any) { ElMessage.error(e.message) } finally {
+  } catch (e) { ElMessage.error(errMsg(e)) } finally {
     pasting = false
   }
 }

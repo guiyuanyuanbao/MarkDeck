@@ -13,7 +13,8 @@ export class ApiError extends Error {
 }
 
 // parseBody reads the response once and tolerates non-JSON bodies.
-async function parseBody(resp: Response): Promise<any> {
+// Shape is caller-validated via the per-endpoint generics.
+async function parseBody(resp: Response): Promise<unknown> {
   const text = await resp.text()
   if (!text) return null
   try { return JSON.parse(text) } catch { return { raw: text } }
@@ -23,12 +24,15 @@ async function parseBody(resp: Response): Promise<any> {
 // (login/setup) surface their own error text — a wrong password must NOT
 // broadcast md:unauthorized ("登录已过期" + redirect loop). Authenticated
 // pages treat 401 as session expiry.
-function throwApiError(resp: Response, data: any, treat401AsExpiry: boolean): never {
+function throwApiError(resp: Response, data: unknown, treat401AsExpiry: boolean): never {
+  const errText = (data && typeof data === 'object' && 'error' in data && typeof (data as { error?: unknown }).error === 'string')
+    ? (data as { error: string }).error
+    : `HTTP ${resp.status}`
   if (resp.status === 401 && treat401AsExpiry) {
     window.dispatchEvent(new CustomEvent('md:unauthorized'))
     throw new ApiError(401, '登录已过期')
   }
-  throw new ApiError(resp.status, (data && data.error) || `HTTP ${resp.status}`)
+  throw new ApiError(resp.status, errText)
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {

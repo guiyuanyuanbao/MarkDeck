@@ -3,7 +3,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus' // ElMessageBox: prompt dialogs (rename/merge tag)
 import { bookmarksApi, type TagInfo } from '@/api/client'
 import { Icon } from '@/components/icons'
-import { confirmAct } from '@/utils/ui'
+import { confirmAct, errMsg } from '@/utils/ui'
 
 const tags = ref<TagInfo[]>([])
 const loading = ref(false)
@@ -12,8 +12,8 @@ async function load() {
   loading.value = true
   try {
     tags.value = (await bookmarksApi.tags()).tags || []
-  } catch (e: any) {
-    ElMessage.error('标签加载失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('标签加载失败: ' + errMsg(e))
   } finally {
     loading.value = false
   }
@@ -31,7 +31,7 @@ async function rename(t: TagInfo) {
     const r = await bookmarksApi.renameTag(t.tag, to)
     ElMessage.success(`已重命名（影响 ${r.affected} 个书签）`)
     load()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 async function merge(t: TagInfo) {
@@ -45,7 +45,7 @@ async function merge(t: TagInfo) {
     const r = await bookmarksApi.renameTag(t.tag, to)
     ElMessage.success(`已合并（影响 ${r.affected} 个书签）`)
     load()
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 function remove(t: TagInfo) {

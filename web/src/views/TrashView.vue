@@ -19,7 +19,7 @@ import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
 import { useViewMode, useGridSize } from '@/composables/useViewMode'
-import { fmtDate, confirmAct } from '@/utils/ui'
+import { fmtDate, confirmAct, errMsg } from '@/utils/ui'
 
 const trash = ref<Bookmark[]>([])
 const loading = ref(false)
@@ -201,8 +201,8 @@ async function load() {
       currentFolder.value = p && live.has(p) ? p : ''
     }
     clearSelection()
-  } catch (e: any) {
-    ElMessage.error('回收站加载失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('回收站加载失败: ' + errMsg(e))
   } finally {
     loading.value = false
   }

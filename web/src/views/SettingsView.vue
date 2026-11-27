@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { authApi, toolsApi, type Device, type Snapshot } from '@/api/client'
 import { Icon } from '@/components/icons'
-import { confirmAct } from '@/utils/ui'
+import { confirmAct, errMsg } from '@/utils/ui'
 
 const tab = ref('account')
 // deep-link: /settings#devices jumps straight to the pairing tab (the
@@ -100,7 +100,7 @@ async function loadAll() {
     devices.value = d.devices || []
     lastDeviceSig = (d.devices || []).map((x: Device) => x.id).sort().join(',')
     snapshots.value = s.snapshots || []
-  } catch (e: any) { /* not logged in */ }
+  } catch (e) { /* not logged in */ }
 }
 
 async function changePassword() {
@@ -110,7 +110,7 @@ async function changePassword() {
     await authApi.changePassword(oldPw.value, newPw.value)
     ElMessage.success('密码已修改，所有会话已失效，请重新登录')
     location.href = '/login'
-  } catch (e: any) { ElMessage.error(e.message) }
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 async function startTotp() {
@@ -132,8 +132,8 @@ async function confirmTotp() {
     ElMessage.success('两步验证已开启')
     totpEnabled.value = true
     totpSecret.value = ''; totpOtpauth.value = ''; totpCode.value = ''; qr.value = ''
-  } catch (e: any) {
-    ElMessage.error(e.message)
+  } catch (e) {
+    ElMessage.error(errMsg(e))
   }
 }
 
@@ -161,8 +161,8 @@ async function testProxy() {
     proxyTestResult.value = r.ok && r.status === 204
       ? { ok: true, text: `连通正常（${r.ms} ms 经 Google 连通性端点）` }
       : { ok: false, text: r.ok ? `HTTP ${r.status}（非预期响应）` : (r.error || '无法连接') }
-  } catch (e: any) {
-    proxyTestResult.value = { ok: false, text: e.message }
+  } catch (e) {
+    proxyTestResult.value = { ok: false, text: errMsg(e) }
   } finally {
     proxyTesting.value = false
   }
@@ -172,8 +172,8 @@ async function saveProxy() {
   try {
     await authApi.setProxy(proxyUrl.value.trim())
     ElMessage.success('代理配置已保存，立即生效')
-  } catch (e: any) {
-    ElMessage.error(e.message)
+  } catch (e) {
+    ElMessage.error(errMsg(e))
   }
 }
 
@@ -183,8 +183,8 @@ async function newPairCode() {
     const r = await authApi.newPairCode(name)
     pairCode.value = r.code
     pairExpiry.value = Date.now() + 300_000
-  } catch (e: any) {
-    ElMessage.error('生成配对码失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('生成配对码失败: ' + errMsg(e))
   }
 }
 async function copyPairCode() {
@@ -224,8 +224,8 @@ async function takeSnapshot() {
     await toolsApi.createSnapshot()
     ElMessage.success('快照已创建')
     loadAll()
-  } catch (e: any) {
-    ElMessage.error('快照创建失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('快照创建失败: ' + errMsg(e))
   }
 }
 
@@ -276,8 +276,8 @@ async function saveRetention() {
     if (days === 0) ElMessage.success('已关闭自动清理')
     else if (r.purged > 0) ElMessage.success(`已保存：自动清理 ${days} 天前的回收站内容（本次清理 ${r.purged} 项）`)
     else ElMessage.success(`已保存：自动清理 ${days} 天前的回收站内容`)
-  } catch (e: any) {
-    ElMessage.error('保存失败: ' + (e?.message || '未知错误'))
+  } catch (e) {
+    ElMessage.error('保存失败: ' + errMsg(e))
   } finally {
     retentionSaving.value = false
   }

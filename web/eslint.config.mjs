@@ -60,10 +60,9 @@ export default [
       // vue-tsc (noUnusedLocals) is the authority on unused symbols
       '@typescript-eslint/no-unused-vars': 'off',
       'no-unused-vars': 'off',
-      // Phase 0 gate: warn while the catch(e: any) pattern (~41 sites) is
-      // still being migrated to typed errors in the refactor program;
-      // raise to 'error' once Phase 2 removes the pattern.
-      '@typescript-eslint/no-explicit-any': 'warn',
+      // the catch(e: any) pattern was fully migrated to typed errors + errMsg
+      // (utils/ui.ts) — regressions are now a hard error
+      '@typescript-eslint/no-explicit-any': 'error',
       'vue/multi-word-component-names': 'off',
       // existing templates use both orders; don't mass-rewrite
       'vue/attributes-order': 'off',

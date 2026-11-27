@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { uploadFile, api } from '@/api/client'
 import { Icon } from '@/components/icons'
-import { confirmAct } from '@/utils/ui'
+import { confirmAct, errMsg } from '@/utils/ui'
 
 const uploading = ref(false)
 const mode = ref<'newfolder' | 'merge'>('merge')
@@ -61,8 +61,8 @@ async function runImport(f: File) {
     result.value = data
     pendingFile.value = null
     ElMessage.success(`导入完成：新增 ${data.created}，跳过重复 ${data.duplicates}`)
-  } catch (e: any) {
-    ElMessage.error('导入失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('导入失败: ' + errMsg(e))
   } finally {
     uploading.value = false
     if (fileInput.value) fileInput.value.value = ''
@@ -79,8 +79,8 @@ async function download(path: string, filename: string) {
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-  } catch (e: any) {
-    ElMessage.error('导出失败: ' + e.message)
+  } catch (e) {
+    ElMessage.error('导出失败: ' + errMsg(e))
   }
 }
 function exportHtml() {

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage } from 'element-plus'
+import { errMsg } from '@/utils/ui'
 
 const auth = useAuthStore()
 const route = useRoute()
@@ -40,11 +41,12 @@ async function submit() {
       await auth.login(password.value, totp.value)
       router.replace((route.query.redirect as string) || '/')
     }
-  } catch (e: any) {
-    if (e?.message?.includes('TOTP') || e?.message?.includes('totp')) {
+  } catch (e) {
+    const msg = errMsg(e)
+    if (msg.includes('TOTP') || msg.includes('totp')) {
       showTotp.value = true
     }
-    ElMessage.error(e?.message || '登录失败')
+    ElMessage.error(msg || '登录失败')
   } finally {
     loading.value = false
   }

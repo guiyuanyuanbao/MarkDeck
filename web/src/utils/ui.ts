@@ -10,15 +10,25 @@ export function fmtDate(ts?: number): string {
 // buildTree assembles the folder hierarchy shown in sidebars/pickers from
 // the flat server tree. URL rows are ignored; siblings sort by position.
 // Returns BookmarksView's TreeNode shape (raw row attached, isLeaf flag).
-export function buildTree(nodes: { id: string; parentId: string; type: string; title: string; position: number }[]) {
-  const byParent = new Map<string, typeof nodes>()
+export interface TreeNode {
+  id: string
+  label: string
+  type: string
+  isLeaf: boolean
+  raw: unknown
+  children: TreeNode[]
+}
+type FlatRow = { id: string; parentId: string; type: string; title: string; position: number }
+
+export function buildTree(nodes: FlatRow[]): TreeNode[] {
+  const byParent = new Map<string, FlatRow[]>()
   for (const n of nodes) {
     if (!byParent.has(n.parentId)) byParent.set(n.parentId, [])
     byParent.get(n.parentId)!.push(n)
   }
-  const sortKids = (a: { position: number }, b: { position: number }) => a.position - b.position
-  const mk = (b: any): any => {
-    const kids = (byParent.get(b.id) || []).filter((k: any) => k.type === 'folder').sort(sortKids)
+  const sortKids = (a: FlatRow, b: FlatRow) => a.position - b.position
+  const mk = (b: FlatRow): TreeNode => {
+    const kids = (byParent.get(b.id) || []).filter((k) => k.type === 'folder').sort(sortKids)
     return { id: b.id, label: b.title || '(未命名)', type: b.type, isLeaf: b.type === 'url', raw: b, children: kids.map(mk) }
   }
   const roots = (byParent.get('') || []).filter((k) => k.type === 'folder').sort(sortKids)
@@ -27,13 +37,20 @@ export function buildTree(nodes: { id: string; parentId: string; type: string; t
 
 // folderTree is the dialog-picker variant: { id, label, children } only
 // (no raw rows). Children are computed from the flat list in one pass.
-export function folderTree(rows: { id: string; parentId: string; type: string; title: string }[]): { id: string; label: string; children?: any[] }[] {
-  const byParent = new Map<string, typeof rows>()
+export interface PickerNode {
+  id: string
+  label: string
+  children?: PickerNode[]
+}
+type PickerRow = { id: string; parentId: string; type: string; title: string }
+
+export function folderTree(rows: PickerRow[]): PickerNode[] {
+  const byParent = new Map<string, PickerRow[]>()
   for (const n of rows) {
     if (!byParent.has(n.parentId)) byParent.set(n.parentId, [])
     byParent.get(n.parentId)!.push(n)
   }
-  const mk = (b: { id: string; type: string; title: string }): { id: string; label: string; children?: any[] } => {
+  const mk = (b: PickerRow): PickerNode => {
     const kids = (byParent.get(b.id) || []).filter((k) => k.type === 'folder').map(mk)
     return { id: b.id, label: b.title || '(未命名)', children: kids.length ? kids : undefined }
   }
