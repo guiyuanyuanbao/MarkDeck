@@ -1,15 +1,16 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/importexport"
+	"github.com/guiyuanyuanbao/MarkDeck/server/internal/store"
 	"github.com/guiyuanyuanbao/MarkDeck/server/internal/tools"
 )
 
@@ -34,33 +35,99 @@ func (a *API) RegisterToolsRoutes(mux *http.ServeMux, chain *tools.Chain) {
 	mux.HandleFunc("POST /api/snapshots/upload", a.requireAny(a.handleUploadSnapshot))
 	mux.HandleFunc("POST /api/snapshots/{id}/restore", a.requireAny(a.handleRestoreSnapshot))
 	mux.HandleFunc("GET /api/snapshots/{id}/download", a.requireAny(a.handleDownloadSnapshot))
+
+	// trash auto-purge retention (registered here — it belongs to the tools
+	// chain, not the auth handlers file where it used to sit)
+	mux.HandleFunc("GET /api/trash/retention", a.requireSession(a.handleGetTrashRetention))
+	mux.HandleFunc("POST /api/trash/retention", a.requireSession(a.handleSetTrashRetention))
+}
+
+// handleGetTrashRetention returns the auto-purge window in days (0 = never).
+func (a *API) handleGetTrashRetention(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]int{"days": a.chain.TrashRetentionDays()})
+}
+
+// handleSetTrashRetention stores the auto-purge window. 0 = never; presets
+// 1/7/30/90 or any custom 0..3650 value.
+func (a *API) handleSetTrashRetention(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Days int `json:"days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad payload"})
+		return
+	}
+	if err := a.chain.SetTrashRetention(body.Days); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// apply immediately so the admin sees the sweep without waiting an hour
+	purged := a.chain.EnforceTrashRetention(store.Now())
+	writeJSON(w, http.StatusOK, map[string]int{"days": body.Days, "purged": purged})
 }
 
 // handleUploadSnapshot accepts a previously downloaded snapshot file
 // (.json.gz) and restores it. Completes the download half of the backup
 // story: cold copies / cross-instance moves can come back without shell
 // access. A protective snapshot of the current state is taken first.
+// readMultipartFile reads the "file" field of an already-parsed multipart
+// form, capping at maxBytes (a shared shape: import and snapshot upload used
+// to carry two different hand-rolled readers).
+func readMultipartFile(r *http.Request, maxBytes int64) ([]byte, error) {
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	buf, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > maxBytes {
+		return nil, errFileTooLarge
+	}
+	return buf, nil
+}
+
+var errFileTooLarge = errors.New("file too large")
+
+// decodeMergeRequest parses + validates the shared keepId/removeIds body of
+// the duplicate-merge endpoints (validation used to be copy-pasted ×2).
+type mergeRequest struct {
+	KeepID    string   `json:"keepId"`
+	RemoveIDs []string `json:"removeIds"`
+}
+
+func decodeMergeRequest(w http.ResponseWriter, r *http.Request) (mergeRequest, bool) {
+	var body mergeRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.KeepID == "" || len(body.RemoveIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId and removeIds required"})
+		return body, false
+	}
+	for _, id := range body.RemoveIDs {
+		if id == body.KeepID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId in removeIds"})
+			return body, false
+		}
+	}
+	return body, true
+}
+
 func (a *API) handleUploadSnapshot(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(64 << 20); err != nil { // 64 MiB upload cap
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart required"})
 		return
 	}
-	file, _, err := r.FormFile("file")
+	data, err := readMultipartFile(r, 64<<20)
 	if err != nil {
+		if errors.Is(err, errFileTooLarge) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file too large"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field required"})
 		return
 	}
-	defer file.Close()
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, io.LimitReader(file, 64<<20+1)); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read failed"})
-		return
-	}
-	if buf.Len() > 64<<20 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file too large"})
-		return
-	}
-	row, err := a.chain.RestoreSnapshotFile(buf.Bytes(), "import")
+	row, err := a.chain.RestoreSnapshotFile(data, "import")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -74,24 +141,14 @@ func (a *API) handleImportHTML(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart required"})
 		return
 	}
-	file, _, err := r.FormFile("file")
+	buf, err := readMultipartFile(r, 64<<20)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field required"})
-		return
-	}
-	defer file.Close()
-	var buf = make([]byte, 0, 1<<20)
-	tmp := make([]byte, 64<<10)
-	for {
-		n, e := file.Read(tmp)
-		buf = append(buf, tmp[:n]...)
-		if e != nil {
-			break
-		}
-		if len(buf) > 64<<20 {
+		if errors.Is(err, errFileTooLarge) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file too large"})
 			return
 		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file field required"})
+		return
 	}
 	root, err := importexport.ParseNetscapeHTML(buf)
 	if err != nil {
@@ -197,19 +254,9 @@ func (a *API) handleDuplicates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleDupMerge(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		KeepID    string   `json:"keepId"`
-		RemoveIDs []string `json:"removeIds"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.KeepID == "" || len(body.RemoveIDs) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId and removeIds required"})
+	body, ok := decodeMergeRequest(w, r)
+	if !ok {
 		return
-	}
-	for _, id := range body.RemoveIDs {
-		if id == body.KeepID {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId in removeIds"})
-			return
-		}
 	}
 	// same-group validation: merge deletes nodes, so it must refuse ids that
 	// are NOT actual duplicate-URL group members — otherwise this endpoint
@@ -236,19 +283,9 @@ func (a *API) handleListFolderDuplicates(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *API) handleFolderDupMerge(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		KeepID    string   `json:"keepId"`
-		RemoveIDs []string `json:"removeIds"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.KeepID == "" || len(body.RemoveIDs) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId and removeIds required"})
+	body, ok := decodeMergeRequest(w, r)
+	if !ok {
 		return
-	}
-	for _, id := range body.RemoveIDs {
-		if id == body.KeepID {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "keepId in removeIds"})
-			return
-		}
 	}
 	if err := a.chain.ValidateFolderDuplicateGroup(body.KeepID, body.RemoveIDs); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

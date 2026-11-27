@@ -38,8 +38,6 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/network/proxy", a.requireSession(a.handleGetProxy))
 	mux.HandleFunc("POST /api/network/proxy", a.requireSession(a.handleSetProxy))
 	mux.HandleFunc("POST /api/network/proxy-test", a.requireSession(a.handleTestProxy))
-	mux.HandleFunc("GET /api/trash/retention", a.requireSession(a.handleGetTrashRetention))
-	mux.HandleFunc("POST /api/trash/retention", a.requireSession(a.handleSetTrashRetention))
 	mux.HandleFunc("GET /api/devices", a.requireSession(a.handleListDevices))
 	mux.HandleFunc("DELETE /api/devices/{id}", a.requireSession(a.handleRevokeDevice))
 
@@ -236,32 +234,6 @@ func (a *API) handleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "1"})
-}
-
-// ---- trash retention ----
-
-// handleGetTrashRetention returns the auto-purge window in days (0 = never).
-func (a *API) handleGetTrashRetention(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]int{"days": a.chain.TrashRetentionDays()})
-}
-
-// handleSetTrashRetention stores the auto-purge window. 0 = never; presets
-// 1/7/30/90 or any custom 0..3650 value.
-func (a *API) handleSetTrashRetention(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Days int `json:"days"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad payload"})
-		return
-	}
-	if err := a.chain.SetTrashRetention(body.Days); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	// apply immediately so the admin sees the sweep without waiting an hour
-	purged := a.chain.EnforceTrashRetention(store.Now())
-	writeJSON(w, http.StatusOK, map[string]int{"days": body.Days, "purged": purged})
 }
 
 // ---- pair / devices ----

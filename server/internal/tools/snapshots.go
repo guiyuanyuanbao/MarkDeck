@@ -84,11 +84,10 @@ func (c *Chain) CleanupSnapshots() {
 // RestoreSnapshot replaces the live tree with the snapshot contents.
 // A protective snapshot of the current state is taken first.
 func (c *Chain) RestoreSnapshot(id string, deviceID string) error {
-	path, row, err := c.SnapshotPath(id)
+	path, _, err := c.SnapshotPath(id)
 	if err != nil {
 		return err
 	}
-	_ = row
 	if _, err := c.TakeSnapshot("pre-restore"); err != nil {
 		return fmt.Errorf("protective snapshot failed: %w", err)
 	}
