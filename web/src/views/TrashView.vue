@@ -19,6 +19,7 @@ import { Icon } from '@/components/icons'
 import { useSelection } from '@/composables/selection'
 import { useRevRefresh } from '@/composables/revRefresh'
 import { useViewMode, useGridSize } from '@/composables/useViewMode'
+import { applyScopeFilters, buildScopeFilters, origPath as origPathOf, relPath as relPathOf, type SideFilterLike } from '@/composables/trashScopes'
 import { fmtDate, confirmAct, errMsg } from '@/utils/ui'
 
 const trash = ref<Bookmark[]>([])
@@ -118,59 +119,18 @@ const editDlg = ref<InstanceType<typeof EditBookmarkDialog> | null>(null)
 // while its children remain trashed — the 原位置 chain must keep resolving
 const liveNameMap = ref<Map<string, string>>(new Map())
 
-// original location: full relative path from the trash top, e.g. 大文件夹/嵌套
-// (trashed ancestors supply names; live ancestors too; purged ones can't —
-// show 已删除 marker)
-function origPath(pid: string): string {
-  if (!pid) return '根目录'
-  const chain: string[] = []
-  let p = pid
-  let guard = 0
-  while (p && guard++ < 100) {
-    const trow = trashById.value.get(p)
-    if (trow) {
-      chain.unshift(trow.title || '(未命名)')
-      p = trow.parentId
-      continue
-    }
-    // not in trash: live row (restored) or gone (purged / deleted elsewhere)
-    const lname = liveNameMap.value.get(p)
-    if (lname) {
-      chain.unshift(lname)
-      p = liveParentId(p)
-      continue
-    }
-    return chain.length ? chain.join(' / ') + ' / （已删除）' : '（原文件夹已删除）'
-  }
-  return chain.join(' / ') || '根目录'
-}
+// original location / relative path renderers live in composables/trashScopes
+// (pure, tested: trashed ancestors, restored live ones, purged markers)
 // parent of a live row (from the live tree map, refreshed in load())
 const liveParent = ref<Map<string, string>>(new Map())
 function liveParentId(id: string): string {
   return liveParent.value.get(id) || ''
 }
-// path relative to the browsed folder (for the 原位置 column inside a level)
+function origPath(pid: string): string {
+  return origPathOf(pid, trashById.value, liveNameMap.value, liveParentId)
+}
 function relPath(pid: string): string {
-  // flat scopes (网址书签/文件夹/时间) have no "current level" concept —
-  // everything is global, so always the full original path (check FIRST:
-  // pid===''===currentFolder at trash top would otherwise say 本层)
-  if (scope.value !== 'all') return origPath(pid)
-  // during global search the browsed folder itself can appear in results —
-  // show its real parent path, not a misleading 本层
-  if (pid === currentFolder.value && !searching.value) return '本层'
-  if (currentFolder.value === '') return origPath(pid)
-  // walk up to currentFolder; if pid is not a descendant, fall back to full path
-  const chain: string[] = []
-  let p = pid
-  let guard = 0
-  while (p && guard++ < 100) {
-    if (p === currentFolder.value) return chain.join(' / ') || '本层'
-    const row = trashById.value.get(p)
-    if (!row) break
-    chain.unshift(row.title || '(未命名)')
-    p = row.parentId
-  }
-  return origPath(pid)
+  return relPathOf(pid, scope.value, currentFolder.value, searching.value, trashById.value, liveNameMap.value, liveParentId)
 }
 
 async function load() {
@@ -212,62 +172,19 @@ onMounted(load)
 // background deletes (extension sync) refresh the trash too, coalesced
 useRevRefresh(load)
 
-// ---- scope pipeline ----
-// 'all': current hierarchy level (search lifts it to the whole trash);
-// flat scopes (url/folder/7d/older): always the WHOLE trash, so the sidebar
-// badge count always matches what's listed — and items inside deleted
-// folders are findable without clicking into each folder.
+// ---- scope pipeline (composables/trashScopes, tested: badge==content) ----
 const searching = computed(() => q.value.trim().length > 0)
-const now7 = computed(() => Date.now() / 1000 - 7 * 86400)
-const baseRows = computed<Bookmark[]>(() => {
-  if (scope.value !== 'all') return trash.value // flat scopes are global
-  return searching.value ? trash.value : currentRows.value
-})
-const filtered = computed(() => {
-  let rows = baseRows.value
-  switch (scope.value) {
-    case 'url': rows = rows.filter((b) => b.type === 'url'); break
-    case 'folder': rows = rows.filter((b) => b.type === 'folder'); break
-    case '7d': rows = rows.filter((b) => (b.deletedAt || 0) >= now7.value); break
-    case 'older': rows = rows.filter((b) => (b.deletedAt || 0) < now7.value); break
-  }
-  if (searching.value) {
-    const k = q.value.toLowerCase()
-    rows = rows.filter((b) => (b.title || '').toLowerCase().includes(k) || (b.url || '').toLowerCase().includes(k))
-  }
-  const s = sortBy.value
-  rows = [...rows].sort((a, b) =>
-    s === 'deletedDesc' ? (b.deletedAt || 0) - (a.deletedAt || 0)
-      : s === 'deletedAsc' ? (a.deletedAt || 0) - (b.deletedAt || 0)
-        : (a.title || '').localeCompare(b.title || '')
-  )
-  return rows
-})
+const filtered = computed(() =>
+  applyScopeFilters(trash.value, scope.value, currentRows.value, searching.value, q.value, sortBy.value, Math.floor(Date.now() / 1000)),
+)
 
-// sidebar scope entries. badge counts describe the CONTENT the entry shows:
-// for 'all' that's the current hierarchy level (topRows at top level), for
-// the flat scopes the global filtered total — never two different numbers
-// for one entry (old design showed 网址书签 8 but listed the level's 1).
-const counts = computed(() => {
-  const week = now7.value
-  return {
-    all: topRows.value.length,
-    total: trash.value.length,
-    url: trash.value.filter((b) => b.type === 'url').length,
-    folder: trash.value.filter((b) => b.type === 'folder').length,
-    week: trash.value.filter((b) => (b.deletedAt || 0) >= week).length,
-    older: trash.value.filter((b) => (b.deletedAt || 0) < week).length,
-  }
-})
-type SideFilter = { key: 'all' | 'url' | 'folder' | '7d' | 'older'; label: string; ico: string; count: number; hint: string }
-const sideFilters = computed<SideFilter[]>(() => [
-  { key: 'all', label: '全部', ico: 'trash', count: counts.value.all, hint: `按层级浏览 · 顶层 ${counts.value.all} 项 / 共 ${counts.value.total} 项` },
-  { key: 'url', label: '网址书签', ico: 'bookmark', count: counts.value.url, hint: '全部网址书签（含文件夹内的）' },
-  { key: 'folder', label: '文件夹', ico: 'folder', count: counts.value.folder, hint: '全部已删除文件夹' },
-  { key: '7d', label: '最近 7 天', ico: 'refresh', count: counts.value.week, hint: '最近 7 天删除的所有内容' },
-  { key: 'older', label: '7 天前', ico: 'stack', count: counts.value.older, hint: '更早删除的所有内容' },
-])
-function pickFilter(f: SideFilter) {
+// sidebar scope entries. badge counts describe the CONTENT the entry shows —
+// never two different numbers for one entry (old design showed 网址书签 8 but
+// listed the level's 1).
+const sideFilters = computed<SideFilterLike[]>(() =>
+  buildScopeFilters(trash.value, topRows.value.length, Math.floor(Date.now() / 1000)),
+)
+function pickFilter(f: SideFilterLike) {
   scope.value = f.key
   // hierarchy browsing only exists in 'all'; leaving it drops the folder
   if (f.key !== 'all') currentFolder.value = ''
@@ -494,7 +411,7 @@ function onKeydown(e: KeyboardEvent) {
             </nav>
             <h1 class="page-title">{{ searching ? '搜索结果' : (scopeTitle) }}</h1>
             <div class="page-sub">
-              {{ filtered.length }} 项<template v-if="!searching && scope === 'all' && currentFolder === '' && counts.total !== counts.all">（共 {{ counts.total }} 项）</template><template v-if="actionableCount"> · 已选 {{ actionableCount }} 项</template>
+              {{ filtered.length }} 项<template v-if="!searching && scope === 'all' && currentFolder === '' && trash.length !== topRows.length">（共 {{ trash.length }} 项）</template><template v-if="actionableCount"> · 已选 {{ actionableCount }} 项</template>
             </div>
           </div>
           <div class="head-actions">
