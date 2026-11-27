@@ -145,6 +145,10 @@ jobs:
           cache: true
 
       # versionCode: M*million + m*thousand + p — monotonically rising with VERSION
+      - name: Generate drift code
+        working-directory: app
+        run: flutter pub get && dart run build_runner build --force-jit
+
       - name: Build release APK
         working-directory: app
         env:
