@@ -62,11 +62,13 @@ docker compose up -d
 
 浏览器端：管理页面 → 设置 → 设备同步 → 生成配对码 → 在 Chrome/Edge 安装插件（[Releases](../../releases) 下载 zip 解压加载）→ 填入地址与配对码。
 
+手机端：在桌面端生成配对码 → [Releases](../../releases) 下载 `markdeck-android-*.apk` 侧载安装（需允许安装未知来源应用）→ App 内填入服务器地址与配对码。支持任意 App「分享 → MarkDeck」快速收藏、点书签跳系统浏览器打开、离线浏览/搜索/编辑（恢复联网后自动同步）。
+
 > ⚠️ **与浏览器自带书签同步二选一**：如果浏览器账号同步（Chrome Sync / Edge 同步）开着，请在浏览器设置中关闭「书签」一项（密码、历史不受影响），避免两套同步互相覆盖。插件检测到重复书签时会自动提醒并提供一键跳转。
 
 ## 源码构建
 
-依赖：Go 1.26+、Node 22+
+依赖：Go 1.26+、Node 22+、Flutter 3.38+（Android App）
 
 ```bash
 cd web && npm ci && npm run build          # 管理页面 → 嵌入二进制
@@ -75,6 +77,8 @@ MARKDECK_ADDR=127.0.0.1:8990 MARKDECK_DATA=./data ./markdeck
 ```
 
 插件：`cd extension && npm ci && npm run build` → 加载 `extension/dist`。
+
+Android App：`cd app && flutter pub get && flutter build apk --release` → `app/build/app/outputs/flutter-apk/app-release.apk`（CI 发布版自动以 VERSION 命名并签名）。
 
 ## 配置
 
@@ -96,6 +100,8 @@ MARKDECK_ADDR=127.0.0.1:8990 MARKDECK_DATA=./data ./markdeck
 ```
 web/          Vue3 + Element Plus 管理页面（构建产物嵌入 Go 二进制）
 extension/    MV3 插件（同步核心纯 TS 可单测，chrome.* 适配层分离）
+app/          Flutter Android App（Dart 移植同一对账引擎，SQLite 镜像 +
+              分享收藏 + 离线可用，差分夹具与 TS 引擎逐场景比对）
 server/
   internal/
     store/          SQLite（WAL）、全局修订号变更日志、FTS5
@@ -111,7 +117,7 @@ server/
 
 ## 版本与发布
 
-CI 全自动：push 到 `main` → 测试通过 → 补丁版本自动 +1 → 多架构 Docker 镜像推 GHCR（`latest` + 精确版本）→ 插件 zip 与三平台二进制发 GitHub Release。详见 [VERSIONING.md](VERSIONING.md)。
+CI 全自动：push 到 `main` → 测试通过 → 补丁版本自动 +1 → 多架构 Docker 镜像推 GHCR（`latest` + 精确版本）→ 插件 zip、Android APK 与三平台二进制发 GitHub Release。详见 [VERSIONING.md](VERSIONING.md)。
 
 ## 开发
 
@@ -119,6 +125,7 @@ CI 全自动：push 到 `main` → 测试通过 → 补丁版本自动 +1 → �
 cd server && go test ./... && golangci-lint run   # 后端（lint 门禁见 .golangci.yml）
 cd web && npm run lint && npm run typecheck && npm run build       # 前端
 cd extension && npm run lint && npm test && npm run build          # 插件
+cd app && flutter analyze && flutter test                          # Android App（含差分引擎比对）
 ```
 
 ## License

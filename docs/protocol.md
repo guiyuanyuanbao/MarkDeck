@@ -1,17 +1,19 @@
 # MarkDeck 同步协议
 
-单一权威描述。改协议 = 改这里 + 三端实现 + golden 契约测试。
+单一权威描述。改协议 = 改这里 + 四端实现 + golden 契约测试。
 
 **约定来源**（改动时同步更新）：
 
 - 服务端 ops/结果结构：`server/internal/store/batch.go`（`BatchOp` / `BatchResult`）
 - 服务端路由：`server/internal/api/sync.go`
 - 插件 op 类型：`extension/src/reconcile.ts`（`ServerOp` / `ServerNode` / `Base`）
+- Android App op 类型：`app/lib/sync/engine.dart`（`ServerOp` / `ServerNode` / `Base`，
+  由差分夹具与 TS 引擎逐场景比对，见 `app/tool/sync-diff/`）
 - Web 类型：`web/src/api/client.ts`（`Bookmark` 等，注释标注 "mirroring server models"）
 - **golden 契约测试**：`server/internal/store/contract_test.go` +
   `server/internal/store/testdata/*.golden.json`（插件侧镜像断言在
-  `extension/tests/protocol.wire.test.ts`）。任一端改 JSON 字段而不改
-  golden 与对端，CI 直接红。
+  `extension/tests/protocol.wire.test.ts`，App 侧在 `app/test/sync/wire_test.dart`）。
+  任一端改 JSON 字段而不改 golden 与对端，CI 直接红。
 
 ## 端点
 
