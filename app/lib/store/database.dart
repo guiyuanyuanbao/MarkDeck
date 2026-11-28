@@ -24,10 +24,22 @@ class AppDatabase extends _$AppDatabase {
   }
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
-  MigrationStrategy get migration => MigrationStrategy(onCreate: (m) => m.createAll());
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) => m.createAll(),
+        onUpgrade: (m, from, to) async {
+          // v2: base_entries gains local_id — the local mirror row this
+          // server row is bound to. App-created rows keep their own ids
+          // (timestamp-hash format), which differ from the minted server
+          // id; without this column the binding never persists and every
+          // reconcile re-mints a fresh create (ghost-folder storm).
+          if (from < 2) {
+            await m.addColumn(baseEntries, baseEntries.localId);
+          }
+        },
+      );
 
   // ---- meta helpers ----
 

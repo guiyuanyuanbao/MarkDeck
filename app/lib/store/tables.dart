@@ -26,10 +26,14 @@ class Nodes extends Table {
 }
 
 // Base snapshot entry: what the server row looked like at the last
-// successful reconcile. The binding is implicit: localId == serverId.
+// successful reconcile, plus the local mirror row it is bound to.
+// localId == serverId for rows absorbed from the server; App-created rows
+// keep their own local id (timestamp-hash format) and the mapping here is
+// what keeps the engine from re-minting their create every reconcile.
 class BaseEntries extends Table {
   TextColumn get serverId => text()(); // PK = server id
   TextColumn get serverJson => text()(); // full ServerNode wire JSON
+  TextColumn get localId => text().nullable()(); // local mirror row id
   IntColumn get appliedAt => integer().withDefault(const Constant(0))();
 
   @override

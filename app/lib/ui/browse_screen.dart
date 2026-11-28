@@ -484,10 +484,10 @@ class _BrowseScreenState extends State<BrowseScreen> {
       border = Border.fromBorderSide(side(selected ? p.primary : p.border));
     } else if (zone == DropZone.before) {
       // 左缘插入线
-      border = Border(left: side(p.primary, 3), top: side(p.border), right: side(p.border), bottom: side(p.border));
+      border = Border(left: side(p.primary, 4), top: side(p.primary, 1.5), right: side(p.border), bottom: side(p.border));
     } else if (zone == DropZone.after) {
       // 右缘插入线
-      border = Border(left: side(p.border), top: side(p.border), right: side(p.primary, 3), bottom: side(p.border));
+      border = Border(left: side(p.border), top: side(p.border), right: side(p.primary, 4), bottom: side(p.border));
     } else {
       // 文件夹移入
       border = Border.fromBorderSide(side(p.primary, 2));
@@ -579,6 +579,24 @@ class _BrowseScreenState extends State<BrowseScreen> {
                   top: 0,
                   left: 0,
                   child: Icon(Icons.check_circle, size: 14, color: p.primary),
+                ),
+              if (zone == DropZone.before || zone == DropZone.after)
+                Positioned(
+                  top: 2,
+                  left: zone == DropZone.before ? 2 : null,
+                  right: zone == DropZone.after ? 2 : null,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: p.primary,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      zone == DropZone.before ? '← 放到它前面' : '放到它后面 →',
+                      style: const TextStyle(
+                          fontSize: 9, color: Colors.white, fontWeight: FontWeight.w700),
+                    ),
+                  ),
                 ),
             ],
           ),

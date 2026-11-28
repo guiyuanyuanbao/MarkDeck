@@ -181,38 +181,90 @@ Future<void> commitMoveInto(
   await app.driver.journalTouch(draggedId);
 }
 
-/// 拖动时的浮起卡片（feedback）
-Widget dragFeedback(BuildContext context, MdPalette p, Node n) {
-  final width = math.min(MediaQuery.of(context).size.width - 48, 360.0);
-  return Material(
-    elevation: 6,
-    borderRadius: BorderRadius.circular(12),
-    color: p.surface,
-    child: SizedBox(
-      width: width,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 32,
-              child: n.type == 'folder'
-                  ? Icon(Icons.folder_rounded, size: 20, color: p.primary)
-                  : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 28),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(n.title,
-                  maxLines: 1,
+/// 拖动时的浮起预览：列表行式（宽条）或网格卡片式（与所拖视图同形）
+Widget dragFeedback(BuildContext context, MdPalette p, Node n, {bool grid = false}) {
+  if (!grid) {
+    final width = math.min(MediaQuery.of(context).size.width - 48, 360.0);
+    return Material(
+      elevation: 6,
+      borderRadius: BorderRadius.circular(12),
+      color: p.surface,
+      child: SizedBox(
+        width: width,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 32,
+                child: n.type == 'folder'
+                    ? Icon(Icons.folder_rounded, size: 20, color: p.primary)
+                    : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 28),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(n.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: p.text)),
+              ),
+              const Icon(Icons.drag_indicator, size: 18, color: Colors.grey),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+  return Transform.scale(
+    scale: 1.08,
+    child: Material(
+      elevation: 8,
+      borderRadius: BorderRadius.circular(14),
+      color: p.surface,
+      child: SizedBox(
+        width: 110,
+        height: 116,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 10, 8, 8),
+          child: Column(
+            children: [
+              SizedBox(
+                height: 44,
+                child: Center(
+                  child: n.type == 'folder'
+                      ? Icon(Icons.folder_rounded, size: 40, color: p.primary)
+                      : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 40),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(n.title,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: p.text)),
-            ),
-            const Icon(Icons.drag_indicator, size: 18, color: Colors.grey),
-          ],
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w700, color: p.text, height: 1.25)),
+              const Spacer(),
+              Text(
+                n.type == 'folder' ? '文件夹' : _hostOf(n.url),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 10, color: p.text3),
+              ),
+            ],
+          ),
         ),
       ),
     ),
   );
+}
+
+String _hostOf(String? url) {
+  if (url == null || url.isEmpty) return '书签';
+  try {
+    return Uri.parse(url).host;
+  } on FormatException {
+    return '书签';
+  }
 }
 
 Widget dropLine(MdPalette p, {bool vertical = false}) {

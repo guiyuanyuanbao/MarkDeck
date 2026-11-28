@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'dart:convert';
 
 import 'package:drift/drift.dart';
@@ -303,7 +304,10 @@ class SyncDriver {
       final j = jsonDecode(r.serverJson) as Map<String, dynamic>;
       entries[r.serverId] = BaseEntry(
         server: ServerNode.fromJson(j),
-        localId: r.serverId, // app invariant: local id == server id
+        // the stored localId is the mirror row this server row is bound to
+        // (== serverId for rows absorbed from the server; App-created rows
+        // keep their own timestamp-hash id)
+        localId: r.localId ?? r.serverId,
         appliedAt: r.appliedAt,
       );
     }
@@ -329,6 +333,10 @@ class SyncDriver {
   Future<void> _executeLocalOps(List<LocalOp> ops) async {
     // creates are topologically ordered by the engine (parents first)
     for (final op in ops) {
+      // locate the mirror row via the op's LOCAL id when the engine provides
+      // one (App-created rows keep their own id, which differs from the
+      // minted server id); rows absorbed from the server have
+      // localId == serverId.
       switch (op) {
         case LocalCreate(:final serverId, :final parentServerId, :final type, :final title, :final url, :final index):
           final pos = await _positionFor(parentServerId, index);
@@ -341,22 +349,25 @@ class SyncDriver {
                 position: Value(pos),
                 createdAt: Value(DateTime.now().millisecondsSinceEpoch ~/ 1000),
               ));
-        case LocalUpdate(:final serverId, :final title, :final url):
-          await (db.update(db.nodes)..where((n) => n.id.equals(serverId))).write(
+        case LocalUpdate(:final serverId, :final localId, :final title, :final url):
+          final rowId = localId ?? serverId;
+          await (db.update(db.nodes)..where((n) => n.id.equals(rowId))).write(
             NodesCompanion(
               title: Value(title),
               url: url == null ? const Value.absent() : Value(url),
             ),
           );
-        case LocalMove(:final serverId, :final parentServerId, :final index):
+        case LocalMove(:final serverId, :final localId, :final parentServerId, :final index):
+          final rowId = localId ?? serverId;
           final pos = await _positionFor(parentServerId, index);
-          await (db.update(db.nodes)..where((n) => n.id.equals(serverId))).write(
+          await (db.update(db.nodes)..where((n) => n.id.equals(rowId))).write(
             NodesCompanion(parentId: Value(parentServerId), position: Value(pos)),
           );
-        case LocalRemove(:final serverId):
+        case LocalRemove(:final serverId, :final localId):
           // the server tree is the truth: a mirror row the server dropped is
           // gone here too (the server holds it in its own trash)
-          await (db.delete(db.nodes)..where((n) => n.id.equals(serverId))).go();
+          final rowId = localId ?? serverId;
+          await (db.delete(db.nodes)..where((n) => n.id.equals(rowId))).go();
       }
     }
   }
@@ -379,6 +390,7 @@ class SyncDriver {
         await db.into(db.baseEntries).insert(BaseEntriesCompanion.insert(
               serverId: e.key,
               serverJson: jsonEncode(e.value.server.toJson()),
+              localId: Value(e.value.localId),
               appliedAt: Value(now),
             ));
       }
