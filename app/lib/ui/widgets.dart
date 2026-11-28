@@ -195,3 +195,58 @@ Future<List<String>?> promptTags(BuildContext context) async {
   );
   return result;
 }
+
+/// 配色主题圆点（web 头部主题切换的手机版）。选中态由 [selected] 控制，
+/// 点击只负责回调，不做导航 —— 放置方（我的页）决定后续行为。
+class ThemeDot extends StatelessWidget {
+  const ThemeDot({
+    super.key,
+    required this.id,
+    required this.label,
+    required this.palette,
+    required this.selected,
+  });
+
+  final String id;
+  final String label;
+  final MdPalette palette;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = context.read<AppController>();
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => app.setTheme(id),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [palette.primary, palette.loginBg1],
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: selected ? palette.primary : palette.border,
+                  width: selected ? 2 : 1,
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 11,
+                    color: selected ? palette.primary : palette.text2,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500)),
+          ],
+        ),
+      ),
+    );
+  }
+}

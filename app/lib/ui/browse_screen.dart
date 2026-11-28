@@ -37,25 +37,30 @@ class _BrowseScreenState extends State<BrowseScreen> {
   @override
   Widget build(BuildContext context) {
     final p = MdTheme.of(context);
-    return StreamBuilder<List<Node>>(
-      stream: _db.watchAllLive(),
-      builder: (context, snap) {
-        final rows = snap.data ?? const <Node>[];
-        final children = _filtered(rows);
-        return Column(
-          children: [
-            _head(p, rows, children.length),
-            if (_selecting) _batchBar(p),
-            Expanded(
-              child: snap.hasData
-                  ? (children.isEmpty
-                      ? _empty(p)
-                      : (_view == _ViewMode.grid ? _grid(p, children) : _list(p, children)))
-                  : Center(child: CircularProgressIndicator(color: p.primary)),
-            ),
-          ],
-        );
-      },
+    // Bare tab page (no Scaffold of its own): the shell provides the bottom
+    // nav, this SafeArea keeps the header clear of the status bar.
+    return SafeArea(
+      bottom: false,
+      child: StreamBuilder<List<Node>>(
+        stream: _db.watchAllLive(),
+        builder: (context, snap) {
+          final rows = snap.data ?? const <Node>[];
+          final children = _filtered(rows);
+          return Column(
+            children: [
+              _head(p, rows, children.length),
+              if (_selecting) _batchBar(p),
+              Expanded(
+                child: snap.hasData
+                    ? (children.isEmpty
+                        ? _empty(p)
+                        : (_view == _ViewMode.grid ? _grid(p, children) : _list(p, children)))
+                    : Center(child: CircularProgressIndicator(color: p.primary)),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 
