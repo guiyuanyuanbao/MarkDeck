@@ -78,6 +78,17 @@ class _BrowseScreenState extends State<BrowseScreen> {
           stream: _db.watchAllLive(),
           builder: (context, snap) {
             final rows = snap.data ?? const <Node>[];
+            // 浏览中的文件夹被任意端删除后，镜像不再有该行：自动回根，
+            // 否则面包屑断链、用户被困在空页面（切 Tab 也回不去）
+            if (_folderId != 'root' &&
+                !_reordering &&
+                !rows.any((r) => r.id == _folderId)) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _folderId != 'root') {
+                  setState(() => _folderId = 'root');
+                }
+              });
+            }
             final children = _filtered(rows);
             return Column(
               children: [
