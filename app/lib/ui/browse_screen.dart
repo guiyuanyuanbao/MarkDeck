@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../state/app_controller.dart';
 import '../store/database.dart';
 import 'edit_sheet.dart' show showEditSheet, showCreateFolder, tagsFromJson, tagsToJson;
+import 'reorder_mode.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -26,6 +27,7 @@ class _BrowseScreenState extends State<BrowseScreen> {
   String _folderId = 'root'; // synthetic bar root in the mirror
   final _selected = <String>{};
   bool _selecting = false;
+  bool _reordering = false;
   _ViewMode _view = _ViewMode.grid;
   String _tagFilter = '';
   bool _searchOpen = false;
@@ -45,6 +47,16 @@ class _BrowseScreenState extends State<BrowseScreen> {
         stream: _db.watchAllLive(),
         builder: (context, snap) {
           final rows = snap.data ?? const <Node>[];
+          if (_reordering) {
+            return Column(
+              children: [
+                _reorderBar(p),
+                Expanded(
+                  child: ReorderMode(app: _app, folderId: _folderId, rows: rows),
+                ),
+              ],
+            );
+          }
           final children = _filtered(rows);
           return Column(
             children: [
@@ -182,6 +194,8 @@ class _BrowseScreenState extends State<BrowseScreen> {
                 onTap: () => setState(
                     () => _view = _view == _ViewMode.grid ? _ViewMode.list : _ViewMode.grid),
               ),
+              const SizedBox(width: 6),
+              _iconBtn(p, Icons.swap_vert, '拖动排序', onTap: () => _enterReorder(rows)),
             ],
           ),
           if (_searchOpen) ...[
@@ -258,6 +272,59 @@ class _BrowseScreenState extends State<BrowseScreen> {
       cur = rows.where((r) => r.id == cur!.parentId).firstOrNull;
     }
     return [('root', '书签栏'), ...chain];
+  }
+
+  // ---- reorder mode bar (显式排序模式) ----
+
+  void _enterReorder(List<Node> rows) {
+    if (_searchOpen || _query.text.trim().isNotEmpty || _tagFilter.isNotEmpty) {
+      _snack('请先清除搜索或标签筛选');
+      return;
+    }
+    final serverParent = _folderId == 'root' ? '' : _folderId;
+    if (!rows.any((r) => r.parentId == serverParent)) {
+      _snack('当前文件夹为空');
+      return;
+    }
+    _exitSelect();
+    setState(() => _reordering = true);
+  }
+
+  Widget _reorderBar(MdPalette p) {
+    return Container(
+      color: p.surface,
+      padding: const EdgeInsets.fromLTRB(8, 8, 16, 12),
+      child: Row(
+        children: [
+          IconButton(
+            icon: Icon(Icons.arrow_back, size: 20, color: p.text2),
+            tooltip: '退出排序',
+            onPressed: () => setState(() => _reordering = false),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('拖动排序',
+                    style: TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w700, color: p.text)),
+                Text('长按拖动换序 · 拖到文件夹卡片移入',
+                    style: TextStyle(fontSize: 11.5, color: p.text3)),
+              ],
+            ),
+          ),
+          FilledButton.tonal(
+            onPressed: () => setState(() => _reordering = false),
+            style: FilledButton.styleFrom(
+              backgroundColor: p.primarySoft,
+              foregroundColor: p.primary,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            ),
+            child: const Text('完成'),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _iconBtn(MdPalette p, IconData icon, String tooltip,
