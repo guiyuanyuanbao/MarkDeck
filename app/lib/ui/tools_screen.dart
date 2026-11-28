@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_controller.dart';
+import 'theme.dart';
 
 /// Tools hub: dead-link scan, duplicate merge, folder-duplicate merge,
 /// snapshots, HTML import, HTML/JSON export — all via paired-token routes.
@@ -10,7 +11,7 @@ class ToolsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final p = MdTheme.of(context);
     final app = context.read<AppController>();
     return Scaffold(
       appBar: AppBar(title: const Text('工具')),
@@ -18,38 +19,38 @@ class ToolsScreen extends StatelessWidget {
         children: [
           const _SectionTitle('维护'),
           ListTile(
-            leading: Icon(Icons.link_off, color: scheme.primary),
+            leading: Icon(Icons.link_off, color: p.primary),
             title: const Text('死链检测'),
             subtitle: const Text('扫描全部书签，区分真死链与反爬拦截'),
             onTap: () => _deadLinks(context, app),
           ),
           ListTile(
-            leading: Icon(Icons.merge_type, color: scheme.primary),
+            leading: Icon(Icons.merge_type, color: p.primary),
             title: const Text('重复书签合并'),
             subtitle: const Text('同 URL 书签合并为一条'),
             onTap: () => _mergeDuplicates(context, app, '/api/tools/duplicates/merge', '重复书签'),
           ),
           ListTile(
-            leading: Icon(Icons.folder_copy_outlined, color: scheme.primary),
+            leading: Icon(Icons.folder_copy_outlined, color: p.primary),
             title: const Text('重复文件夹合并'),
             subtitle: const Text('同名文件夹内容合并'),
             onTap: () => _mergeDuplicates(context, app, '/api/tools/folder-duplicates/merge', '重复文件夹'),
           ),
           const _SectionTitle('备份'),
           ListTile(
-            leading: Icon(Icons.history, color: scheme.primary),
+            leading: Icon(Icons.history, color: p.primary),
             title: const Text('快照'),
             subtitle: const Text('每日自动备份 + 手动快照，可恢复'),
             onTap: () => _snapshots(context, app),
           ),
           ListTile(
-            leading: Icon(Icons.file_download_outlined, color: scheme.primary),
+            leading: Icon(Icons.file_download_outlined, color: p.primary),
             title: const Text('导出 HTML'),
             subtitle: const Text('下载全部书签为 Netscape HTML'),
             onTap: () => _export(context, app, '/api/export/html', 'markdeck.html'),
           ),
           ListTile(
-            leading: Icon(Icons.file_download_outlined, color: scheme.primary),
+            leading: Icon(Icons.file_download_outlined, color: p.primary),
             title: const Text('导出 JSON'),
             subtitle: const Text('下载全部书签为 JSON'),
             onTap: () => _export(context, app, '/api/export/json', 'markdeck.json'),
@@ -184,7 +185,7 @@ class _SectionTitle extends StatelessWidget {
       child: Text(
         text,
         style: TextStyle(
-          color: Theme.of(context).colorScheme.primary,
+          color: MdTheme.of(context).primary,
           fontWeight: FontWeight.w600,
         ),
       ),

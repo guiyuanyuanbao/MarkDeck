@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_controller.dart';
+import 'theme.dart';
 import '../api/sync_api.dart';
 import '../store/database.dart';
 import 'widgets.dart';
@@ -61,13 +62,13 @@ class _TrashScreenState extends State<TrashScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final p = MdTheme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('回收站')),
       body: _trash == null
           ? const Center(child: CircularProgressIndicator())
           : _trash!.isEmpty
-              ? Center(child: Text('回收站为空', style: TextStyle(color: scheme.outline)))
+              ? Center(child: Text('回收站为空', style: TextStyle(color: p.text3)))
               : RefreshIndicator(
                   onRefresh: _load,
                   child: ListView.builder(
@@ -76,7 +77,7 @@ class _TrashScreenState extends State<TrashScreen> {
                       final n = _trash![i];
                       return ListTile(
                         leading: n.type == 'folder'
-                            ? Icon(Icons.folder_off_outlined, color: scheme.outline)
+                            ? Icon(Icons.folder_off_outlined, color: p.text3)
                             : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 32),
                         title: Text(n.title, maxLines: 1, overflow: TextOverflow.ellipsis),
                         subtitle: n.type == 'url'
@@ -91,7 +92,7 @@ class _TrashScreenState extends State<TrashScreen> {
                               onPressed: () => _restore(n),
                             ),
                             IconButton(
-                              icon: Icon(Icons.delete_forever, color: scheme.error),
+                              icon: Icon(Icons.delete_forever, color: p.danger),
                               tooltip: '彻底删除',
                               onPressed: () => _purge(n),
                             ),

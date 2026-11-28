@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_controller.dart';
+import 'theme.dart';
 import '../store/database.dart';
 import 'edit_sheet.dart' show tagsFromJson, tagsToJson;
 
@@ -15,7 +16,7 @@ class TagsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final db = context.read<AppController>().db;
-    final scheme = Theme.of(context).colorScheme;
+    final p = MdTheme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('标签')),
       body: StreamBuilder<List<Node>>(
@@ -29,7 +30,7 @@ class TagsScreen extends StatelessWidget {
           }
           if (counts.isEmpty) {
             return Center(
-              child: Text('还没有标签', style: TextStyle(color: scheme.outline)),
+              child: Text('还没有标签', style: TextStyle(color: p.text3)),
             );
           }
           final tags = counts.keys.toList()..sort();
@@ -38,7 +39,7 @@ class TagsScreen extends StatelessWidget {
             itemBuilder: (context, i) {
               final tag = tags[i];
               return ListTile(
-                leading: Icon(Icons.label_outline, color: scheme.primary),
+                leading: Icon(Icons.label_outline, color: p.primary),
                 title: Text(tag),
                 trailing: Text('${counts[tag]}'),
                 onTap: () => _rename(context, db, tag, counts.keys.toList()),
