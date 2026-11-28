@@ -165,33 +165,53 @@ class _BrowseScreenState extends State<BrowseScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // breadcrumbs — only past the root; at root the title below says
-          // the same thing and the duplicate line reads as a bug
+          // the same thing and the duplicate line reads as a bug.
+          // 胶囊式路径：与整体 pill/卡片风格一致，点击目标大、层级清晰。
           if (crumbs.length > 1)
             SizedBox(
-              height: 24,
+              height: 34,
               child: ListView(
                 scrollDirection: Axis.horizontal,
                 children: [
                   for (var i = 0; i < crumbs.length; i++) ...[
                     if (i > 0)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        child: Text('/', style: TextStyle(color: p.text3, fontSize: 13)),
-                      ),
-                    InkWell(
-                      onTap: i == crumbs.length - 1
-                          ? null
-                          : () => setState(() {
-                                _folderId = crumbs[i].$1;
-                                _exitSelect();
-                              }),
-                      child: Text(
-                        crumbs[i].$2,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight:
-                              i == crumbs.length - 1 ? FontWeight.w700 : FontWeight.w500,
-                          color: i == crumbs.length - 1 ? p.text : p.text2,
+                      Icon(Icons.chevron_right, size: 13, color: p.text3),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 3),
+                      child: Material(
+                        color: i == crumbs.length - 1 ? p.primarySoft : p.bg,
+                        borderRadius: BorderRadius.circular(999),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(999),
+                          onTap: i == crumbs.length - 1
+                              ? null
+                              : () => setState(() {
+                                    _folderId = crumbs[i].$1;
+                                    _exitSelect();
+                                  }),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 5),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                  color: i == crumbs.length - 1
+                                      ? p.primary
+                                      : p.border),
+                            ),
+                            child: Text(
+                              crumbs[i].$2,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight: i == crumbs.length - 1
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
+                                color: i == crumbs.length - 1
+                                    ? p.primary
+                                    : p.text2,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -199,7 +219,7 @@ class _BrowseScreenState extends State<BrowseScreen> {
                 ],
               ),
             ),
-          if (crumbs.length > 1) const SizedBox(height: 6),
+          if (crumbs.length > 1) const SizedBox(height: 8),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [

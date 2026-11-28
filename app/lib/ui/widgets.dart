@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_controller.dart';
+import '../store/database.dart' hide BaseEntry;
 import 'theme.dart';
 
 /// BookmarkAvatar parity (web/src/components/BookmarkAvatar.vue): favicon
@@ -110,13 +111,78 @@ class _FolderPicker extends StatefulWidget {
 class _FolderPickerState extends State<_FolderPicker> {
   String _current = 'root';
 
+  /// root..current 的层级链（用于对话框内的路径面包屑）
+  List<Node> _crumbChain(List rows) {
+    final chain = <Node>[];
+    var cur = rows.where((r) => r.id == _current).firstOrNull;
+    while (cur != null) {
+      chain.insert(0, cur);
+      cur = rows.where((r) => r.id == cur!.parentId).firstOrNull;
+    }
+    return chain;
+  }
+
+  Widget _crumbChip(MdPalette p, String label,
+      {required bool active, VoidCallback? onTap}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      child: Material(
+        color: active ? p.primarySoft : p.bg,
+        borderRadius: BorderRadius.circular(999),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(999),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: active ? p.primary : p.border),
+            ),
+            child: Text(label,
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                    color: active ? p.primary : p.text2)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pickerRow(MdPalette p, IconData icon, String title,
+      {VoidCallback? onTap, bool isCurrent = false}) {
+    return ListTile(
+      leading: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: isCurrent ? p.primary : p.primarySoft,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(icon, size: 18, color: isCurrent ? Colors.white : p.primary),
+      ),
+      title: Text(title,
+          style: TextStyle(
+              fontSize: 14,
+              fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w500,
+              color: p.text)),
+      trailing: isCurrent
+          ? Icon(Icons.check_circle, size: 18, color: p.primary)
+          : Icon(Icons.chevron_right, size: 18, color: p.text3),
+      onTap: onTap,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      tileColor: isCurrent ? p.primarySoft : null,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final p = MdTheme.of(context);
     return AlertDialog(
       title: const Text('移动到…'),
       content: SizedBox(
-        width: 280,
-        height: 320,
+        width: 320,
+        height: 380,
         child: StreamBuilder(
           stream: widget.db.watchAllLive(),
           builder: (context, snap) {
@@ -125,28 +191,71 @@ class _FolderPickerState extends State<_FolderPicker> {
             final folders = rows
                 .where((r) => r.type == 'folder' && r.parentId == serverParent)
                 .toList()
-              ..sort((a, b) => a.position.compareTo(b.position));
-            return ListView(
+              ..sort((a, b) {
+                final c = a.position.compareTo(b.position);
+                return c != 0 ? c : a.createdAt.compareTo(b.createdAt);
+              });
+            final chain = _crumbChain(rows);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (_current != 'root')
-                  ListTile(
-                    leading: const Icon(Icons.arrow_upward),
-                    title: const Text('上一级'),
-                    onTap: () => setState(() {
-                      final parent =
-                          rows.where((r) => r.id == _current).firstOrNull;
-                      _current = parent == null
-                          ? 'root'
-                          : (parent.parentId.isEmpty ? 'root' : parent.parentId);
-                    }),
+                // 当前路径面包屑：用户随时知道自己浏览到哪一层
+                SizedBox(
+                  height: 34,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    shrinkWrap: true,
+                    children: [
+                      _crumbChip(p, '书签栏',
+                          active: _current == 'root',
+                          onTap: _current == 'root'
+                              ? null
+                              : () => setState(() => _current = 'root')),
+                      for (final c in chain) ...[
+                        Icon(Icons.chevron_right, size: 13, color: p.text3),
+                        _crumbChip(p, c.title,
+                            active: c.id == _current,
+                            onTap: c.id == _current
+                                ? null
+                                : () => setState(() => _current = c.id)),
+                      ],
+                    ],
                   ),
-                for (final f in folders)
-                  if (!widget.excludeIds.contains(f.id))
-                    ListTile(
-                      leading: Icon(Icons.folder_outlined, color: MdTheme.of(context).primary),
-                      title: Text(f.title),
-                      onTap: () => setState(() => _current = f.id),
-                    ),
+                ),
+                const SizedBox(height: 4),
+                Divider(height: 1, color: p.border),
+                Expanded(
+                  child: ListView(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    children: [
+                      if (_current != 'root')
+                        _pickerRow(p, Icons.arrow_upward, '上一级',
+                            onTap: () => setState(() {
+                                  final parent = rows
+                                      .where((r) => r.id == _current)
+                                      .firstOrNull;
+                                  _current = parent == null
+                                      ? 'root'
+                                      : (parent.parentId.isEmpty
+                                          ? 'root'
+                                          : parent.parentId);
+                                })),
+                      for (final f in folders)
+                        if (!widget.excludeIds.contains(f.id))
+                          _pickerRow(p, Icons.folder_rounded, f.title,
+                              onTap: () => setState(() => _current = f.id)),
+                      if (folders
+                          .where((f) => !widget.excludeIds.contains(f.id))
+                          .isEmpty &&
+                          _current != 'root')
+                        Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Text('此文件夹下没有子文件夹了',
+                              style: TextStyle(fontSize: 12.5, color: p.text3)),
+                        ),
+                    ],
+                  ),
+                ),
               ],
             );
           },
