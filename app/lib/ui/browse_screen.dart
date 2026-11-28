@@ -28,10 +28,26 @@ class _BrowseScreenState extends State<BrowseScreen> {
   final _selected = <String>{};
   bool _selecting = false;
   bool _reordering = false;
+  final _drag = DragOrderModel();
+  final _reorderScroll = ScrollController();
   _ViewMode _view = _ViewMode.grid;
   String _tagFilter = '';
   bool _searchOpen = false;
   final _query = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _drag.scroll = _reorderScroll;
+  }
+
+  @override
+  void dispose() {
+    _reorderScroll.dispose();
+    _drag.dispose();
+    _query.dispose();
+    super.dispose();
+  }
 
   AppController get _app => context.read<AppController>();
   AppDatabase get _db => _app.db;
@@ -40,52 +56,63 @@ class _BrowseScreenState extends State<BrowseScreen> {
   Widget build(BuildContext context) {
     final p = MdTheme.of(context);
     // Bare tab page (no Scaffold of its own): the shell provides the bottom
-    // nav, this SafeArea keeps the header clear of the status bar.
-    return SafeArea(
-      bottom: false,
-      child: StreamBuilder<List<Node>>(
-        stream: _db.watchAllLive(),
-        builder: (context, snap) {
-          final rows = snap.data ?? const <Node>[];
+    // nav, this SafeArea keeps the header clear of the status bar. PopScope
+    // lets the SYSTEM back gesture/button exit in-page modes (排序/选择)
+    // instead of leaving the app — no custom swipe implementation.
+    return PopScope(
+      canPop: !_reordering && !_selecting,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        setState(() {
           if (_reordering) {
+            _reordering = false;
+            _drag.end();
+          } else {
+            _exitSelect();
+          }
+        });
+      },
+      child: SafeArea(
+        bottom: false,
+        child: StreamBuilder<List<Node>>(
+          stream: _db.watchAllLive(),
+          builder: (context, snap) {
+            final rows = snap.data ?? const <Node>[];
+            final children = _filtered(rows);
             return Column(
               children: [
-                _reorderBar(p),
+                _head(p, rows, children.length),
+                if (_selecting) _batchBar(p),
                 Expanded(
-                  child: ReorderMode(app: _app, folderId: _folderId, rows: rows),
+                  child: snap.hasData
+                      ? (children.isEmpty
+                          ? _empty(p)
+                          : (_view == _ViewMode.grid
+                              ? _grid(p, children, rows)
+                              : _list(p, children, rows)))
+                      : Center(child: CircularProgressIndicator(color: p.primary)),
                 ),
+                if (_reordering) _reorderBarSlim(p),
               ],
             );
-          }
-          final children = _filtered(rows);
-          return Column(
-            children: [
-              _head(p, rows, children.length),
-              if (_selecting) _batchBar(p),
-              Expanded(
-                child: snap.hasData
-                    ? (children.isEmpty
-                        ? _empty(p)
-                        : (_view == _ViewMode.grid ? _grid(p, children) : _list(p, children)))
-                    : Center(child: CircularProgressIndicator(color: p.primary)),
-              ),
-            ],
-          );
-        },
+          },
+        ),
       ),
     );
   }
-
   // ---- data ----
 
   List<Node> _filtered(List<Node> rows) {
     final serverParent = _folderId == 'root' ? '' : _folderId;
+    // 顺序真值 = 纯 position 序（与网页 BookmarksView / 引擎 rank 一致，
+    // 文件夹不提前分组——排序模式所见即所同步）。md-others 是服务端管理
+    // 的固定尾项（pos=9999/10001），强制排最后且不参与位置重写。
+    final othersId = _app.driver.othersId;
     var kids = rows.where((r) => r.parentId == serverParent).toList()
       ..sort((a, b) {
-        // folders first, then by position (web mirrors this order)
-        if ((a.type == 'folder') != (b.type == 'folder')) {
-          return a.type == 'folder' ? -1 : 1;
-        }
+        final oa = a.id == othersId ? 1 : 0;
+        final ob = b.id == othersId ? 1 : 0;
+        if (oa != ob) return oa - ob;
         final c = a.position.compareTo(b.position);
         return c != 0 ? c : a.createdAt.compareTo(b.createdAt);
       });
@@ -126,40 +153,42 @@ class _BrowseScreenState extends State<BrowseScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // breadcrumbs
-          SizedBox(
-            height: 24,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                for (var i = 0; i < crumbs.length; i++) ...[
-                  if (i > 0)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: Text('/', style: TextStyle(color: p.text3, fontSize: 13)),
-                    ),
-                  InkWell(
-                    onTap: i == crumbs.length - 1
-                        ? null
-                        : () => setState(() {
-                              _folderId = crumbs[i].$1;
-                              _exitSelect();
-                            }),
-                    child: Text(
-                      crumbs[i].$2,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight:
-                            i == crumbs.length - 1 ? FontWeight.w700 : FontWeight.w500,
-                        color: i == crumbs.length - 1 ? p.text : p.text2,
+          // breadcrumbs — only past the root; at root the title below says
+          // the same thing and the duplicate line reads as a bug
+          if (crumbs.length > 1)
+            SizedBox(
+              height: 24,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  for (var i = 0; i < crumbs.length; i++) ...[
+                    if (i > 0)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Text('/', style: TextStyle(color: p.text3, fontSize: 13)),
+                      ),
+                    InkWell(
+                      onTap: i == crumbs.length - 1
+                          ? null
+                          : () => setState(() {
+                                _folderId = crumbs[i].$1;
+                                _exitSelect();
+                              }),
+                      child: Text(
+                        crumbs[i].$2,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight:
+                              i == crumbs.length - 1 ? FontWeight.w700 : FontWeight.w500,
+                          color: i == crumbs.length - 1 ? p.text : p.text2,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ],
-              ],
+              ),
             ),
-          ),
-          const SizedBox(height: 6),
+          if (crumbs.length > 1) const SizedBox(height: 6),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -176,29 +205,34 @@ class _BrowseScreenState extends State<BrowseScreen> {
                   ],
                 ),
               ),
+              // 排序模式下锁定其余工具（会改变可见集合，破坏拖拽映射）
               _iconBtn(p, Icons.search, _searchOpen ? '关闭搜索' : '搜索',
-                  active: _searchOpen, onTap: () => setState(() => _searchOpen = !_searchOpen)),
+                  active: _searchOpen,
+                  onTap: _reordering ? null : () => setState(() => _searchOpen = !_searchOpen)),
               const SizedBox(width: 6),
               _iconBtn(
                 p,
                 _tagFilter.isEmpty ? Icons.label_outline : Icons.label,
                 '按标签筛选',
                 active: _tagFilter.isNotEmpty,
-                onTap: () => _pickTag(rows),
+                onTap: _reordering ? null : () => _pickTag(rows),
               ),
               const SizedBox(width: 6),
               _iconBtn(
                 p,
                 _view == _ViewMode.grid ? Icons.view_list_outlined : Icons.grid_view,
                 _view == _ViewMode.grid ? '列表视图' : '图标视图',
-                onTap: () => setState(
-                    () => _view = _view == _ViewMode.grid ? _ViewMode.list : _ViewMode.grid),
+                onTap: _reordering
+                    ? null
+                    : () => setState(
+                        () => _view = _view == _ViewMode.grid ? _ViewMode.list : _ViewMode.grid),
               ),
               const SizedBox(width: 6),
-              _iconBtn(p, Icons.swap_vert, '拖动排序', onTap: () => _enterReorder(rows)),
+              _iconBtn(p, Icons.swap_vert, _reordering ? '退出排序' : '拖动排序',
+                  active: _reordering, onTap: () => _toggleReorder(rows)),
             ],
           ),
-          if (_searchOpen) ...[
+          if (!_reordering && _searchOpen) ...[
             const SizedBox(height: 8),
             TextField(
               controller: _query,
@@ -230,34 +264,36 @@ class _BrowseScreenState extends State<BrowseScreen> {
               ],
             ),
           ],
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              FilledButton.icon(
-                onPressed: () => showEditSheet(
-                  context,
-                  _db,
-                  parentId: _folderId == 'root' ? '' : _folderId,
+          if (!_reordering) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                FilledButton.icon(
+                  onPressed: () => showEditSheet(
+                    context,
+                    _db,
+                    parentId: _folderId == 'root' ? '' : _folderId,
+                  ),
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('新书签'),
                 ),
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('新书签'),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: () => showCreateFolder(context, _db, _folderId),
-                icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                label: const Text('新文件夹'),
-              ),
-              const Spacer(),
-              if (_selecting)
-                TextButton(onPressed: _exitSelect, child: const Text('取消'))
-              else
-                TextButton(
-                  onPressed: () => setState(() => _selecting = true),
-                  child: const Text('选择'),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => showCreateFolder(context, _db, _folderId),
+                  icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                  label: const Text('新文件夹'),
                 ),
-            ],
-          ),
+                const Spacer(),
+                if (_selecting)
+                  TextButton(onPressed: _exitSelect, child: const Text('取消'))
+                else
+                  TextButton(
+                    onPressed: () => setState(() => _selecting = true),
+                    child: const Text('选择'),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -274,9 +310,16 @@ class _BrowseScreenState extends State<BrowseScreen> {
     return [('root', '书签栏'), ...chain];
   }
 
-  // ---- reorder mode bar (显式排序模式) ----
+  // ---- reorder mode (原地排序：当前布局直接可拖，底部窄栏提示) ----
 
-  void _enterReorder(List<Node> rows) {
+  void _toggleReorder(List<Node> rows) {
+    if (_reordering) {
+      setState(() {
+        _reordering = false;
+        _drag.end();
+      });
+      return;
+    }
     if (_searchOpen || _query.text.trim().isNotEmpty || _tagFilter.isNotEmpty) {
       _snack('请先清除搜索或标签筛选');
       return;
@@ -287,39 +330,39 @@ class _BrowseScreenState extends State<BrowseScreen> {
       return;
     }
     _exitSelect();
-    setState(() => _reordering = true);
+    setState(() {
+      _reordering = true;
+      _searchOpen = false;
+      _tagFilter = '';
+    });
   }
 
-  Widget _reorderBar(MdPalette p) {
+  Widget _reorderBarSlim(MdPalette p) {
     return Container(
-      color: p.surface,
-      padding: const EdgeInsets.fromLTRB(8, 8, 16, 12),
+      decoration: BoxDecoration(
+        color: p.surface,
+        border: Border(top: BorderSide(color: p.border)),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
       child: Row(
         children: [
-          IconButton(
-            icon: Icon(Icons.arrow_back, size: 20, color: p.text2),
-            tooltip: '退出排序',
-            onPressed: () => setState(() => _reordering = false),
-          ),
+          Icon(Icons.swap_vert, size: 16, color: p.primary),
+          const SizedBox(width: 8),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('拖动排序',
-                    style: TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w700, color: p.text)),
-                Text('长按拖动换序 · 拖到文件夹卡片移入',
-                    style: TextStyle(fontSize: 11.5, color: p.text3)),
-              ],
+            child: Text(
+              _view == _ViewMode.grid
+                  ? '拖动排序：长按卡片，拖到文件夹卡片移入'
+                  : '拖动排序：长按拖动换序 · 拖到文件夹移入',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: p.text2),
             ),
           ),
-          FilledButton.tonal(
-            onPressed: () => setState(() => _reordering = false),
-            style: FilledButton.styleFrom(
-              backgroundColor: p.primarySoft,
-              foregroundColor: p.primary,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            ),
+          TextButton(
+            onPressed: () => setState(() {
+              _reordering = false;
+              _drag.end();
+            }),
             child: const Text('完成'),
           ),
         ],
@@ -328,7 +371,7 @@ class _BrowseScreenState extends State<BrowseScreen> {
   }
 
   Widget _iconBtn(MdPalette p, IconData icon, String tooltip,
-      {bool active = false, required VoidCallback onTap}) {
+      {bool active = false, required VoidCallback? onTap}) {
     return Material(
       color: active ? p.primarySoft : Colors.transparent,
       borderRadius: BorderRadius.circular(10),
@@ -339,7 +382,13 @@ class _BrowseScreenState extends State<BrowseScreen> {
           message: tooltip,
           child: Padding(
             padding: const EdgeInsets.all(8),
-            child: Icon(icon, size: 20, color: active ? p.primary : p.text2),
+            child: Icon(icon,
+                size: 20,
+                color: active
+                    ? p.primary
+                    : onTap == null
+                        ? p.text3
+                        : p.text2),
           ),
         ),
       ),
@@ -380,9 +429,10 @@ class _BrowseScreenState extends State<BrowseScreen> {
 
   // ---- grid (web BookmarkGrid card) ----
 
-  Widget _grid(MdPalette p, List<Node> children) {
+  Widget _grid(MdPalette p, List<Node> children, List<Node> rows) {
     return GridView.builder(
       padding: const EdgeInsets.all(16),
+      controller: _reordering ? _reorderScroll : null,
       gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
         maxCrossAxisExtent: 110,
         mainAxisExtent: 116,
@@ -390,20 +440,67 @@ class _BrowseScreenState extends State<BrowseScreen> {
         mainAxisSpacing: 10,
       ),
       itemCount: children.length,
-      itemBuilder: (context, i) => _card(p, children[i]),
+      itemBuilder: (context, i) {
+        final n = children[i];
+        final card = _card(p, n);
+        if (!_reordering) return card;
+        return ListenableBuilder(
+          listenable: _drag,
+          builder: (context, _) => DragTarget<String>(
+            onWillAcceptWithDetails: (d) => canAcceptDrop(rows, d.data, n),
+            onMove: (d) =>
+                _drag.track(n, d.offset, grid: true, othersId: _app.driver.othersId),
+            onLeave: (_) => _drag.clearHover(n.id),
+            onAcceptWithDetails: (d) => _commitDrop(n, d.offset, rows, children),
+            builder: (_, _, _) => KeyedSubtree(
+              key: _drag.keyFor(n.id),
+              child: LongPressDraggable<String>(
+                data: n.id,
+                dragAnchorStrategy: pointerDragAnchorStrategy,
+                onDragStarted: () => _drag.start(n.id),
+                onDragUpdate: (d) => _drag.autoScroll(d.globalPosition),
+                onDragEnd: (_) => _drag.end(),
+                onDraggableCanceled: (_, _) => _drag.end(),
+                feedback: dragFeedback(context, p, n),
+                childWhenDragging: Opacity(opacity: 0.3, child: card),
+                child: card,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
   Widget _card(MdPalette p, Node n) {
     final isFolder = n.type == 'folder';
     final selected = _selected.contains(n.id);
+    // 排序模式：落点分区可视化（左/右缘插入线、文件夹中心移入）
+    final zone = _reordering && _drag.hoverId == n.id ? _drag.hoverZone : null;
+    final inside = zone == DropZone.inside;
+    BorderSide side(Color c, [double w = 1]) => BorderSide(color: c, width: w);
+    Border border;
+    if (zone == null) {
+      border = Border.fromBorderSide(side(selected ? p.primary : p.border));
+    } else if (zone == DropZone.before) {
+      // 左缘插入线
+      border = Border(left: side(p.primary, 3), top: side(p.border), right: side(p.border), bottom: side(p.border));
+    } else if (zone == DropZone.after) {
+      // 右缘插入线
+      border = Border(left: side(p.border), top: side(p.border), right: side(p.primary, 3), bottom: side(p.border));
+    } else {
+      // 文件夹移入
+      border = Border.fromBorderSide(side(p.primary, 2));
+    }
     return Material(
-      color: selected ? p.primarySoft : p.surface,
+      color: inside || (selected && !_reordering) ? p.primarySoft : p.surface,
       borderRadius: BorderRadius.circular(14),
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
         onTap: () {
-          if (_selecting) {
+          if (_reordering) {
+            return; // 排序模式下不导航
+          } else if (_selecting) {
             _toggle(n.id);
           } else if (isFolder) {
             setState(() => _folderId = n.id);
@@ -411,16 +508,18 @@ class _BrowseScreenState extends State<BrowseScreen> {
             _open(n.url);
           }
         },
-        onLongPress: () {
-          setState(() {
-            _selecting = true;
-            _selected.add(n.id);
-          });
-        },
+        onLongPress: _reordering
+            ? null
+            : () {
+                setState(() {
+                  _selecting = true;
+                  _selected.add(n.id);
+                });
+              },
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: selected ? p.primary : p.border),
+            border: border,
           ),
           padding: const EdgeInsets.fromLTRB(8, 10, 8, 8),
           child: Stack(
@@ -455,10 +554,17 @@ class _BrowseScreenState extends State<BrowseScreen> {
                   ),
                   const Spacer(),
                   Text(
-                    isFolder ? '文件夹' : _host(n.url),
+                    inside
+                        ? '松手移入此文件夹'
+                        : isFolder
+                            ? '文件夹'
+                            : _host(n.url),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 10, color: p.text3),
+                    style: TextStyle(
+                        fontSize: 10,
+                        color: inside ? p.primary : p.text3,
+                        fontWeight: inside ? FontWeight.w700 : FontWeight.w400),
                   ),
                 ],
               ),
@@ -483,20 +589,64 @@ class _BrowseScreenState extends State<BrowseScreen> {
 
   // ---- list (web BookmarkList row) ----
 
-  Widget _list(MdPalette p, List<Node> children) {
+  Widget _list(MdPalette p, List<Node> children, List<Node> rows) {
+    if (_reordering) {
+      return ListView.builder(
+        controller: _reorderScroll,
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        itemCount: children.length,
+        itemBuilder: (context, i) {
+          final n = children[i];
+          return ListenableBuilder(
+            listenable: _drag,
+            builder: (context, _) {
+              final showLine =
+                  _drag.hoverId == n.id && _drag.hoverZone != DropZone.inside;
+              final lineAbove = showLine && _drag.hoverZone == DropZone.before;
+              return Column(
+                children: [
+                  if (lineAbove) dropLine(p),
+                  DragTarget<String>(
+                    onWillAcceptWithDetails: (d) => canAcceptDrop(rows, d.data, n),
+                    onMove: (d) =>
+                        _drag.track(n, d.offset, grid: false, othersId: _app.driver.othersId),
+                    onLeave: (_) => _drag.clearHover(n.id),
+                    onAcceptWithDetails: (d) => _commitDrop(n, d.offset, rows, children),
+                    builder: (_, _, _) => KeyedSubtree(
+                      key: _drag.keyFor(n.id),
+                      child: LongPressDraggable<String>(
+                        data: n.id,
+                        dragAnchorStrategy: pointerDragAnchorStrategy,
+                        onDragStarted: () => _drag.start(n.id),
+                        onDragUpdate: (d) => _drag.autoScroll(d.globalPosition),
+                        onDragEnd: (_) => _drag.end(),
+                        onDraggableCanceled: (_, _) => _drag.end(),
+                        feedback: dragFeedback(context, p, n),
+                        childWhenDragging:
+                            Opacity(opacity: 0.3, child: _listRowBody(p, n, reorder: true)),
+                        child: _listRowBody(p, n, reorder: true),
+                      ),
+                    ),
+                  ),
+                  if (showLine && !lineAbove) dropLine(p),
+                ],
+              );
+            },
+          );
+        },
+      );
+    }
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: children.length,
       separatorBuilder: (_, _) => Divider(height: 1, color: p.border, indent: 56),
       itemBuilder: (context, i) {
         final n = children[i];
-        final isFolder = n.type == 'folder';
-        final selected = _selected.contains(n.id);
         return InkWell(
           onTap: () {
             if (_selecting) {
               _toggle(n.id);
-            } else if (isFolder) {
+            } else if (n.type == 'folder') {
               setState(() => _folderId = n.id);
             } else {
               _open(n.url);
@@ -508,88 +658,101 @@ class _BrowseScreenState extends State<BrowseScreen> {
               _selected.add(n.id);
             });
           },
-          child: Container(
-            color: selected ? p.primarySoft : p.surface,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            child: Row(
+          child: _listRowBody(p, n),
+        );
+      },
+    );
+  }
+
+  Widget _listRowBody(MdPalette p, Node n, {bool reorder = false}) {
+    final isFolder = n.type == 'folder';
+    final selected = _selected.contains(n.id);
+    return Container(
+      color: !reorder && selected ? p.primarySoft : p.surface,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 36,
+            child: reorder
+                ? Icon(Icons.drag_indicator, size: 18, color: p.text3)
+                : _selecting
+                    ? Checkbox(
+                        value: selected,
+                        onChanged: (_) => _toggle(n.id),
+                        visualDensity: VisualDensity.compact,
+                      )
+                    : (isFolder
+                        ? Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: p.primarySoft,
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                            child: Icon(Icons.folder_rounded,
+                                size: 18, color: p.primary),
+                          )
+                        : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 32)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SizedBox(
-                  width: 36,
-                  child: _selecting
-                      ? Checkbox(
-                          value: selected,
-                          onChanged: (_) => _toggle(n.id),
-                          visualDensity: VisualDensity.compact,
-                        )
-                      : (isFolder
-                          ? Container(
-                              width: 32,
-                              height: 32,
-                              decoration: BoxDecoration(
-                                color: p.primarySoft,
-                                borderRadius: BorderRadius.circular(9),
-                              ),
-                              child: Icon(Icons.folder_rounded,
-                                  size: 18, color: p.primary),
-                            )
-                          : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 32)),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Flexible(
-                            child: Text(n.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w500,
-                                    color: p.text)),
-                          ),
-                          if (n.favorite)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Icon(Icons.star, size: 13, color: p.warning),
-                            ),
-                          if (n.note.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Icon(Icons.sticky_note_2_outlined,
-                                  size: 13, color: p.text3),
-                            ),
-                        ],
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(n.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: p.text)),
+                    ),
+                    if (n.favorite)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Icon(Icons.star, size: 13, color: p.warning),
                       ),
-                      if (isFolder)
-                        Text('文件夹', style: TextStyle(fontSize: 12, color: p.text3))
-                      else
-                        Text(n.url ?? '',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 12, color: p.text3)),
-                    ],
-                  ),
+                    if (n.note.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Icon(Icons.sticky_note_2_outlined,
+                            size: 13, color: p.text3),
+                      ),
+                  ],
                 ),
                 if (isFolder)
-                  Icon(Icons.chevron_right, size: 18, color: p.text3)
-                else if (!_selecting)
-                  PopupMenuButton<String>(
-                    icon: Icon(Icons.more_vert, size: 18, color: p.text3),
-                    onSelected: (v) => _rowAction(v, n),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'open', child: Text('打开')),
-                      PopupMenuItem(value: 'edit', child: Text('编辑')),
-                      PopupMenuItem(value: 'delete', child: Text('删除')),
-                    ],
-                  ),
+                  Text(reorder ? '文件夹 · 松手移入' : '文件夹',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: reorder ? p.primary : p.text3))
+                else
+                  Text(n.url ?? '',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 12, color: p.text3)),
               ],
             ),
           ),
-        );
-      },
+          if (reorder)
+            Icon(Icons.drag_indicator, size: 18, color: p.text3)
+          else if (isFolder)
+            Icon(Icons.chevron_right, size: 18, color: p.text3)
+          else if (!_selecting)
+            PopupMenuButton<String>(
+              icon: Icon(Icons.more_vert, size: 18, color: p.text3),
+              onSelected: (v) => _rowAction(v, n),
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'open', child: Text('打开')),
+                PopupMenuItem(value: 'edit', child: Text('编辑')),
+                PopupMenuItem(value: 'delete', child: Text('删除')),
+              ],
+            ),
+        ],
+      ),
     );
   }
 
@@ -624,6 +787,24 @@ class _BrowseScreenState extends State<BrowseScreen> {
   }
 
   // ---- helpers ----
+
+  /// 排序拖放的落点提交：文件夹中心带（含其他书签固定尾）= 移入；
+  /// 其余 = 同级插行（序列排除 md-others，位置由服务端管理）
+  void _commitDrop(Node target, Offset global, List<Node> rows, List<Node> children) {
+    final dragged = _drag.dragId;
+    final zone = _drag.hoverZone ?? DropZone.after;
+    _drag.end();
+    if (dragged == null) return;
+    final othersId = _app.driver.othersId;
+    if (zone == DropZone.inside && target.type == 'folder') {
+      commitMoveInto(_app, rows, dragged, target.id);
+    } else {
+      final seq = List.of(children)..removeWhere((r) => r.id == othersId);
+      if (!seq.any((r) => r.id == target.id)) return;
+      commitReorderInsert(_app, _folderId, seq, dragged, target.id,
+          before: zone == DropZone.before);
+    }
+  }
 
   String _host(String? url) {
     if (url == null || url.isEmpty) return '书签';

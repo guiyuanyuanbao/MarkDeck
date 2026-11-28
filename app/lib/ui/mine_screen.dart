@@ -23,9 +23,11 @@ class MineScreen extends StatelessWidget {
     final p = MdTheme.of(context);
     return Scaffold(
       backgroundColor: p.bg,
-      appBar: AppBar(title: const Text('我的')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      // 无顶栏：底部导航已标明所在页，身份卡即页头
+      body: SafeArea(
+        bottom: false,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
         children: [
           // ---- identity / sync card ----
           Container(
@@ -151,6 +153,7 @@ class MineScreen extends StatelessWidget {
             },
           ),
         ],
+      ),
       ),
     );
   }

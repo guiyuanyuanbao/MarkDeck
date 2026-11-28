@@ -121,8 +121,11 @@ class _TrashScreenState extends State<TrashScreen> {
     final app = context.watch<AppController>();
     final p = MdTheme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('回收站')),
-      body: !app.adminLoggedIn
+      backgroundColor: p.bg,
+      // 无顶栏：底部导航已标明所在页
+      body: SafeArea(
+        bottom: false,
+        child: !app.adminLoggedIn
           ? _locked(p)
           : _trash == null
               ? const Center(child: CircularProgressIndicator())
@@ -175,6 +178,7 @@ class _TrashScreenState extends State<TrashScreen> {
                                 },
                               ),
                             ),
+        ),
     );
   }
 

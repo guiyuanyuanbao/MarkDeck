@@ -18,36 +18,39 @@ class TagsScreen extends StatelessWidget {
     final db = context.read<AppController>().db;
     final p = MdTheme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('标签')),
-      body: StreamBuilder<List<Node>>(
-        stream: db.watchAllLive(),
-        builder: (context, snap) {
-          final counts = <String, int>{};
-          for (final r in snap.data ?? const <Node>[]) {
-            for (final t in tagsFromJson(r.tags)) {
-              counts[t] = (counts[t] ?? 0) + 1;
+      // 无顶栏：底部导航已标明所在页
+      body: SafeArea(
+        bottom: false,
+        child: StreamBuilder<List<Node>>(
+          stream: db.watchAllLive(),
+          builder: (context, snap) {
+            final counts = <String, int>{};
+            for (final r in snap.data ?? const <Node>[]) {
+              for (final t in tagsFromJson(r.tags)) {
+                counts[t] = (counts[t] ?? 0) + 1;
+              }
             }
-          }
-          if (counts.isEmpty) {
-            return Center(
-              child: Text('还没有标签', style: TextStyle(color: p.text3)),
-            );
-          }
-          final tags = counts.keys.toList()..sort();
-          return ListView.builder(
-            itemCount: tags.length,
-            itemBuilder: (context, i) {
-              final tag = tags[i];
-              return ListTile(
-                leading: Icon(Icons.label_outline, color: p.primary),
-                title: Text(tag),
-                trailing: Text('${counts[tag]}'),
-                onTap: () => _rename(context, db, tag, counts.keys.toList()),
-                onLongPress: () => _confirmDelete(context, db, tag),
+            if (counts.isEmpty) {
+              return Center(
+                child: Text('还没有标签', style: TextStyle(color: p.text3)),
               );
-            },
-          );
-        },
+            }
+            final tags = counts.keys.toList()..sort();
+            return ListView.builder(
+              itemCount: tags.length,
+              itemBuilder: (context, i) {
+                final tag = tags[i];
+                return ListTile(
+                  leading: Icon(Icons.label_outline, color: p.primary),
+                  title: Text(tag),
+                  trailing: Text('${counts[tag]}'),
+                  onTap: () => _rename(context, db, tag, counts.keys.toList()),
+                  onLongPress: () => _confirmDelete(context, db, tag),
+                );
+              },
+            );
+          },
+        ),
       ),
     );
   }

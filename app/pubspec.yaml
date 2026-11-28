@@ -60,6 +60,14 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   build_runner: 2.15.0
   drift_dev: 2.34.0
+  flutter_launcher_icons: ^0.14.4
+
+# Launcher icon: regenerate mipmaps from the product logo with
+# `dart run flutter_launcher_icons` after changing assets/logo.png.
+flutter_launcher_icons:
+  image_path: "assets/logo.png"
+  android: true
+  min_sdk_android: 21
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
