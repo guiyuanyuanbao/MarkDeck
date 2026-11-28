@@ -75,7 +75,7 @@ class _AdminScreenState extends State<AdminScreen> {
                       style: TextStyle(
                           fontSize: 14.5, fontWeight: FontWeight.w700, color: p.text)),
                   const SizedBox(height: 4),
-                  Text('登录后解锁 工具 · 导入导出 · 设备管理',
+                  Text('登录后解锁 回收站 · 工具 · 导入导出 · 设备管理',
                       style: TextStyle(fontSize: 12, color: p.text3)),
                   const SizedBox(height: 12),
                   TextField(

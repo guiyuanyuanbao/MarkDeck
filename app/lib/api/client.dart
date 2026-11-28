@@ -69,9 +69,13 @@ class ApiClient {
 
   // ---- request plumbing ----
 
-  Map<String, String> _headers({bool mutating = false}) {
+  Map<String, String> _headers({bool mutating = false, bool admin = false}) {
     final h = <String, String>{'Accept': 'application/json'};
-    if (_deviceToken != null) h['Authorization'] = 'Bearer $_deviceToken';
+    // admin-channel requests authenticate as the admin session (web-admin
+    // semantics on the shared requireAny routes); the device token is
+    // deliberately withheld so the server falls through to cookie auth.
+    // No session -> no credentials -> server 401 -> the UI prompts login.
+    if (!admin && _deviceToken != null) h['Authorization'] = 'Bearer $_deviceToken';
     if (_sessionCookie != null) h['Cookie'] = _sessionCookie!;
     if (_sessionCookie != null && mutating) h['X-CSRF'] = _csrf ?? '';
     return h;
@@ -108,33 +112,35 @@ class ApiClient {
     return parsed;
   }
 
-  Future<dynamic> get(String path, {Map<String, String>? query}) =>
-      _run(() => _http.get(_uri(path, query), headers: _headers()));
+  Future<dynamic> get(String path, {Map<String, String>? query, bool admin = false}) =>
+      _run(() => _http.get(_uri(path, query), headers: _headers(admin: admin)));
 
-  Future<dynamic> post(String path, {Object? body}) => _run(
+  Future<dynamic> post(String path, {Object? body, bool admin = false}) => _run(
         () => _http.post(
           _uri(path),
-          headers: _headers(mutating: true)..['Content-Type'] = 'application/json',
+          headers: _headers(mutating: true, admin: admin)..['Content-Type'] = 'application/json',
           body: body == null ? null : jsonEncode(body),
         ),
         mutating: true,
       );
 
-  Future<dynamic> put(String path, {Object? body}) => _run(
+  Future<dynamic> put(String path, {Object? body, bool admin = false}) => _run(
         () => _http.put(
           _uri(path),
-          headers: _headers(mutating: true)..['Content-Type'] = 'application/json',
+          headers: _headers(mutating: true, admin: admin)..['Content-Type'] = 'application/json',
           body: body == null ? null : jsonEncode(body),
         ),
         mutating: true,
       );
 
-  Future<dynamic> delete(String path) =>
-      _run(() => _http.delete(_uri(path), headers: _headers(mutating: true)), mutating: true);
+  Future<dynamic> delete(String path, {bool admin = false}) =>
+      _run(() => _http.delete(_uri(path), headers: _headers(mutating: true, admin: admin)),
+          mutating: true);
 
   /// Raw bytes fetch (export/download endpoints).
-  Future<http.Response> getBytes(String path) async {
-    final resp = await _http.get(_uri(path), headers: _headers()).timeout(timeout);
+  Future<http.Response> getBytes(String path, {bool admin = false}) async {
+    final resp =
+        await _http.get(_uri(path), headers: _headers(admin: admin)).timeout(timeout);
     if (resp.statusCode < 200 || resp.statusCode >= 300) {
       throw ApiException(resp.statusCode, 'HTTP ${resp.statusCode}');
     }

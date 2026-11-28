@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../api/client.dart' show ApiException;
 import '../state/app_controller.dart';
 import 'theme.dart';
 
 /// Tools hub: dead-link scan, duplicate merge, folder-duplicate merge,
-/// snapshots, HTML import, HTML/JSON export — all via paired-token routes.
+/// snapshots, HTML import, HTML/JSON export — all via the admin-session
+/// channel (the paired token would also be accepted server-side, but the
+/// app keeps destructive maintenance on the admin plane).
 class ToolsScreen extends StatelessWidget {
   const ToolsScreen({super.key});
 
@@ -64,24 +67,29 @@ class ToolsScreen extends StatelessWidget {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  String _err(Object e) => e is ApiException && e.isAuth
+      ? '管理员登录已过期，请到「我的」重新登录'
+      : '$e';
+
   Future<void> _deadLinks(BuildContext context, AppController app) async {
     _toast(context, '开始扫描…');
     try {
-      await app.client.post('/api/tools/deadlinks/scan');
+      await app.client.post('/api/tools/deadlinks/scan', admin: true);
       // poll until done then fetch results
       for (var i = 0; i < 120; i++) {
         await Future<void>.delayed(const Duration(seconds: 1));
-        final st = await app.client.get('/api/tools/deadlinks/status') as Map<String, dynamic>;
+        final st = await app.client.get('/api/tools/deadlinks/status', admin: true)
+            as Map<String, dynamic>;
         if (st['running'] != true) break;
       }
-      final r = await app.client.get('/api/tools/deadlinks') as Map<String, dynamic>;
+      final r = await app.client.get('/api/tools/deadlinks', admin: true) as Map<String, dynamic>;
       final dead = (r['dead'] as List? ?? []).length;
       final blocked = (r['blocked'] as List? ?? []).length;
       if (context.mounted) {
         _toast(context, '扫描完成：真死链 $dead，反爬拦截 $blocked');
       }
     } catch (e) {
-      if (context.mounted) _toast(context, '扫描失败：$e');
+      if (context.mounted) _toast(context, '扫描失败：${_err(e)}');
     }
   }
 
@@ -101,18 +109,18 @@ class ToolsScreen extends StatelessWidget {
     if (!context.mounted) return;
     final messenger = ScaffoldMessenger.of(context);
     try {
-      await app.client.post(path);
+      await app.client.post(path, admin: true);
       messenger.showSnackBar(const SnackBar(content: Text('合并完成')));
       await app.driver.reconcile('merge');
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('合并失败：$e')));
+      messenger.showSnackBar(SnackBar(content: Text('合并失败：${_err(e)}')));
     }
   }
 
   Future<void> _snapshots(BuildContext context, AppController app) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final r = await app.client.get('/api/snapshots') as Map<String, dynamic>;
+      final r = await app.client.get('/api/snapshots', admin: true) as Map<String, dynamic>;
       final snaps = (r['snapshots'] as List? ?? []).cast<Map<String, dynamic>>();
       if (!context.mounted) return;
       await showDialog<void>(
@@ -132,7 +140,8 @@ class ToolsScreen extends StatelessWidget {
                           title: Text('${s['createdAt'] ?? s['id']}'),
                           trailing: TextButton(
                             onPressed: () async {
-                              await app.client.post('/api/snapshots/${s['id']}/restore');
+                              await app.client.post('/api/snapshots/${s['id']}/restore',
+                                  admin: true);
                               if (ctx.mounted) Navigator.pop(ctx);
                               await app.driver.reconcile('snapshot-restore');
                             },
@@ -145,7 +154,7 @@ class ToolsScreen extends StatelessWidget {
           actions: [
             TextButton(
               onPressed: () async {
-                await app.client.post('/api/snapshots');
+                await app.client.post('/api/snapshots', admin: true);
                 if (ctx.mounted) Navigator.pop(ctx);
                 messenger.showSnackBar(const SnackBar(content: Text('快照已创建')));
               },
@@ -156,19 +165,19 @@ class ToolsScreen extends StatelessWidget {
         ),
       );
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('加载快照失败：$e')));
+      messenger.showSnackBar(SnackBar(content: Text('加载快照失败：${_err(e)}')));
     }
   }
 
   Future<void> _export(BuildContext context, AppController app, String path, String filename) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final resp = await app.client.getBytes(path);
+      final resp = await app.client.getBytes(path, admin: true);
       messenger.showSnackBar(SnackBar(
         content: Text('已下载 ${resp.body.length} 字节（$filename）— 请在服务器管理页下载完整导出'),
       ));
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      messenger.showSnackBar(SnackBar(content: Text('导出失败：${_err(e)}')));
     }
   }
 }

@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../api/client.dart' show ApiException;
 import '../state/app_controller.dart';
 import 'theme.dart';
 
 /// 导入导出 screen (web ImportView): import HTML with merge/standalone modes
-/// + export HTML/JSON cards. Device-token routes; export downloads bytes.
+/// + export HTML/JSON cards. Admin-session channel (gated behind admin
+/// login in 我的); export copies bytes to the clipboard.
 class ImportScreen extends StatefulWidget {
   const ImportScreen({super.key});
 
@@ -177,7 +179,7 @@ class _ImportScreenState extends State<ImportScreen> {
     if (!mounted) return;
     setState(() => _busy = true);
     try {
-      final r = await _app.client.post('/api/import/html', body: {
+      final r = await _app.client.post('/api/import/html', admin: true, body: {
         'html': html,
         if (!_merge) 'folderName': _folderName.text.trim().isNotEmpty ? _folderName.text.trim() : '导入的书签',
       }) as Map<String, dynamic>;
@@ -187,7 +189,8 @@ class _ImportScreenState extends State<ImportScreen> {
       await _app.driver.reconcile('import');
     } catch (e) {
       setState(() => _done = null);
-      messenger.showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      final msg = e is ApiException && e.isAuth ? '管理员登录已过期，请到「我的」重新登录' : '$e';
+      messenger.showSnackBar(SnackBar(content: Text('导入失败：$msg')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -253,13 +256,14 @@ class _ImportScreenState extends State<ImportScreen> {
   Future<void> _doExport(Color color, String title, String ext) async {
     final messenger = ScaffoldMessenger.of(context);
     try {
-      final resp = await _app.client.getBytes('/api/export/$ext');
+      final resp = await _app.client.getBytes('/api/export/$ext', admin: true);
       await Clipboard.setData(ClipboardData(text: resp.body));
       messenger.showSnackBar(SnackBar(
         content: Text('$title 已复制到剪贴板（${resp.body.length} 字符）'),
       ));
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('导出失败：$e')));
+      final msg = e is ApiException && e.isAuth ? '管理员登录已过期，请到「我的」重新登录' : '$e';
+      messenger.showSnackBar(SnackBar(content: Text('导出失败：$msg')));
     }
   }
 
