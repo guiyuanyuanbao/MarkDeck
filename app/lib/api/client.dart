@@ -39,6 +39,8 @@ class ApiClient {
   bool get hasSession => _sessionCookie != null;
   String get baseUrl => _baseUrl;
   String? get deviceToken => _deviceToken;
+  String? get sessionCookie => _sessionCookie;
+  String? get csrf => _csrf;
 
   // ---- configuration ----
 

@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../api/client.dart' show ApiException;
 import '../state/app_controller.dart';
+import 'admin_screen.dart';
 import 'theme.dart';
 
 /// 配对设备 (web SettingsDevices): pair-code generation + device list with
-/// revoke. Deep-linked from the utility sheet.
+/// revoke. Admin-session routes — opened from 我的 (already gated), but a
+/// stale/expired session surfaces a re-login card instead of an empty list.
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
 
@@ -18,6 +21,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
   bool _busyCode = false;
   String? _code;
   List<Map<String, dynamic>>? _devices;
+  bool _authRequired = false;
+  String? _error;
 
   AppController get _app => context.read<AppController>();
 
@@ -28,12 +33,29 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   Future<void> _loadDevices() async {
+    setState(() {
+      _authRequired = false;
+      _error = null;
+    });
     try {
       final r = await _app.client.get('/api/devices') as Map<String, dynamic>;
       setState(() => _devices = (r['devices'] as List? ?? []).cast<Map<String, dynamic>>());
-    } catch (_) {
-      setState(() => _devices = []);
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        // session expired/revoked server-side — clear local admin state
+        await _app.logoutAdmin(notify: false);
+        if (mounted) setState(() => _authRequired = true);
+      } else if (mounted) {
+        setState(() => _error = e.message);
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
     }
+  }
+
+  Future<void> _loginAndRetry() async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminScreen()));
+    if (mounted) await _loadDevices();
   }
 
   Future<void> _newPairCode() async {
@@ -43,6 +65,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
         if (_name.text.trim().isNotEmpty) 'deviceName': _name.text.trim(),
       }) as Map<String, dynamic>;
       setState(() => _code = r['code'] as String);
+    } on ApiException catch (e) {
+      if (e.isAuth) {
+        await _app.logoutAdmin(notify: false);
+        if (mounted) setState(() => _authRequired = true);
+      } else {
+        _toast(e.isRateLimited ? '尝试过多，请稍候再试' : '生成失败：${e.message}');
+      }
     } catch (e) {
       _toast('生成失败：$e');
     } finally {
@@ -67,7 +96,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
       ),
     );
     if (ok != true) return;
-    await _app.client.delete('/api/devices/$id');
+    try {
+      await _app.client.delete('/api/devices/$id');
+    } catch (e) {
+      if (mounted) _toast('吊销失败：$e');
+      return;
+    }
     await _loadDevices();
   }
 
@@ -84,8 +118,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ---- pair-code card ----
-          Container(
+          // ---- pair-code card (hidden until an admin session exists) ----
+          if (!_authRequired)
+            Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: p.surface,
@@ -145,7 +180,47 @@ class _DevicesScreenState extends State<DevicesScreen> {
           Text('已配对设备',
               style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: p.text)),
           const SizedBox(height: 8),
-          if (_devices == null)
+          if (_authRequired)
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: p.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: p.border),
+              ),
+              child: Column(
+                children: [
+                  Icon(Icons.lock_outline, size: 28, color: p.text3),
+                  const SizedBox(height: 8),
+                  Text('管理员登录已过期',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: p.text)),
+                  const SizedBox(height: 4),
+                  Text('设备管理需要管理员身份，请重新登录',
+                      style: TextStyle(fontSize: 12, color: p.text3)),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: _loginAndRetry,
+                    icon: const Icon(Icons.admin_panel_settings_outlined, size: 18),
+                    label: const Text('管理员登录'),
+                  ),
+                ],
+              ),
+            )
+          else if (_error != null)
+            Container(
+              padding: const EdgeInsets.all(16),
+              alignment: Alignment.center,
+              child: Column(
+                children: [
+                  Text('加载失败：$_error',
+                      style: TextStyle(color: p.danger, fontSize: 12.5),
+                      textAlign: TextAlign.center),
+                  const SizedBox(height: 8),
+                  TextButton(onPressed: _loadDevices, child: const Text('重试')),
+                ],
+              ),
+            )
+          else if (_devices == null)
             Center(child: CircularProgressIndicator(color: p.primary))
           else if (_devices!.isEmpty)
             Container(

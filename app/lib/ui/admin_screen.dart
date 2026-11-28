@@ -2,12 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_controller.dart';
-import 'devices_screen.dart';
 import 'theme.dart';
 
-/// 管理员登录：session + CSRF 登录表单。登录成功进入设备管理
-/// （配对码生成/设备吊销都在那里，web 把它们放在 设置→设备同步）。
-/// 429 = 登录限速（5 次失败后最长锁 15 分钟），UI 明示等待。
+/// 管理员登录：session + CSRF 登录表单。成功后 pop(true) 由打开方决定
+/// 去向（我的页的门控入口会接着跳目标页）。429 = 登录限速（5 次失败后
+/// 最长锁 15 分钟），UI 明示等待。
 class AdminScreen extends StatefulWidget {
   const AdminScreen({super.key});
 
@@ -30,12 +29,10 @@ class _AdminScreenState extends State<AdminScreen> {
       _error = null;
     });
     try {
-      await _app.client.login(
+      await _app.loginAdmin(
           password: _password.text, totp: _totp.text.isEmpty ? null : _totp.text);
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const DevicesScreen()),
-      );
+      Navigator.of(context).pop(true);
     } catch (e) {
       final msg = e.toString();
       if (!mounted) return;
@@ -78,7 +75,7 @@ class _AdminScreenState extends State<AdminScreen> {
                       style: TextStyle(
                           fontSize: 14.5, fontWeight: FontWeight.w700, color: p.text)),
                   const SizedBox(height: 4),
-                  Text('登录后可生成配对码、管理已配对设备',
+                  Text('登录后解锁 工具 · 导入导出 · 设备管理',
                       style: TextStyle(fontSize: 12, color: p.text3)),
                   const SizedBox(height: 12),
                   TextField(

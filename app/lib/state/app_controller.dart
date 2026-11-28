@@ -29,6 +29,7 @@ class AppController extends ChangeNotifier {
 
   bool booted = false;
   bool paired = false;
+  bool adminLoggedIn = false;
   String? serverUrl;
   String? deviceId;
   SyncStatus syncStatus = SyncStatus.unconfigured;
@@ -55,11 +56,36 @@ class AppController extends ChangeNotifier {
       _configure(url: url, token: token, devId: devId);
       paired = true;
     }
+    await _restoreAdminSession();
     booted = true;
     notifyListeners();
 
     if (paired) {
       await driver.reconcile('boot');
+    }
+  }
+
+  /// Restore a persisted admin session (cookie + csrf) and validate it
+  /// against a session-only route. Optimistically logged-in at boot; a 401
+  /// from /api/auth/me clears it (network errors keep it — server may just
+  /// be temporarily unreachable).
+  Future<void> _restoreAdminSession() async {
+    if (!paired) return;
+    final cookie = await _identity.read(key: _kAdminCookie);
+    final csrf = await _identity.read(key: _kAdminCsrf);
+    if (cookie == null || csrf == null) return;
+    _client.setSession(cookie: cookie, csrf: csrf);
+    adminLoggedIn = true;
+    unawaited(_validateAdminSession());
+  }
+
+  Future<void> _validateAdminSession() async {
+    try {
+      await _client.get('/api/auth/me');
+    } on ApiException catch (e) {
+      if (e.isAuth) await logoutAdmin(notify: true);
+    } catch (_) {
+      // network/timeout — keep the session, retried on next admin call
     }
   }
 
@@ -167,6 +193,36 @@ class AppController extends ChangeNotifier {
     await _identity.write(key: _kTheme, value: id);
   }
 
+  // ---- admin session (device pairing is separate; see unpair) ----
+
+  /// Admin password (+TOTP) login. The session cookie + csrf are persisted
+  /// to Keystore so gating survives app restarts; expiry is handled lazily
+  /// (admin routes turn a 401 into a re-login prompt).
+  Future<void> loginAdmin({required String password, String? totp}) async {
+    await _client.login(password: password, totp: totp);
+    adminLoggedIn = true;
+    notifyListeners();
+    final cookie = _client.sessionCookie;
+    final csrf = _client.csrf;
+    if (cookie != null) await _identity.write(key: _kAdminCookie, value: cookie);
+    if (csrf != null) await _identity.write(key: _kAdminCsrf, value: csrf);
+  }
+
+  /// Admin logout: best-effort server-side session revoke, then drop the
+  /// local session. Pairing is untouched — the device keeps syncing.
+  Future<void> logoutAdmin({bool notify = true}) async {
+    try {
+      await _client.post('/api/auth/logout');
+    } catch (_) {
+      // already expired / offline — local clear is enough
+    }
+    _client.clearSession();
+    adminLoggedIn = false;
+    await _identity.delete(key: _kAdminCookie);
+    await _identity.delete(key: _kAdminCsrf);
+    if (notify) notifyListeners();
+  }
+
   // ---- lifecycle ----
 
   void onAppResume() {
@@ -192,3 +248,5 @@ const _kServer = 'md_server';
 const _kToken = 'md_token';
 const _kDeviceId = 'md_device_id';
 const _kTheme = 'md_theme';
+const _kAdminCookie = 'md_admin_cookie';
+const _kAdminCsrf = 'md_admin_csrf';
