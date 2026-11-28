@@ -9,9 +9,15 @@ import 'widgets.dart';
 
 /// Recycle bin. The server's trash lives server-side (GET /api/trash); the
 /// app's mirror only holds live rows, so the bin view reads from the API
-/// and restores/purges via the paired token.
+/// and restores/purges via the paired token. It is NOT mirror data, so it
+/// refetches when the tab activates and whenever a sync reconcile lands
+/// (dataEpoch) — otherwise the view would show the boot-time snapshot.
 class TrashScreen extends StatefulWidget {
-  const TrashScreen({super.key});
+  const TrashScreen({super.key, required this.active});
+
+  /// Whether the shell currently shows this tab (IndexedStack keeps every
+  /// tab alive, so state must react to activation explicitly).
+  final bool active;
 
   @override
   State<TrashScreen> createState() => _TrashScreenState();
@@ -19,12 +25,33 @@ class TrashScreen extends StatefulWidget {
 
 class _TrashScreenState extends State<TrashScreen> {
   List<Node>? _trash;
+  int _seenEpoch = -1;
 
   AppController get _app => context.read<AppController>();
 
   @override
   void initState() {
     super.initState();
+    _seenEpoch = _app.dataEpoch;
+    _app.addListener(_onAppChanged);
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(TrashScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.active && !old.active) _load();
+  }
+
+  @override
+  void dispose() {
+    _app.removeListener(_onAppChanged);
+    super.dispose();
+  }
+
+  void _onAppChanged() {
+    if (!widget.active || _app.dataEpoch == _seenEpoch) return;
+    _seenEpoch = _app.dataEpoch;
     _load();
   }
 

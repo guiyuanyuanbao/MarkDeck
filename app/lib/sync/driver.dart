@@ -114,6 +114,11 @@ class SyncDriver {
   final _statusController = StreamController<SyncStatus>.broadcast();
   Stream<SyncStatus> get statusStream => _statusController.stream;
 
+  /// Invoked after every successful reconcile cycle — observers hook
+  /// "server data may have changed" side-effects here (e.g. the trash
+  /// view refetches, since the mirror only holds live rows).
+  void Function()? onSynced;
+
   void _setStatus(SyncStatus s, {String? error}) {
     status = s;
     lastError = error;
@@ -223,6 +228,7 @@ class SyncDriver {
         _again = false;
         await _once('coalesced');
       }
+      onSynced?.call();
     } catch (e) {
       // a failed reconcile never advances base: offline edits replay
       final msg = e.toString();

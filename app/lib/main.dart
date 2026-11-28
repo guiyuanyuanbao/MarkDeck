@@ -153,15 +153,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final p = MdTheme.of(context);
-    const screens = [
-      BrowseScreen(),
-      TrashScreen(),
-      TagsScreen(),
-      MineScreen(),
-    ];
     return Scaffold(
       backgroundColor: p.bg,
-      body: IndexedStack(index: _tab, children: screens),
+      body: IndexedStack(
+        index: _tab,
+        children: [
+          const BrowseScreen(),
+          TrashScreen(active: _tab == 1),
+          const TagsScreen(),
+          const MineScreen(),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (i) => setState(() => _tab = i),

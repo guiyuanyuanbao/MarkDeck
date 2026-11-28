@@ -36,6 +36,11 @@ class AppController extends ChangeNotifier {
   String? syncError;
   String themeId = ThemeId.indigo;
 
+  /// Bumped after every successful sync reconcile — views that read
+  /// server-side data outside the mirror (trash) listen to it to refetch.
+  int _dataEpoch = 0;
+  int get dataEpoch => _dataEpoch;
+
   StreamSubscription<SyncStatus>? _statusSub;
 
   // ---- boot: load stored identity, open the db, wire the driver ----
@@ -108,6 +113,10 @@ class AppController extends ChangeNotifier {
       syncError = _driver!.lastError;
       notifyListeners();
     });
+    _driver!.onSynced = () {
+      _dataEpoch++;
+      notifyListeners();
+    };
     _driver!.start();
   }
 
