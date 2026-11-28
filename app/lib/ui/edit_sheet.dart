@@ -226,3 +226,48 @@ class _TagsFieldState extends State<TagsField> {
     );
   }
 }
+
+/// New-folder dialog: mint a client id and insert into the mirror.
+Future<void> showCreateFolder(
+  BuildContext context,
+  AppDatabase db,
+  String folderId,
+) async {
+  final c = TextEditingController();
+  final name = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('新建文件夹'),
+      content: TextField(
+        controller: c,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: '文件夹名'),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('创建')),
+      ],
+    ),
+  );
+  if (name == null || name.isEmpty) return;
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final id = '${now.toRadixString(36)}-f${name.hashCode.toRadixString(36)}';
+  final parent = folderId == 'root' ? '' : folderId;
+  final sibs = await (db.select(db.nodes)..where((r) => r.parentId.equals(parent))).get();
+  var pos = 1.0;
+  if (sibs.isNotEmpty) {
+    pos = sibs.map((s) => s.position).reduce((a, b) => a > b ? a : b) + 1.0;
+  }
+  await db.into(db.nodes).insert(NodesCompanion.insert(
+        id: id,
+        parentId: Value(parent),
+        type: 'folder',
+        title: name,
+        position: Value(pos),
+        createdAt: Value(now),
+        updatedAt: Value(now),
+      ));
+  if (!context.mounted) return;
+  final controller = Provider.of<AppController>(context, listen: false);
+  await controller.driver.journalTouch(id, title: name);
+}

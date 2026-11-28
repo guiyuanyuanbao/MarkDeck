@@ -115,7 +115,7 @@ class _SearchScreenState extends State<SearchScreen> {
           itemBuilder: (context, i) {
             final r = rows[i];
             return ListTile(
-              leading: Favicon(host: _hostOf(r.url)),
+              leading: BookmarkAvatar(url: r.url ?? '', title: r.title, size: 32),
               title: Text(r.title, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: Text(r.url ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
               trailing: r.favorite
@@ -127,15 +127,6 @@ class _SearchScreenState extends State<SearchScreen> {
         );
       },
     );
-  }
-
-  String _hostOf(String? url) {
-    if (url == null) return '';
-    try {
-      return Uri.parse(url).host;
-    } on FormatException {
-      return '';
-    }
   }
 
   Future<void> _open(String? url) async {

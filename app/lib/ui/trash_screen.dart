@@ -77,7 +77,7 @@ class _TrashScreenState extends State<TrashScreen> {
                       return ListTile(
                         leading: n.type == 'folder'
                             ? Icon(Icons.folder_off_outlined, color: scheme.outline)
-                            : Favicon(host: _host(n.url)),
+                            : BookmarkAvatar(url: n.url ?? '', title: n.title, size: 32),
                         title: Text(n.title, maxLines: 1, overflow: TextOverflow.ellipsis),
                         subtitle: n.type == 'url'
                             ? Text(n.url ?? '', maxLines: 1, overflow: TextOverflow.ellipsis)
@@ -102,15 +102,6 @@ class _TrashScreenState extends State<TrashScreen> {
                   ),
                 ),
     );
-  }
-
-  String _host(String? url) {
-    if (url == null) return '';
-    try {
-      return Uri.parse(url).host;
-    } on FormatException {
-      return '';
-    }
   }
 
   Future<void> _restore(Node n) async {

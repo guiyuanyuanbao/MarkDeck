@@ -7,6 +7,7 @@ import '../api/client.dart';
 import '../api/sync_api.dart';
 import '../store/database.dart';
 import '../sync/driver.dart';
+import '../ui/theme.dart' show ThemeId, themes;
 
 /// App-wide controller: pairing state, database lifecycle, the sync driver,
 /// and the observable state the UI renders. Foundation-only — no widgets.
@@ -32,6 +33,7 @@ class AppController extends ChangeNotifier {
   String? deviceId;
   SyncStatus syncStatus = SyncStatus.unconfigured;
   String? syncError;
+  String themeId = ThemeId.indigo;
 
   StreamSubscription<SyncStatus>? _statusSub;
 
@@ -42,6 +44,10 @@ class AppController extends ChangeNotifier {
     final url = await _identity.read(key: _kServer);
     final token = await _identity.read(key: _kToken);
     final devId = await _identity.read(key: _kDeviceId);
+    final storedTheme = await _identity.read(key: _kTheme);
+    if (storedTheme != null && themes.containsKey(storedTheme)) {
+      themeId = storedTheme;
+    }
 
     _db = AppDatabase.open(await AppDatabase.defaultPath());
 
@@ -153,6 +159,14 @@ class AppController extends ChangeNotifier {
     await driver.reconcile('force-resync');
   }
 
+  /// Switch the visual theme (靖紫/青蓝/暗夜/琥珀) and persist it.
+  Future<void> setTheme(String id) async {
+    if (!themes.containsKey(id) || id == themeId) return;
+    themeId = id;
+    notifyListeners();
+    await _identity.write(key: _kTheme, value: id);
+  }
+
   // ---- lifecycle ----
 
   void onAppResume() {
@@ -177,3 +191,4 @@ class AppController extends ChangeNotifier {
 const _kServer = 'md_server';
 const _kToken = 'md_token';
 const _kDeviceId = 'md_device_id';
+const _kTheme = 'md_theme';

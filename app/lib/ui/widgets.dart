@@ -2,30 +2,106 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../state/app_controller.dart';
-import '../store/database.dart';
+import 'theme.dart';
 
-/// Shared UI helpers: folder picker, tag prompt, favicon widget, tag codec.
+/// BookmarkAvatar parity (web/src/components/BookmarkAvatar.vue): favicon
+/// from /api/favicon/{host} with a per-host letter-gradient fallback picked
+/// by hash(url|title). List rows and grid cards render identically.
+class BookmarkAvatar extends StatefulWidget {
+  const BookmarkAvatar({super.key, required this.url, required this.title, this.size = 22});
+
+  final String url;
+  final String title;
+  final double size;
+
+  @override
+  State<BookmarkAvatar> createState() => _BookmarkAvatarState();
+}
+
+class _BookmarkAvatarState extends State<BookmarkAvatar> {
+  static final _failed = <String>{};
+
+  String? get _host {
+    if (widget.url.isEmpty) return null;
+    try {
+      final h = Uri.parse(widget.url).host;
+      return h.isEmpty ? null : h;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final host = _host;
+    final size = widget.size;
+    if (host == null || _failed.contains(host)) {
+      // letter gradient fallback
+      final colors = MdTheme.avatarColors(widget.url, widget.title);
+      final letter = (widget.title.isNotEmpty ? widget.title[0] : '?').toUpperCase();
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: colors,
+          ),
+          borderRadius: BorderRadius.circular(size * 0.3),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          letter,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: size * 0.45,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+    }
+    final server = context.read<AppController>().serverUrl ?? '';
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(size * 0.3),
+      child: Image.network(
+        '$server/api/favicon/$host',
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) {
+          _failed.add(host);
+          // schedule rebuild to show the fallback
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() {});
+          });
+          return SizedBox(width: size, height: size);
+        },
+      ),
+    );
+  }
+}
+
+/// Shared UI helpers kept from v1: folder picker + tag prompt + codecs.
 
 /// Folder picker dialog: walk the mirror tree, return the picked folder id
 /// ('root' = bar bucket) or null when cancelled.
 Future<String?> pickFolder(
   BuildContext context,
-  AppDatabase db, {
+  dynamic db, {
   Set<String> excludeIds = const {},
 }) async {
-  final controller = Provider.of<AppController>(context, listen: false);
   return showDialog<String>(
     context: context,
-    builder: (ctx) => _FolderPicker(db: db, excludeIds: excludeIds, controller: controller),
+    builder: (ctx) => _FolderPicker(db: db, excludeIds: excludeIds),
   );
 }
 
 class _FolderPicker extends StatefulWidget {
-  const _FolderPicker({required this.db, required this.excludeIds, required this.controller});
+  const _FolderPicker({required this.db, required this.excludeIds});
 
-  final AppDatabase db;
+  final dynamic db;
   final Set<String> excludeIds;
-  final AppController controller;
 
   @override
   State<_FolderPicker> createState() => _FolderPickerState();
@@ -41,10 +117,10 @@ class _FolderPickerState extends State<_FolderPicker> {
       content: SizedBox(
         width: 280,
         height: 320,
-        child: StreamBuilder<List<Node>>(
+        child: StreamBuilder(
           stream: widget.db.watchAllLive(),
           builder: (context, snap) {
-            final rows = snap.data ?? const <Node>[];
+            final rows = (snap.data as List?) ?? const [];
             final serverParent = _current == 'root' ? '' : _current;
             final folders = rows
                 .where((r) => r.type == 'folder' && r.parentId == serverParent)
@@ -57,14 +133,17 @@ class _FolderPickerState extends State<_FolderPicker> {
                     leading: const Icon(Icons.arrow_upward),
                     title: const Text('上一级'),
                     onTap: () => setState(() {
-                      final parent = rows.where((r) => r.id == _current).firstOrNull;
-                      _current = parent == null ? 'root' : (parent.parentId.isEmpty ? 'root' : parent.parentId);
+                      final parent =
+                          rows.where((r) => r.id == _current).firstOrNull;
+                      _current = parent == null
+                          ? 'root'
+                          : (parent.parentId.isEmpty ? 'root' : parent.parentId);
                     }),
                   ),
                 for (final f in folders)
                   if (!widget.excludeIds.contains(f.id))
                     ListTile(
-                      leading: const Icon(Icons.folder_outlined),
+                      leading: Icon(Icons.folder_outlined, color: MdTheme.of(context).primary),
                       title: Text(f.title),
                       onTap: () => setState(() => _current = f.id),
                     ),
@@ -75,13 +154,14 @@ class _FolderPickerState extends State<_FolderPicker> {
       ),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-        FilledButton(onPressed: () => Navigator.pop(context, _current), child: const Text('移到这里')),
+        FilledButton(
+            onPressed: () => Navigator.pop(context, _current), child: const Text('移到这里')),
       ],
     );
   }
 }
 
-/// Tag input prompt: comma-separated, trimmed, deduped. Returns null on cancel.
+/// Tag input prompt: comma-separated, trimmed, deduped. Null on cancel.
 Future<List<String>?> promptTags(BuildContext context) async {
   final controller = TextEditingController();
   final result = await showDialog<List<String>>(
@@ -102,8 +182,8 @@ Future<List<String>?> promptTags(BuildContext context) async {
           onPressed: () {
             final tags = controller.text
                 .split(',')
-                .map((s) => s.trim())
-                .where((s) => s.isNotEmpty)
+                .map((t) => t.trim())
+                .where((t) => t.isNotEmpty)
                 .toSet()
                 .toList();
             Navigator.pop(ctx, tags);
@@ -114,49 +194,4 @@ Future<List<String>?> promptTags(BuildContext context) async {
     ),
   );
   return result;
-}
-
-/// Favicon tile backed by GET /api/favicon/{host} (public route) with an
-/// in-memory LRU so lists don't re-fetch every build.
-class Favicon extends StatefulWidget {
-  const Favicon({super.key, required this.host, this.size = 40});
-
-  final String host;
-  final double size;
-
-  @override
-  State<Favicon> createState() => _FaviconState();
-}
-
-class _FaviconState extends State<Favicon> {
-  static final _cache = <String, ImageProvider<Object>>{};
-
-  @override
-  Widget build(BuildContext context) {
-    final host = widget.host;
-    if (host.isEmpty) {
-      return SizedBox(
-        width: widget.size,
-        height: widget.size,
-        child: const Icon(Icons.public_outlined),
-      );
-    }
-    var provider = _cache[host];
-    if (provider == null) {
-      final server = context.read<AppController>().serverUrl ?? '';
-      provider = NetworkImage('$server/api/favicon/$host');
-      _cache[host] = provider;
-    }
-    return SizedBox(
-      width: widget.size,
-      height: widget.size,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(6),
-        child: Image(image: provider, fit: BoxFit.cover,
-          errorBuilder: (context, error, stackTrace) =>
-              const Icon(Icons.public_outlined),
-        ),
-      ),
-    );
-  }
 }
